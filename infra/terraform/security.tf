@@ -4,7 +4,7 @@
 
 resource "aws_security_group" "instance" {
   name_prefix = "domestic-waterway-signals-"
-  description = "Domestic Waterway Signals — single instance security group"
+  description = "Domestic Waterway Signals - single instance security group"
   vpc_id      = aws_vpc.main.id
 
   tags = {
@@ -17,7 +17,7 @@ resource "aws_security_group" "instance" {
 }
 
 # Ingress is an allowlist of exactly three ports (CLAUDE.md § 8 / decision 4): SSH from the
-# admin CIDR only, HTTP and HTTPS from anywhere. Postgres is never exposed — timescaledb is
+# admin CIDR only, HTTP and HTTPS from anywhere. Postgres is never exposed - timescaledb is
 # reachable only over the Compose network.
 
 resource "aws_vpc_security_group_ingress_rule" "ssh_admin" {
@@ -50,10 +50,10 @@ resource "aws_vpc_security_group_ingress_rule" "https" {
 # Explicit egress is mandatory (CLAUDE.md § 8 / decision 3). Terraform's security-group rule
 # resources treat the rule set as authoritative and revoke the AWS API's default allow-all
 # egress. Without this, the instance never reaches the SSM endpoints, never registers, and
-# Session Manager — the recovery path — is dead before it's needed.
+# Session Manager - the recovery path - is dead before it's needed.
 resource "aws_vpc_security_group_egress_rule" "all_outbound" {
   security_group_id = aws_security_group.instance.id
-  description       = "All outbound — required for SSM, package fetches, and API calls to USGS/USDA"
+  description       = "All outbound - required for SSM, package fetches, and API calls to USGS/USDA"
   cidr_ipv4         = "0.0.0.0/0"
   ip_protocol       = "-1"
 }
