@@ -3,14 +3,55 @@
 This is the **log**: current state, decisions as they are made, and `§ Up Next`. Stable contracts
 live in `CLAUDE.md`. If something here hardens into an invariant, move it there and note the move.
 
-**Last updated:** 2026-08-10 (provisioning 1 of 3)
+**Last updated:** 2026-08-10 (provisioning 2 of 3)
 
 ---
 
 ## Current state
 
-**Provisioning 1 of 3 written and unit-tested, not yet run against an instance.** Phase 1
+**Provisioning 2 of 3 written and unit-tested, not yet run against the instance.** Phase 1
 (Terraform) is defined but not applied; no `terraform apply` has run.
+
+- `infra/provision/install_docker.py` installs Docker Engine and the Compose plugin at exact
+  pinned versions (explicit `pkg=version` install strings, `apt-mark hold` after), via Docker's
+  official repository — GPG key fetched to a temp file, content-validated, then dearmored into a
+  repo-scoped keyring, never `apt-key add`. `infra/provision/discover_external_interface.py`
+  identifies the default-route interface from `/proc/net/route`, never "isn't loopback," and
+  writes it to `/etc/dws/external-interface` via its own boot-ordered
+  `dws-external-interface.service` (`After=network-online.target`,
+  `RemainAfterExit=yes`), so provisioning 3 reads a file instead of re-deriving the value. See
+  `CLAUDE.md § 10`.
+- `tests/provision/` — 27 tests green (15 from provisioning 1 plus 12 new). All 11 required
+  mutation-table rows confirmed: each was performed, observed to turn the named test red, then
+  restored. `conftest.py` extended with a `FakeCommandRunner` (an explicitly-injected `run`
+  callable, not a global `subprocess.run` monkeypatch like provisioning 1's `StubRunner`, per this
+  commit's spec) plus `fake_os_release` and `fake_proc_net_route` builders.
+- `install_docker.py`'s real (non-dry-run) `install()` needed a way to avoid writing to the real
+  `/etc/apt/sources.list.d/docker.list` during tests; added an internal `sources_list_path`
+  parameter with no CLI flag (the interface deliberately doesn't expose one — the real destination
+  is always the same fixed path) so tests can inject a tmp path while the real script keeps using
+  the constant.
+- CLI wiring verified end-to-end: `discover_external_interface.py` against a real fixture
+  `/proc/net/route` tree (no subprocess calls at all — pure file I/O, so no stubbing needed);
+  `install_docker.py` with stubbed `dpkg`/`curl`/`gpg`/`install`/`apt-get`/`apt-mark` on `PATH`,
+  confirming the full command sequence and generated sources.list content, and confirming no real
+  `/etc/apt` files were touched on this dev machine.
+- **Doc placement judgment call, flagged here rather than silently applied:** the spec's Doc
+  updates listed two Terraform-specific bullets (ASCII-only AWS string fields; `ignore_changes =
+  [associate_public_ip_address]` on `aws_instance`) under the new `§ 10`. Given last commit's `§ 5`
+  / `§ 9` split was exactly this failure shape — a Terraform-specific fact stated somewhere other
+  than the Terraform section — they're recorded in `§ 8` (Terraform conventions) instead, and the
+  canonical deploy path (`/opt/inland-waterway-signals`, per this commit's decision 9) extends the
+  existing `§ 5` deploy-path bullet rather than adding a second, competing statement in `§ 10`.
+  **Not yet applied:** the `ignore_changes` lifecycle block itself is not in `compute.tf` — that
+  file isn't in this commit's file list, and adding it would be scope creep into an unrequested
+  Terraform change. It's a one-line follow-up once requested.
+- Docker install, once it runs on the instance, opens a **real, temporary, accepted risk window**:
+  Docker inserts its own `DOCKER-USER` iptables chain with no restriction until provisioning 3
+  populates it. Container traffic is not firewalled by anything this project controls during that
+  window — only the security group, unaffected by any of this. Not a defect; schedule provisioning
+  3 promptly rather than leaving a freshly-Dockerized instance unattended.
+- `DOCKER-USER`/ufw and the Compose systemd unit are explicitly **not started** — provisioning 3.
 
 - `infra/provision/mount_data_volume.py` identifies the data volume by AWS volume ID matched
   against the NVMe block-device serial (dash-stripped), formats it only if `blkid` reports no
@@ -35,8 +76,9 @@ live in `CLAUDE.md`. If something here hardens into an invariant, move it there 
   `findmnt` on `PATH` (this dev machine has no `blkid`, so this is as close to the real CLI path as
   is reachable off-instance): both the "already formatted" and "no filesystem yet" branches print
   the expected actions, fstab is untouched, and the mount point is not created.
-- Docker install, `DOCKER-USER`/ufw, and the Compose systemd unit are explicitly **not started** —
-  separate, later provisioning commits (2 and 3).
+- (At the time provisioning 1 landed: Docker install and interface discovery were not yet
+  started. Both landed in provisioning 2, above; `DOCKER-USER`/ufw and the Compose systemd unit
+  remain provisioning 3.)
 
 - `CLAUDE.md` seeded with the contracts carried forward from the prior project (`Trade_Analysis_Project`).
 - `.gitignore` committed, verified not self-excluding.
@@ -112,17 +154,25 @@ confidence gating that says "insufficient history" rather than manufacturing con
 
 ## § Up Next
 
-**Provisioning 2 — Docker, pinned, plus external-interface discovery.** Then **provisioning 3 —
-ufw and interface-scoped `DOCKER-USER` rules**, the lockout-risk commit, and only after a human has
+**Provisioning 3 — ufw with the admin-CIDR SSH rule, plus interface-scoped `DOCKER-USER` rules
+reading `/etc/dws/external-interface`.** The lockout-risk commit; only start it after a human has
 confirmed SSM Session Manager works on the instance (that's the recovery path if the boot sequence
-goes wrong). This is a script run after `apply`, not `user_data`.
+goes wrong), and only after provisioning 2 has actually run — until then the instance is in the
+accepted temporary risk window described in its commit report: Docker's own `DOCKER-USER` chain
+exists with no restriction, and only the security group is firewalling anything.
 
 A human needs to: configure the AWS budget alert; fill in real values in
 `infra/terraform/terraform.tfvars` (region, AZ, `ssh_admin_cidr`, a verified current, region- and
 architecture-matched Ubuntu 24.04 AMI ID — `terraform.tfvars` still does not exist, this is a human
 decision and blocks `apply`); run `terraform apply`; then run provisioning 1
-(`mount_data_volume.py`) on the instance per the live-verification steps in its commit report,
-reconnecting after a reboot to confirm the fstab entry survives one, not just `mount -a`.
+(`mount_data_volume.py`) and provisioning 2 (`install_docker.py`, `discover_external_interface.py`)
+on the instance per the live-verification steps in their commit reports — provisioning 2's install
+script needs real version strings from `apt-cache madison` first, the placeholder versions in its
+report are not verified current values.
+
+**Process note:** after any Claude Code session reports a commit, run `git log --oneline
+origin/main` from your own terminal before treating the work as real — three separate sessions
+today reported committed work that had not been pushed.
 
 Then, in order: Phase 2 orchestration skeleton (migration runner, `job_runs`, `@job`, APScheduler with
 persistent store, cadence table, heartbeat) **before the first ingest client**, so the first data that

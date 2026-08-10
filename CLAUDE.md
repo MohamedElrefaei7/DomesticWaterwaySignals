@@ -163,7 +163,9 @@ describes does not hold has already happened here.
   incidents in a single session; it is not a deployment mechanism.
 - The deploy directory default is a **fixed absolute path**, never derived from a script's own
   location — especially once anything does `rsync --delete` into it. **Refuse to run if the target
-  contains a `.git` directory.**
+  contains a `.git` directory.** **The canonical value is `/opt/inland-waterway-signals`** — every
+  provisioning and deploy script references this constant; none derives it from `$0`, `pwd`, or any
+  other contextual source.
 
 ---
 
@@ -229,6 +231,12 @@ not the user-facing output.
   committing, and the lock file's growth is confirmed, not assumed. A lock file that only carries the
   `h1:` hash for the platform that happened to run `init` first either fails or silently grows on the
   next machine, which is `§ 5`'s "resolved from the machine that runs it" applied to providers.
+- AWS resource `description`/`Name`-style string fields are ASCII-only; use a hyphen, never an em
+  dash, in any generated string that becomes one.
+- On `aws_instance` resources with an associated `aws_eip`, add `lifecycle { ignore_changes =
+  [associate_public_ip_address] }` — once the EIP attaches, live state reports this attribute as
+  `true` regardless of config, and without the ignore it forces instance replacement on every
+  subsequent plan.
 
 ---
 
@@ -246,3 +254,19 @@ not the user-facing output.
 - Provisioning scripts accept `--dry-run` and filesystem-root overrides so their load-bearing logic
   is testable without an instance.
 - Provisioning is run by a human on the instance. No agent connects to the server.
+
+---
+
+## 10. Docker and interface discovery conventions
+
+- Docker packages are installed at exact pinned versions via explicit `pkg=version` strings and
+  held with `apt-mark hold`. Never a bare `apt-get install docker-ce`.
+- The GPG key is dearmored into a repo-scoped keyring file, never `apt-key add`; content is
+  validated before it's trusted.
+- The repo codename is always read from `/etc/os-release`, never hardcoded, because the AMI is
+  expected to be bumped to a newer Ubuntu LTS deliberately at some point.
+- The external interface is always identified from the default-route entry in `/proc/net/route`,
+  never by "the interface that isn't loopback" — Docker's own bridge and veth interfaces make that
+  heuristic wrong the moment Docker is running, which is always, on this instance.
+- Interface discovery writes a single-line file at a fixed path via its own boot-ordered systemd
+  unit; downstream consumers (the firewall commit) read the file rather than re-deriving the value.

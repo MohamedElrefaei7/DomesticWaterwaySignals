@@ -1,0 +1,12 @@
+[Unit]
+Description=Identify the instance's external network interface
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/python3 /opt/inland-waterway-signals/infra/provision/discover_external_interface.py --output-path /etc/dws/external-interface
+
+[Install]
+WantedBy=multi-user.target

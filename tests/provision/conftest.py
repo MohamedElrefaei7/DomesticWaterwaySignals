@@ -109,3 +109,86 @@ def fake_completed_process():
     tests/terraform/conftest.py's own "conftest" module when both suites run in one session.
     """
     return FakeCompletedProcess
+
+
+class FakeCommandRunner:
+    """A general-purpose stand-in for an injected `run` callable (install_docker.py,
+    discover_external_interface.py), as opposed to provisioning 1's StubRunner, which
+    monkeypatches subprocess.run globally. Records every call, in order; answers from a
+    per-command-prefix script; and can run a side-effect callback (e.g. writing fake file
+    content, the way a real `curl -o <path>` would) without ever touching a real process.
+    """
+
+    def __init__(self):
+        self.calls = []
+        self._responses = {}
+        self._side_effects = []
+
+    def script(self, prefix, returncode=0, stdout="", stderr=""):
+        self._responses[tuple(prefix)] = FakeCompletedProcess(returncode, stdout, stderr)
+
+    def on_call(self, prefix, effect):
+        """effect(cmd) runs for its side effects whenever a recorded command's prefix matches —
+        e.g. writing content to the path a fake `curl -o <path>` was asked to write to.
+        """
+        self._side_effects.append((tuple(prefix), effect))
+
+    def __call__(self, cmd, **kwargs):
+        cmd = list(cmd)
+        self.calls.append(cmd)
+        for prefix, effect in self._side_effects:
+            if tuple(cmd[: len(prefix)]) == prefix:
+                effect(cmd)
+        for prefix, response in self._responses.items():
+            if tuple(cmd[: len(prefix)]) == prefix:
+                return response
+        return FakeCompletedProcess(0, "", "")
+
+    def calls_with(self, prefix):
+        return [c for c in self.calls if c[: len(prefix)] == list(prefix)]
+
+
+@pytest.fixture
+def fake_runner():
+    return FakeCommandRunner()
+
+
+@pytest.fixture
+def fake_os_release(tmp_path):
+    """Return a builder: fake_os_release("jammy") -> Path to a fixture /etc/os-release
+    declaring that VERSION_CODENAME. Each call gets its own file.
+    """
+    counter = itertools.count()
+
+    def _build(codename: str) -> Path:
+        path = tmp_path / f"os-release-{next(counter)}"
+        path.write_text(
+            'PRETTY_NAME="Ubuntu 24.04.1 LTS"\n'
+            'NAME="Ubuntu"\n'
+            'VERSION_ID="24.04"\n'
+            f"VERSION_CODENAME={codename}\n"
+            "ID=ubuntu\n"
+        )
+        return path
+
+    return _build
+
+
+@pytest.fixture
+def fake_proc_net_route(tmp_path):
+    """Return a builder: fake_proc_net_route([("eth0", "00000000"), ...]) -> Path to a fixture
+    /proc/net/route with a real header row and one data row per (iface, destination_hex) pair.
+    Each call gets its own file.
+    """
+    counter = itertools.count()
+
+    def _build(rows) -> Path:
+        path = tmp_path / f"route{next(counter)}"
+        header = "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n"
+        lines = [header]
+        for iface, destination in rows:
+            lines.append(f"{iface}\t{destination}\t0102A8C0\t0003\t0\t0\t0\t00000000\t0\t0\t0\n")
+        path.write_text("".join(lines))
+        return path
+
+    return _build
