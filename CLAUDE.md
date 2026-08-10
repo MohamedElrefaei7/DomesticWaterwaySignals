@@ -133,8 +133,13 @@ describes does not hold has already happened here.
 - The data volume is **separate from the instance**, carries `prevent_destroy` in Terraform, and is
   referenced in `fstab` by **filesystem UUID** — never a device path. Cloud NVMe device enumeration is
   not stable across stop/start; it changed twice in one week on the prior project.
-- Any script that identifies a disk does so by **AWS volume ID matched against the NVMe controller
-  serial** (`/sys/class/nvme/nvme*/serial`), never by topology ("the disk that isn't root").
+- Any script that identifies a disk does so by **AWS volume ID matched against the NVMe serial**,
+  **dash-stripped on both sides** (AWS presents `vol-0abc...`; the kernel serial omits the dash),
+  read from **`/sys/block/<dev>/device/serial`** — the block device, not the controller.
+  `/sys/class/nvme/nvme*/serial` names the *controller*; the device `mkfs` needs is a namespace
+  beneath it, and inferring its name (`nvme1` → `nvme1n1`) is an assumption that holds until the
+  instance where it doesn't. Reading from `/sys/block` gives the block device name directly from
+  the directory entry instead. Never identify by topology ("the disk that isn't root").
   **Hard-fail on zero or multiple matches. Never guess.**
 - `mkfs` runs **only if the device has no existing filesystem**. Check `blkid` for a `TYPE`, not
   merely for a partition table.
@@ -224,3 +229,20 @@ not the user-facing output.
   committing, and the lock file's growth is confirmed, not assumed. A lock file that only carries the
   `h1:` hash for the platform that happened to run `init` first either fails or silently grows on the
   next machine, which is `§ 5`'s "resolved from the machine that runs it" applied to providers.
+
+---
+
+## 9. Provisioning conventions
+
+- Disks are identified as specified in `§ 5`: AWS volume ID matched against the NVMe serial,
+  dash-stripped on both sides, read from `/sys/block/<dev>/device/serial`. Zero or multiple
+  matches is a hard failure. There is no topology-based fallback.
+- `mkfs` runs only when `blkid` exits `2`. Any other non-zero exit raises. Never `!= 0`.
+- fstab entries key on filesystem UUID, carry `nofail` and a short device timeout, and are written
+  idempotently by mount point.
+- Because `nofail` allows boot to proceed without the volume, **the systemd unit for the Compose
+  stack carries `RequiresMountsFor=/mnt/data`.** The mount's absence must stop the application, not
+  be discovered in the data.
+- Provisioning scripts accept `--dry-run` and filesystem-root overrides so their load-bearing logic
+  is testable without an instance.
+- Provisioning is run by a human on the instance. No agent connects to the server.

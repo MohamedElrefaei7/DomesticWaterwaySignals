@@ -3,13 +3,40 @@
 This is the **log**: current state, decisions as they are made, and `§ Up Next`. Stable contracts
 live in `CLAUDE.md`. If something here hardens into an invariant, move it there and note the move.
 
-**Last updated:** 2026-08-10 (re-verified same day, post-`/clear`)
+**Last updated:** 2026-08-10 (provisioning 1 of 3)
 
 ---
 
 ## Current state
 
-**Phase 1 defined, not applied.** No infrastructure has been created; no `terraform apply` has run.
+**Provisioning 1 of 3 written and unit-tested, not yet run against an instance.** Phase 1
+(Terraform) is defined but not applied; no `terraform apply` has run.
+
+- `infra/provision/mount_data_volume.py` identifies the data volume by AWS volume ID matched
+  against the NVMe block-device serial (dash-stripped), formats it only if `blkid` reports no
+  filesystem, and writes an idempotent, UUID-keyed `fstab` entry with `nofail`. See
+  `CLAUDE.md § 9`.
+- **Resolved:** the `§ 5` / `§ 9` split flagged in the previous report — `§ 5` said disks are
+  identified via the NVMe controller path, `§ 9` said the code actually reads the block-device
+  path — has been folded into a single statement in `§ 5` (block-device path, with the reasoning
+  inline); `§ 9` now just points to `§ 5` instead of restating it. No more than one place says
+  what the identification method is.
+- `tests/provision/` (`pytest`, offline, no root/network/instance) — 15 tests green. All 12
+  mutation-table rows confirmed: each was performed, observed to turn the named test red, then
+  restored. Two fixture gaps were found and fixed during that process, not just the code: the
+  zero-match fixture for "never returns a device on failure" had no non-root device for a
+  topology-fallback bug to find, and the fstab fixture's root line was already in the exact
+  single-space form a "rewrite from parsed fields" bug would reproduce — both let a real mutation
+  pass green on the first attempt. Also fixed: a bare `from conftest import X` in the two later
+  test files collided with `tests/terraform/conftest.py`'s own `conftest` module name when both
+  suites run in one `pytest` invocation; resolved by exposing the shared test double as a fixture
+  instead of an import, touching only `tests/provision/`.
+- CLI wiring verified end-to-end under `--dry-run` with stubbed `blkid`/`mkfs.ext4`/`mount`/
+  `findmnt` on `PATH` (this dev machine has no `blkid`, so this is as close to the real CLI path as
+  is reachable off-instance): both the "already formatted" and "no filesystem yet" branches print
+  the expected actions, fstab is untouched, and the mount point is not created.
+- Docker install, `DOCKER-USER`/ufw, and the Compose systemd unit are explicitly **not started** —
+  separate, later provisioning commits (2 and 3).
 
 - `CLAUDE.md` seeded with the contracts carried forward from the prior project (`Trade_Analysis_Project`).
 - `.gitignore` committed, verified not self-excluding.
@@ -85,15 +112,17 @@ confidence gating that says "insufficient history" rather than manufacturing con
 
 ## § Up Next
 
-**The provisioning commit.** UUID-based mount of the data volume (never a device path), an
-interface-scoped `DOCKER-USER` iptables setup (discover the interface at boot; never hardcode it),
-and ufw with the admin-CIDR SSH rule opened before the default-deny activates. This is a script run
-after `apply`, not `user_data` — see `CLAUDE.md § 8` and decision 9's note in the Phase 1 commit
-about the no-public-IP window before the EIP associates.
+**Provisioning 2 — Docker, pinned, plus external-interface discovery.** Then **provisioning 3 —
+ufw and interface-scoped `DOCKER-USER` rules**, the lockout-risk commit, and only after a human has
+confirmed SSM Session Manager works on the instance (that's the recovery path if the boot sequence
+goes wrong). This is a script run after `apply`, not `user_data`.
 
-A human needs to: configure the AWS budget alert, fill in real values in
-`infra/terraform/terraform.tfvars` (region, AZ, `ssh_admin_cidr`, a verified current AMI ID), and
-run `terraform apply`.
+A human needs to: configure the AWS budget alert; fill in real values in
+`infra/terraform/terraform.tfvars` (region, AZ, `ssh_admin_cidr`, a verified current, region- and
+architecture-matched Ubuntu 24.04 AMI ID — `terraform.tfvars` still does not exist, this is a human
+decision and blocks `apply`); run `terraform apply`; then run provisioning 1
+(`mount_data_volume.py`) on the instance per the live-verification steps in its commit report,
+reconnecting after a reboot to confirm the fstab entry survives one, not just `mount -a`.
 
 Then, in order: Phase 2 orchestration skeleton (migration runner, `job_runs`, `@job`, APScheduler with
 persistent store, cadence table, heartbeat) **before the first ingest client**, so the first data that
