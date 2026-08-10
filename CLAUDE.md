@@ -205,3 +205,22 @@ prevent. The lead-lag sweep still runs underneath to *discover* which pairs dese
 not the user-facing output.
 
 **Every number that appears in the README, the UI, or the résumé must be reproducible from a query.**
+
+---
+
+## 8. Terraform conventions
+
+- The data volume is always a top-level `aws_ebs_volume` with `prevent_destroy`; never an
+  `ebs_block_device` block, because lifecycle meta-arguments cannot apply to nested blocks.
+- Security groups always declare an explicit egress rule; the provider revokes the API's default
+  allow-all, and losing egress kills the SSM recovery path.
+- Ingress is an allowlist asserted by exact set equality, never a denylist of forbidden ports.
+- AMIs are pinned IDs. No `most_recent` data sources, for the same reason no image tag is `latest`.
+- IMDSv2 required on every instance.
+- IAM roles carry exactly the managed policies they need, added in the commit that needs them.
+- `terraform apply` is human-only, as is any operation that destroys or detaches the data volume.
+- `.terraform.lock.hcl` is locked for every platform that will run `terraform init` — laptop and
+  CI/server architectures alike — via `terraform providers lock -platform=... -platform=...` before
+  committing, and the lock file's growth is confirmed, not assumed. A lock file that only carries the
+  `h1:` hash for the platform that happened to run `init` first either fails or silently grows on the
+  next machine, which is `§ 5`'s "resolved from the machine that runs it" applied to providers.
