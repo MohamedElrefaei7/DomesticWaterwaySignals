@@ -1,0 +1,207 @@
+# CLAUDE.md — Inland Waterway Signals
+
+This file is the project **contract**. Claude Code reads it as ground truth at the start of every
+session. It holds invariants, conventions, and decisions that are not up for re-litigation.
+
+**It does not hold plans.** Current state, recent decisions, and `§ Up Next` live in `CONTEXT.md`.
+Contracts here; log there. If you are about to write "next we will…" into this file, it belongs in
+`CONTEXT.md`.
+
+**Precedence:** this file > `CONTEXT.md` > any handoff or summary document. If a summary conflicts
+with this file, this file wins and the summary is stale.
+
+These contracts were learned expensively on a prior project. Each one exists because its absence
+caused a real failure. Do not relax one because it looks like ceremony — if you believe one is
+wrong, say so in the commit report and leave it in place.
+
+---
+
+## 0. Working conventions
+
+- **One commit per logical change.** A commit has a single scope and a clean done-condition. Do not
+  helpfully expand the diff into adjacent work, even when the adjacent work is obviously needed.
+- **Guard non-obvious decisions with tests that go red.** For every decision where the obvious
+  implementation is wrong, there must be a test that fails when the decision is reverted. Confirm
+  this by **mutation**: revert the decision, watch the named test fail, restore it, and report that
+  you did. A test you asserted would catch a regression, without watching it catch one, is a comment
+  wearing a test's clothes.
+- **Report what you verified, not what you intended.** Commit reports are checked against the repo
+  with `git show` and `grep`. A report describing a change that did not land is worse than no report.
+- **When a measurement contradicts the plan, the measurement wins.** Report the contradiction; do not
+  reconcile it silently.
+
+---
+
+## 1. Delegation boundaries — hard limits on this agent
+
+**Never handle, request, generate, or echo:** cloud credentials, SSH private keys, database
+passwords, webhook URLs, or any other secret. Reference them by environment variable name only.
+
+**Never run:** `terraform apply`, `terraform destroy`, any `DROP` statement, or any command that
+deletes data from the database or object storage. Write them if asked, leave them for a human to run,
+and say so explicitly in the report.
+
+**Never invent:** the gauge site list, threshold values that define an event (what stage counts as
+"low"), analog-matching logic, or confidence-gating logic. These are the human's modelling decisions.
+If a task appears to require one, stop and ask rather than picking a plausible default.
+
+Everything else — application code, systemd units, Dockerfiles, the Caddyfile, migration scripts, the
+scheduler, ingest clients, the normalizer, the FastAPI surface, the React frontend, backup and
+heartbeat jobs, the deploy script, and every test — is yours.
+
+---
+
+## 2. Recurring failure themes — read every change against these first
+
+**Theme 1 — a layer reports success while the thing downstream gets nothing.** Ingest "worked" with a
+required field hardcoded to `None`. An aggregation was documented but never written, so 29,650 rows
+fed nothing. Orchestration recorded "Completed" while the whole stack had been down for two and a
+half months. A `pg_dump` exited zero and wrote a third of a file.
+
+The question is never "did this run?" — it is **"did the thing downstream of this actually receive
+what it expected?"** A count of `0` frequently means the query measured something narrower than its
+name suggests, not that there was nothing to do.
+
+**Theme 2 — a check verifies the exact thing responsible for a failure and reports it correct.** A
+test asserted a firewall rule existed while that rule broke every outbound connection. Ten scheduler
+tests asserted the settings that were supposed to guarantee restart recovery, all green, while
+recovery did not work — they tested configuration, and the behaviour lived in process lifetime. An
+ingress test passed vacuously because the set it constrained was empty.
+
+The discipline: **check that your check would fail if the thing were broken.** Prefer verification
+that crosses the boundary where the bug would live. A config test that passes while the behaviour it
+describes does not hold has already happened here.
+
+---
+
+## 3. Schema and data
+
+- Schema changes are **additive numbered migration files**, applied by a runner that records
+  `version, filename, checksum, applied_at` and **aborts if an already-applied file's checksum
+  changed**. Filename-only tracking silently permits editing an applied migration.
+- **There is no re-runnable `schema.sql`.** A fresh database is created by restoring a verified dump,
+  not by executing a monolith. The prior project came within one command of unrecoverable loss twice.
+- Migrations run **one transaction per file**, with the `schema_migrations` insert inside that same
+  transaction. Never all-pending-in-one.
+- A migration that must run outside a transaction (e.g. `CREATE INDEX CONCURRENTLY`) is marked with a
+  first-line `-- migrate:no-transaction` comment that the runner honours.
+- **Destructive operations are archived, never dropped:** `ALTER TABLE … RENAME TO …_archived_YYYYMMDD`.
+  Only a human runs an actual `DROP`.
+- **A dump is verified by `pg_restore -f /dev/null <file>` completing with no stderr output.**
+  `pg_restore --list` is *not* verification — it reads only the archive's table of contents. A dump
+  that was one-third its correct size once passed `--list` cleanly, matched its own SHA-256 across
+  three machines, and failed on restore. This binds every backup job and every restore test.
+- A restored database has **no planner statistics**. `ANALYZE` follows every `pg_restore`, as part of
+  restoring — not as a migration and not as a scheduled job.
+- **Migrations never run on container start.** A restart loop would become a migration loop.
+
+---
+
+## 4. Jobs and monitoring
+
+- Exactly **one `@job` per scheduled unit**, never nested. Job names are stable identifiers and are
+  the join key between the cadence table and the heartbeat.
+- `rows_written` means **rows written to the database**, never rows examined or processed. `0` and
+  `NULL` are distinguishable and both meaningful.
+- The `@job` decorator writes a `running` row **before** the call, from a **separate database session
+  committed independently**. If the wrapped work rolls back, the failure record must survive. It
+  re-raises; it never swallows.
+- `job_runs.status` is constrained **by the database** to `running | success | failed | missed`.
+- A misfired job never invokes the function, so a **scheduler event listener writes the `missed`
+  row**. Without it a missed run is invisible — indistinguishable from never having been scheduled.
+- `job_runs` is **append-only**. No code path deletes from it. A human may make a one-off correction
+  with a stated reason. **When data is lost, record the loss — never synthesize a replacement.**
+- The **cadence table is the single source of truth for both trigger timing and per-job overdue
+  thresholds.** The heartbeat imports it and defines no thresholds of its own. Two tables of the same
+  fact diverge silently, and the divergence produces false confidence.
+- **"Last success" is the most recent `success` row's `finished_at`** — never the most recent row of
+  any status. A job failing nightly has recent activity and no recent success.
+- **Liveness is measured from the data, never from the process.** A source that accepts your
+  connection and delivers nothing is indistinguishable from a healthy one at every layer except the
+  data. Check `MAX(ts)` on the ingested table.
+- `coalesce=True`, with per-job `misfire_grace_time` proportional to the job's interval, so a restart
+  after an outage catches up **once, promptly** — rather than once per missed slot, or not at all.
+  The library default grace of one second silently drops everything.
+- The scheduler uses a **persistent job store**. An in-memory store forgets the schedule on restart,
+  and configuration tests will not catch it.
+- **Alert delivery failures never fail the monitoring job itself.**
+
+---
+
+## 5. Infrastructure
+
+- The data volume is **separate from the instance**, carries `prevent_destroy` in Terraform, and is
+  referenced in `fstab` by **filesystem UUID** — never a device path. Cloud NVMe device enumeration is
+  not stable across stop/start; it changed twice in one week on the prior project.
+- Any script that identifies a disk does so by **AWS volume ID matched against the NVMe controller
+  serial** (`/sys/class/nvme/nvme*/serial`), never by topology ("the disk that isn't root").
+  **Hard-fail on zero or multiple matches. Never guess.**
+- `mkfs` runs **only if the device has no existing filesystem**. Check `blkid` for a `TYPE`, not
+  merely for a partition table.
+- **ufw and the security group are gates in series, not alternatives.** ufw's default-deny blocks a
+  port regardless of what the security group permits. SSH needs an explicit ufw rule scoped to the
+  admin CIDR, or provisioning locks you out the moment the firewall activates.
+- **Docker bypasses ufw entirely** via the `DOCKER-USER` iptables chain. That chain hooks `FORWARD`
+  and carries traffic in *both* directions, so an unqualified `DROP` blocks every container's own
+  outbound DNS and package fetches. Rules must be **interface-scoped**: accept `-o $EXT_IFACE`
+  egress, accept `-i $EXT_IFACE` on 80/443, drop `-i $EXT_IFACE` otherwise. **Discover the interface
+  at boot; never hardcode it.**
+- **Every image tag is pinned, and resolved from the machine that runs it** — never from a developer
+  laptop's cache. `latest` on a database image resolved to two different TimescaleDB versions three
+  months apart and cost a full session.
+- Secrets reach containers via Compose `environment:` referencing `.env`, and `.env` is excluded from
+  the image build context. **Passwords must be URI-safe** — generate with `openssl rand -hex 32`, not
+  `base64`, because `/` and `+` break `DATABASE_URL` parsing and surface as confusing host and port
+  errors rather than as auth failures.
+- The deploy path is **`git pull` on the server**, then a provisioning script that stages the build
+  context, then `docker compose up -d`. Manual `scp` of directories caused four separate stale-file
+  incidents in a single session; it is not a deployment mechanism.
+- The deploy directory default is a **fixed absolute path**, never derived from a script's own
+  location — especially once anything does `rsync --delete` into it. **Refuse to run if the target
+  contains a `.git` directory.**
+
+---
+
+## 6. Architecture — fixed
+
+Five containers on one EC2 instance, one Docker Compose stack, all `restart: unless-stopped`, brought
+up at boot by a single systemd unit.
+
+| Service | Contents | Exposed |
+|---|---|---|
+| `timescaledb` | Postgres 16 + TimescaleDB, volume-backed on a **separate** EBS volume | **no** — internal only |
+| `worker` | APScheduler running all jobs | no |
+| `api` | FastAPI + uvicorn | internal, proxied |
+| `caddy` | TLS termination, serves the built React bundle, proxies `/api` | 80, 443 |
+
+**There is no streaming daemon. Everything is polled on a schedule.** This removes an entire category
+of failure the prior project fought: supervising a long-lived socket, cold-start state reconstruction,
+reconnection policy, bounded-backoff escalation. **Do not reintroduce it**, including as an
+"optimization" for the 15-minute USGS cadence.
+
+Frontend: React + TypeScript via Vite; Recharts or TradingView `lightweight-charts`; MapLibre GL JS
+for the river map; Caddy for automatic Let's Encrypt.
+
+**Live USACE LPMS lock-queue scraping is not a dependency of anything.** Weekly lock movements arrive
+cleanly via USDA Table 10. Scraping an Oracle APEX web app is the same fragility class as a news-site
+scraper; if it is ever built, it is strictly an optional enhancement whose failure degrades nothing.
+
+**Pin external API versions.** USGS is migrating to a modernized OGC API. Build against a specific,
+named endpoint set and pin it; never build against a moving default.
+
+---
+
+## 7. Output contract
+
+The user-facing output is **historical analogs, not regression coefficients**:
+
+> Mississippi stage at Memphis has fallen 4.2 ft in 14 days and is now 1.8 ft below the 10-year
+> seasonal median. The last 5 times stage fell this far this fast during harvest season, the
+> Cairo–Memphis barge rate rose 18–47% within 3 weeks — median +29%, 5 of 5 directionally correct.
+
+**Confidence gate: ≥4 analogs and ≥70% directional consistency, else the system says "insufficient
+history."** Manufacturing conviction from three coincidences is the failure this gate exists to
+prevent. The lead-lag sweep still runs underneath to *discover* which pairs deserve detectors; it is
+not the user-facing output.
+
+**Every number that appears in the README, the UI, or the résumé must be reproducible from a query.**
