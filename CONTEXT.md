@@ -43,9 +43,12 @@ live in `CLAUDE.md`. If something here hardens into an invariant, move it there 
   than the Terraform section — they're recorded in `§ 8` (Terraform conventions) instead, and the
   canonical deploy path (`/opt/inland-waterway-signals`, per this commit's decision 9) extends the
   existing `§ 5` deploy-path bullet rather than adding a second, competing statement in `§ 10`.
-  **Not yet applied:** the `ignore_changes` lifecycle block itself is not in `compute.tf` — that
-  file isn't in this commit's file list, and adding it would be scope creep into an unrequested
-  Terraform change. It's a one-line follow-up once requested.
+  **Applied, outside this session:** commit `048fdcf` ("typoes in compute.tf and security.tf")
+  landed between the provisioning-2 report and its commit, adding the `ignore_changes` lifecycle
+  block to `compute.tf` and fixing the em-dash-to-hyphen `description`/comment strings in
+  `compute.tf` and `security.tf` — the same two things `§ 8` now documents as contract. One
+  side effect of that pass: a comment on `compute.tf`'s `metadata_options` block read `CLAUDE.md
+  § a8` (a stray character from the em-dash cleanup); corrected back to `§ 8` in this commit.
 - Docker install, once it runs on the instance, opens a **real, temporary, accepted risk window**:
   Docker inserts its own `DOCKER-USER` iptables chain with no restriction until provisioning 3
   populates it. Container traffic is not firewalled by anything this project controls during that

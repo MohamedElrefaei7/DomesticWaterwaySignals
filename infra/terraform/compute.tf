@@ -16,7 +16,7 @@ resource "aws_instance" "main" {
   # EIP below is the only public address this instance ever has.
   associate_public_ip_address = false
 
-  # IMDSv2 required (CLAUDE.md § a8 / decision 8). Default is "optional", which leaves IMDSv1
+  # IMDSv2 required (CLAUDE.md § 8 / decision 8). Default is "optional", which leaves IMDSv1
   # reachable and turns any SSRF in the API container into instance-credential theft. Hop limit
   # 2, not 1, because containers reach the metadata service through an extra network hop.
   metadata_options {
