@@ -114,9 +114,14 @@ def test_misfire_grace_derivation_is_half_the_interval_floored_at_sixty():
     assert Cadence("b", timedelta(minutes=15), timedelta(minutes=45)).misfire_grace_time == 450
     assert Cadence("c", timedelta(minutes=4), timedelta(minutes=20)).misfire_grace_time == 120
 
-    # Below the floor.
+    # Where the half-interval term falls below the floor and the floor takes over.
     assert Cadence("d", timedelta(minutes=2), timedelta(minutes=10)).misfire_grace_time == 60
-    assert Cadence("e", timedelta(seconds=30), timedelta(minutes=5)).misfire_grace_time == 60
+    assert Cadence("e", timedelta(seconds=90), timedelta(minutes=5)).misfire_grace_time == 60
+
+    # 61s is the shortest interval this table admits: the floor gives it a 60s grace, which is
+    # strictly shorter, so it survives the grace-versus-interval check below. A 60s interval does
+    # not - see test_a_grace_at_or_above_the_interval_is_rejected.
+    assert Cadence("f", timedelta(seconds=61), timedelta(minutes=5)).misfire_grace_time == 60
 
 
 def test_jobstore_is_sqlalchemy_not_memory(scheduler):
@@ -180,3 +185,40 @@ def test_overdue_after_must_exceed_interval():
 
     with pytest.raises(ValueError, match="must be longer than interval"):
         Cadence("worse", timedelta(hours=1), timedelta(minutes=5))
+
+
+def test_a_grace_at_or_above_the_interval_is_rejected():
+    """CLAUDE.md § 12: grace >= interval means the job can never record a `missed` row.
+
+    With coalesce=True only the LAST missed fire time is compared against the grace window, and
+    that one is never more than an interval old - so the comparison can never be true and the job
+    always catches up instead. The lost row is not the damage; the damage is that an ABSENCE of
+    `missed` rows silently stops being evidence that nothing was missed, for that job only, while
+    everything else looks normal.
+
+    The floor is what makes this reachable at all: below 61s the 60-second grace floor wins and
+    meets or exceeds the interval. Above it, the half-interval term or the floor is always
+    strictly smaller, so no valid entry can trip this by accident.
+    """
+    # A short interval is not obviously wrong to whoever writes it - which is why this is a
+    # constructor error rather than a review item.
+    for seconds in (15, 20, 30, 45, 59, 60):
+        with pytest.raises(ValueError, match="must be shorter than interval") as excinfo:
+            Cadence("too_frequent", timedelta(seconds=seconds), timedelta(hours=1))
+
+        message = str(excinfo.value)
+        assert "too_frequent" in message
+        assert f"{seconds}s" in message, "the offending interval is not named"
+        assert "60s" in message, "the derived grace is not named"
+        assert "missed" in message
+
+    # 61 seconds is the boundary and must be accepted, or the check is rejecting valid entries.
+    assert Cadence("just_ok", timedelta(seconds=61), timedelta(hours=1)).misfire_grace_time == 60
+
+    # And every entry actually in the table satisfies it - asserted by size first, so this cannot
+    # pass by iterating over nothing.
+    assert len(CADENCES) >= 1
+    for entry in CADENCES:
+        assert entry.misfire_grace_time < entry.interval_seconds, (
+            f"{entry.job_name} can never record a missed run"
+        )

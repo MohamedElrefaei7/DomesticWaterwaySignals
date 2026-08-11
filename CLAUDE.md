@@ -358,6 +358,16 @@ not the user-facing output.
   test that mutates an entry and asserts the verdict flips — not by grepping for literals.
 - `coalesce=True`, and `misfire_grace_time` **derived from the interval**, never the library
   default of one second.
+- **A cadence entry whose `misfire_grace_time` meets or exceeds its `interval` is a configuration
+  error.** With `coalesce=True` APScheduler evaluates only the *last* missed fire time, which is
+  never more than one interval old, so such a job can never produce a `missed` row — it always
+  catches up instead. The consequence is worse than the lost row: **an absence of `missed` rows is
+  then not evidence that nothing was missed**, and the `missed` status quietly means something
+  different per job. **Enforced in `Cadence.__post_init__`.** With the current
+  half-the-interval-floored-at-60-seconds derivation, the reachable range is an interval of **60
+  seconds or less** — there the floor wins and meets or exceeds the interval. Above 60s the
+  half-interval term or the floor is always strictly smaller, so no valid entry trips it by
+  accident. 61 seconds is therefore the shortest interval the cadence table admits.
 - The job store is **persistent**, and **configuration tests cannot prove it works.** Jobs are
   reconciled into it with `add`-if-absent / `modify`-if-present, **never
   `add_job(replace_existing=True)`** — the latter recomputes `next_run_time` from now and
@@ -382,3 +392,48 @@ not the user-facing output.
 - Container images are **pinned by digest, resolved on the machine that runs them.** A placeholder
   digest in a committed file must be one that cannot resolve, so a missed step fails loudly rather
   than falling back to a floating tag.
+
+---
+
+## 13. Verification conventions
+
+These bind every check under `verify/`, and any check written anywhere else.
+
+- **Container images are referenced as `tag@digest`, never digest alone.** The digest is the pin;
+  Docker resolves by it and ignores the tag, so the two cannot disagree about what runs. The tag is
+  how the digest is **re-derivable** — when a pin fails, the operator has to know what to pull in
+  order to obtain the correct digest, and a bare `name@sha256:…` reference does not say. A digest
+  is also not a value a human should be typing: it is resolved and written by
+  `verify/preflight.py --write-digest`, because hand-editing it failed twice.
+- **A check reports the observed value on failure, never a bare `FAIL`.** The digest it read, both
+  device IDs, the byte count, the fire timestamps. A harness that says `FAIL` without evidence
+  sends the operator off to re-derive by hand what the harness already had in a variable.
+- **A skipped check exits non-zero, and a `SKIP` never reads as green.** A check that quietly
+  becomes a no-op when its precondition is missing, and still reports success, is § 2's theme 2 in
+  its purest form. Conversely, no check prints `PASS` for something it did not observe.
+- **A mount is verified by comparing `st_dev` against the root device** — never free space, never
+  path existence. A bind mount into a directory on the root volume reports the root volume's size
+  perfectly happily and the path exists either way. `nofail` in `fstab` (§ 9) makes a
+  silently-absent volume a designed-for possibility, so this is the check that has to fail when it
+  happens.
+- **A secret written in two shapes is compared to the two shapes of itself**, not merely validated
+  independently. Two values that are each well formed and different produce a container
+  initialized with one and an application authenticating with the other, surfacing much later as
+  an auth failure pointing at nothing.
+- **Verification never prints a secret's value.** Where a failure needs evidence, it reports the
+  value's shape — length, characters outside the permitted alphabet — which is enough to act on
+  and not enough to leak.
+- **Restart recovery is verified by stopping and starting a real process running the real
+  scheduler code**, against the real job store, and asserts **exactly one prompt catch-up fire.**
+  Not `>= 1`, which passes when coalescing is broken and the job fires once per missed slot; and
+  not a count alone, which passes the `replace_existing` bug whose symptom was a correctly-single
+  fire one full interval late. **Configuration tests are not evidence of restart behaviour** — a
+  harness that mocked the job store, the scheduler, or the decorator would reproduce that bug's
+  invisibility exactly.
+- **A check that proves a rollback asserts the absence of the work's own write**, not just the
+  presence of the failure record. The `failed` row appears whether or not the bookkeeping used a
+  separate session; only the sentinel's absence alongside the record's presence shows the two were
+  on different connections.
+- **Verification apparatus lives in `verify/`, never in `app/`.** A probe job in `app/` means
+  production code shipping a job that exists only to be watched. Anything a harness registers in
+  the persistent job store it removes again on every exit path, or it keeps firing in production.

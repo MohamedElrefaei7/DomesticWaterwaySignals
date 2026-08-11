@@ -9,17 +9,40 @@ live in `CLAUDE.md`. If something here hardens into an invariant, move it there 
 
 ## Current state
 
-**Phase 2 orchestration skeleton written; unit tier green with no database, integration tier green
-against a real Postgres 16 + TimescaleDB 2.26.2.** 99 tests green across the repo (61 from Phase 1,
-38 new: 14 unit, 24 integration). Nothing in Phase 2 has run on the instance — see `§ Up Next` for
-the live verification that is the actual point of the commit.
+**PHASE 1 IS COMPLETE AND VERIFIED ON THE INSTANCE, as of 2026-08-10.** Recorded here late — see
+the process note at the end of `§ Up Next`, which exists because of this. What was confirmed on
+the machine:
 
-- **A spec/repo discrepancy, flagged rather than silently accepted:** the Phase 2 brief states
-  Phase 1 "landed and was verified on the instance." This log says otherwise and nothing has
-  changed it — Terraform is defined but **not applied**, no `terraform apply` has run, and
-  provisioning 1/2/3 are written and unit-tested but **not run against any instance**. Phase 2 was
-  written on that basis: it touches nothing under `infra/`, and every step needing a machine is
-  left to the human. If Phase 1 really was applied, this file needs updating by whoever did it.
+- `terraform apply` run: **17 resources created**, matching the plan the tests assert.
+- The data volume is **mounted by filesystem UUID** and survived a **reboot**.
+- Docker installed at the **pinned, held versions**, with a container run confirmed **after** the
+  reboot.
+- **`ens5`** discovered as the external interface and persisted by its boot unit.
+- **ufw active with exactly the three expected rules**.
+- **`DOCKER-USER` carrying four correctly-ordered, interface-scoped rules in both v4 and v6**, all
+  confirmed **after a reboot** — which is the only thing that proves raw iptables rules persist.
+
+The paragraphs further down this file that describe provisioning 1/2/3 as "written and
+unit-tested, not yet run against the instance" are **superseded by the above**. They are left in
+place as the record of what each commit knew at the time; where they conflict with this section,
+this section is current.
+
+**Phase 2 verification harness written; 25 unit tests green offline.** The Phase 2 orchestration
+layer itself is unchanged by this commit. 124 tests green across the repo (61 Phase 1, 38
+orchestration, 25 verification).
+
+- `verify/preflight.py` — five gates: image pinned as `tag@digest` and not the placeholder; `.env`
+  mode 600; `POSTGRES_PASSWORD` and `DATABASE_URL`'s password **compared to each other** and both
+  64-hex; `/mnt/data/timescaledb` on a **different `st_dev`** than `/`; `schema_migrations` row
+  count equal to the number of migration files. Plus `--resolve-digest` / `--write-digest`, which
+  exist because hand-editing the digest failed twice — once as an unsaved edit, once as a
+  fabricated value.
+- `verify/restart_recovery.py` — spawns a **real scheduler process**, stops it, starts it again,
+  and asserts **exactly one prompt catch-up fire**. Drives the real `register_jobs()`, the real
+  `@job`, the real `SQLAlchemyJobStore`. Mocks nothing, by design.
+- `verify/failure_survives.py` — a probe writes a sentinel and raises; asserts the `failed` row
+  **and** the sentinel's absence **and** the exception's propagation.
+- See `CLAUDE.md § 13` for the conventions all three obey.
 
 - `migrations/` + `app/orchestration/migrate.py` — three numbered migrations and the runner that
   applies them. `schema_migrations` is bootstrapped by the runner outside the numbered sequence;
@@ -260,78 +283,56 @@ confidence gating that says "insufficient history" rather than manufacturing con
 
 ## § Up Next
 
-**Provisioning 3 is written and unit-tested but not yet applied anywhere.** A human needs to run,
-on the instance, in this order — this is the lockout-risk commit, so the order below is not
-optional:
+**Phase 1 is done — the block that used to live here is retired.** It listed the provisioning-3
+firewall run, `terraform apply`, and the budget alert as outstanding. All of it has been completed
+and reboot-verified on the instance; see `§ Current state`. Nothing from Phase 1 is pending.
 
-1. Confirm an SSM session works right now, and open a second one and leave it open for the
-   duration.
-2. Arm an auto-revert before touching anything: `sudo systemd-run --on-active=10min
-   /usr/sbin/ufw --force disable` — note the unit name; cancel it with `sudo systemctl stop <unit>`
-   only after step 6 below passes.
-3. `configure_firewall.py --admin-cidr <the same value as terraform.tfvars> --dry-run` — inspect
-   every command, confirm `allow outgoing` is present, confirm the SSH rule carries the CIDR,
-   confirm rule ordering. Send this output to a reviewer before the real run.
-4. The real run, under `sudo`, without `--dry-run`.
-5. `sudo ufw status verbose` — confirm `Default: deny (incoming), allow (outgoing)` and exactly
-   three rules.
-6. Confirm both SSM sessions still respond, and open a third. This is the go/no-go point; cancel
-   the auto-revert timer only now.
-7. `sudo iptables -L DOCKER-USER -n -v --line-numbers` and the same for `ip6tables` — confirm four
-   rules in the specified order, all interface-scoped.
-8. `sudo docker run --rm alpine wget -qO- https://example.com >/dev/null && echo EGRESS_OK` —
-   proves container egress survived the terminal `DROP`.
-9. `sudo reboot`, reconnect, then repeat steps 5, 7, and 8, plus `systemctl status
-   dws-docker-firewall.service` (expect `active (exited)`) — only the reboot proves the
-   `DOCKER-USER` rules persist.
-
-A human also still needs to, before any of the above: configure the AWS budget alert; fill in real
-values in `infra/terraform/terraform.tfvars` (region, AZ, `ssh_admin_cidr`, a verified current,
-region- and architecture-matched Ubuntu 24.04 AMI ID — `terraform.tfvars` still does not exist,
-this is a human decision and blocks `apply`); run `terraform apply`; then run provisioning 1
-(`mount_data_volume.py`) and provisioning 2 (`install_docker.py`, `discover_external_interface.py`)
-per their own commit reports — provisioning 2's install script needs real version strings from
-`apt-cache madison` first, the placeholder versions in its report are not verified current values.
-
-**Process note:** after any Claude Code session reports a commit, run `git log --oneline
+**Process note — commits:** after any Claude Code session reports a commit, run `git log --oneline
 origin/main` from your own terminal before treating the work as real — three separate sessions
 today reported committed work that had not been pushed.
 
-**Phase 2 live verification — on the instance, once the above is done.** Steps 7 and 8 are the
-ones that matter; the rest is setup. Nothing here has been run.
+**Process note — live-verification outcomes are written back into `CONTEXT.md` as their own small
+commit.** This is the rule this file most needs and has never followed. Every session so far has
+written "not yet run against the instance" and none has come back to correct it once the
+verification succeeded, so the log sat **three commits behind reality** while `CLAUDE.md § 0` names
+this file as the second-highest authority in the project. The Phase 1 status corrected at the top
+of `§ Current state` was stale for exactly that reason, and the Phase 2 session then reasoned from
+it and wrote a discrepancy note about work that had in fact already been done. Running the
+verification and not recording the result is not finishing the verification.
 
-1. **Resolve and pin the image digest.** `docker pull timescale/timescaledb:2.26.2-pg16`, then
-   `docker image inspect timescale/timescaledb:2.26.2-pg16 --format '{{index .RepoDigests 0}}'`.
-   Paste the result into `docker-compose.yml`, replacing the all-zero placeholder, and report it
-   back. `docker compose config` must then show a digest, not a floating tag.
-2. `cp .env.example .env`, generate the password with **`openssl rand -hex 32`** (not `base64` —
-   `/` and `+` break `DATABASE_URL` parsing), and put the same value in both `POSTGRES_PASSWORD`
-   and the password field of `DATABASE_URL`.
-3. `mkdir -p /mnt/data/timescaledb`, `docker compose up -d timescaledb`, then `docker compose ps`
-   and `docker compose logs timescaledb | tail`.
-4. **Confirm the data is on the data volume, not the root disk:**
-   `df -h /mnt/data && du -sh /mnt/data/timescaledb`.
-5. Run the migration runner from the host venv, then
-   `docker compose exec timescaledb psql -U waterway -d waterway -c 'select version, filename,
-   applied_at from schema_migrations order by version'` — expect three rows.
-6. **Tamper test.** Append a blank line to `migrations/0001_extensions.sql`, re-run the runner,
-   confirm it aborts naming that file and both checksums, then `git checkout -- migrations/`. A
-   guard that has never been seen refusing is not a guard. (Rehearsed off-instance against a
-   throwaway database: it aborts with exit 1 and prints both digests. Not yet seen on the real
-   data.)
-7. **Restart-recovery test — the point of this commit.** Start the scheduler, confirm a `job_runs`
-   row appears for the heartbeat. Stop the process for **longer than one 15-minute interval**.
-   Start it again. Confirm the job fires **once, promptly** — not once per missed slot, not never
-   — then paste `select job_name, status, started_at from job_runs order by started_at desc limit
-   10`. Configuration tests cannot prove this; only this can, and this commit already caught one
-   real bug that only this kind of test can see.
-8. **Failure-survives test.** Register a temporary job that inserts a row and then raises. Run it.
-   Confirm `job_runs` holds a `failed` row **with the message**, and that the row it inserted is
-   **gone** — the work rolled back, the record did not.
-9. `docker compose restart timescaledb`, then confirm the scheduler reconnects and the next
-   heartbeat still records a row.
+**Phase 2 live verification — on the instance. Now a harness, not a checklist.**
 
-**Host connectivity for steps 5–9, and it is a deliberate temporary deviation.**
+Every step below is a command that checks itself and exits non-zero when it should. Steps 6 and 7
+are the ones that matter; the rest is setup. A `SKIP` is not a pass — the run exits non-zero and
+says what was not checked. Nothing here has been run yet.
+
+1. `docker pull timescale/timescaledb:2.26.2-pg16` (the tag is in `docker-compose.yml`), then
+   `python3 -m verify.preflight --resolve-digest` — inspect the digest it prints.
+2. `python3 -m verify.preflight --write-digest`, review the printed `git diff`, commit it. **Do not
+   hand-edit the digest** — that is what failed twice. The tag stays on the line; the digest is the
+   pin and the tag is how the pin is re-derivable.
+3. `python3 -m verify.preflight` — all five gates. Expect the `.env` password-match gate, the
+   `st_dev` gate, and the migration-count gate to pass, and the run to exit **zero with no SKIP**.
+4. **Tamper test.** Append a blank line to `migrations/0001_extensions.sql`, run the migration
+   runner, confirm it aborts naming the file and both digests, `git checkout -- migrations/`, re-run,
+   confirm clean. A guard that has never been seen refusing is not a guard.
+5. Run the orchestration integration suite on the instance against the real database:
+   `python3 -m pytest tests/orchestration -q`. **Compare the count to the offline run** — offline it
+   is `14 passed, 24 skipped`; on the instance it must be `38 passed`. If the count has not risen,
+   the `integration` marker is skipping and nothing was verified here.
+6. `python3 -m verify.restart_recovery` — expect exactly one prompt catch-up fire. **This takes
+   about 6½ minutes** and that is not tunable downwards: the probe obeys the cadence contract, and
+   `CLAUDE.md § 12`'s grace-floor rule puts a 61-second minimum on any interval, so the defaults
+   are a 90s interval and a 270s outage. Paste the fire timestamps and
+   `select job_name, status, started_at from job_runs order by started_at desc limit 10`.
+7. `python3 -m verify.failure_survives` — expect a `failed` row carrying its message, and no
+   sentinel.
+8. `docker compose restart timescaledb`, then confirm the scheduler reconnects and the next
+   heartbeat records a row.
+
+**Write the outcomes back into this file as their own small commit.** See the process note above.
+
+**Host connectivity for steps 3 and 5–8, and it is a deliberate temporary deviation.**
 `docker-compose.yml` publishes **no ports**, per `CLAUDE.md § 6`. The Phase 2 scheduler runs from a
 host venv, so it needs host reachability for now. Use an override file kept **outside the repo**,
 so it cannot be committed by accident and cannot outlive its reason:
@@ -359,6 +360,22 @@ it registers its table.
 
 ## Housekeeping — open, non-blocking
 
+- ~~`CLAUDE.md § 12` forbids a cadence entry whose `misfire_grace_time` >= its `interval`, and
+  `cadence.py` does not enforce it.~~ **Closed:** enforced in `Cadence.__post_init__`.
+  **And the note that opened this item was wrong on the numbers** — it said the derivation
+  produces a violation "for any interval under two minutes." Measured: the reachable range is an
+  interval of **60 seconds or less**. Between 61s and 120s the 60-second floor is already strictly
+  shorter than the interval, so those are valid. 61s is the shortest interval the table admits.
+  Corrected in `CLAUDE.md § 12`.
+- **The verification probe jobs write permanent `job_runs` rows** (`verify_restart_probe`,
+  `verify_failure_survives_probe`). That is correct — `job_runs` is append-only and those rows are
+  the record that the verification ran — but it means the heartbeat would report them overdue if
+  they ever appeared in the cadence table. They do not, and must not.
+- `verify/restart_recovery.py` removes its probe from `apscheduler_jobs` on every exit path. If it
+  ever warns that it could not, run `python3 -m verify.restart_recovery --cleanup-only` **before**
+  starting the production scheduler — a leftover probe row keeps firing, because `register_jobs()`
+  never removes jobs it does not recognise.
+
 - **`apscheduler_jobs` must be EXCLUDED from dumps when backups land in Phase 11.** Restoring a
   stale scheduler state is worse than restoring none: the rows carry `next_run_time` values from
   whenever the dump was taken, and a job store full of long-past fire times interacts with
@@ -383,8 +400,16 @@ it registers its table.
   untracked, correctly matched by `.gitignore:16` (`*.tfstate`), and `git log --all -- '*.tfstate'`
   is empty, so it has never been committed. Noted only because Terraform state carries secrets in
   plaintext and its presence next to a clean `git status` invites the assumption without the check.
-- AWS budget alert not yet configured. Blocks `terraform apply`.
+- **AWS budget alert — status unknown, and it no longer blocks anything by itself.** It was
+  recorded here as blocking `terraform apply`, and `terraform apply` has since run. Whether the
+  alert was configured first was not recorded. Confirm it exists now: there is a running instance,
+  an EIP, and an EBS volume billing continuously.
 - Domain not purchased. Blocks Phase 10 only.
+- **State is local, and there is now applied infrastructure behind it.** This was written when
+  nothing had been applied, which made it theoretical; it is not any more. If
+  `infra/terraform/terraform.tfstate` is lost, `prevent_destroy` protects nothing, because
+  Terraform no longer knows the data volume or the EIP exist. An S3 backend with locking was out of
+  scope for Phase 1 and is now the highest-value piece of unowned work in `infra/`.
 - **State is local this commit.** No S3 backend, no state locking — that is explicitly out of
   scope for Phase 1. If `terraform.tfstate` is lost, `prevent_destroy` protects nothing, because
   Terraform no longer knows the data volume or the EIP exist. Do not treat local state as durable

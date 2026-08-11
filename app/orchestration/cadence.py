@@ -51,6 +51,37 @@ class Cadence:
                 f"heartbeat trains its readers to ignore it."
             )
 
+        # CLAUDE.md § 12: a grace window at or above the interval is a configuration error.
+        #
+        # With coalesce=True, APScheduler evaluates only the LAST missed fire time against the
+        # grace window, and that one is never more than `interval` old. So when grace >= interval
+        # the comparison can never be true and the job CAN NEVER PRODUCE A `missed` ROW - it
+        # always catches up instead.
+        #
+        # The lost row is not the damage. The damage is that `missed` then means something
+        # different per job, and an ABSENCE of `missed` rows stops being evidence that nothing was
+        # missed - silently, for that job only, while the heartbeat and job_runs both look
+        # entirely normal. That is CLAUDE.md § 2's theme 2: a check that reports correct about the
+        # exact thing it is failing to observe.
+        #
+        # Raised here rather than left to review because the derivation below hides it. Nobody
+        # picking an interval is thinking about the grace floor, and the arithmetic only bites
+        # under it: at or below MINIMUM_MISFIRE_GRACE_SECONDS the floor wins and equals or exceeds
+        # the interval; above it the half-interval term or the floor is always strictly smaller.
+        if self.misfire_grace_time >= self.interval_seconds:
+            raise ValueError(
+                f"cadence for {self.job_name!r}: misfire_grace_time ({self.misfire_grace_time}s) "
+                f"must be shorter than interval ({self.interval_seconds}s), and it is not.\n"
+                f"With coalesce=True only the last missed fire time is checked against the grace "
+                f"window, and it is never more than one interval old - so this job can never "
+                f"record a `missed` row, and an absence of them would not mean nothing was missed "
+                f"(CLAUDE.md § 12).\n"
+                f"The grace floor is {MINIMUM_MISFIRE_GRACE_SECONDS}s, so any interval of "
+                f"{MINIMUM_MISFIRE_GRACE_SECONDS}s or less lands here. Use an interval longer than "
+                f"that, or - if this job genuinely needs to run more often than that - change the "
+                f"derivation deliberately and say why."
+            )
+
     @property
     def interval_seconds(self) -> int:
         return int(self.interval.total_seconds())

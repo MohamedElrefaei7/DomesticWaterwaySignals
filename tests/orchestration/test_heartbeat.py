@@ -285,13 +285,14 @@ def test_heartbeat_job_records_itself_and_alerts_only_when_overdue(
     assert len(heartbeat_rows) == 1
     assert heartbeat_rows[0]["status"] == "success"
 
-    # Now make it overdue and confirm the alert names the job. The interval shrinks along with
-    # the threshold because Cadence refuses overdue_after <= interval - a cadence entry that
-    # alerts on a single late run is a cadence entry whose alerts get muted.
+    # Now make it overdue and confirm the alert names the job. The numbers here are boxed in from
+    # both sides by Cadence's own validation: overdue_after must exceed interval, and the derived
+    # misfire grace must be shorter than it - which puts a floor of 61s under any interval. So
+    # 90s/2min, against a success seeded four minutes ago.
     monkeypatch.setattr(
         cadence_module,
         "CADENCES",
-        (Cadence("fresh_job", timedelta(seconds=30), timedelta(minutes=1)),),
+        (Cadence("fresh_job", timedelta(seconds=90), timedelta(minutes=2)),),
     )
     heartbeat.heartbeat_job(sink=alerts.append, url=database_url)
 
