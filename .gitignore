@@ -68,4 +68,4 @@ Thumbs.db
 .idea/
 .vscode/*
 !.vscode/extensions.json
-!.vscode/settings.json
+!.vscode/settings.jsondocker-compose.override.yml
