@@ -3,11 +3,37 @@
 This is the **log**: current state, decisions as they are made, and `§ Up Next`. Stable contracts
 live in `CLAUDE.md`. If something here hardens into an invariant, move it there and note the move.
 
-**Last updated:** 2026-08-10 (Phase 2 — orchestration skeleton)
+**Last updated:** 2026-08-11 (Phase 2 verified on the instance)
 
 ---
 
 ## Current state
+
+**PHASE 2 IS VERIFIED ON THE INSTANCE, as of 2026-08-11.** Recorded the same day, per the process
+note at the end of `§ Up Next`. Reported back from the machine:
+
+- **125 of 125 tests green on the instance, with ZERO SKIPS.** This is the number that matters and
+  the reason step 5 asked for a comparison: offline the run is `101 passed, 24 skipped`, because
+  the integration tier skips itself when `DATABASE_URL` is absent. Zero skips means all 24
+  integration tests actually executed against the real database rather than quietly vanishing from
+  a green report.
+- **Tamper guard observed refusing**, against a database carrying real state — not a fixture. The
+  runner aborted naming the file and both checksums. `CLAUDE.md § 3`'s guard has now been seen
+  saying no; a guard that has never refused is not a guard.
+- **Restart recovery: one fire, 0.43s after restart**, following a three-slot outage. Exactly one,
+  and prompt — not once per missed slot, and not one full interval late. This is the behaviour no
+  configuration test can establish, and the one whose absence this project shipped and caught
+  earlier in Phase 2.
+- **Failure-survives: all three observations.** The `failed` row present with its message, the
+  sentinel absent, the exception propagated. The sentinel's absence alongside the record's
+  presence is what demonstrates the `@job` bookkeeping ran on a separate connection.
+
+**Not reported back, so not recorded as done:** the digest resolution and rewrite (steps 1–2), the
+full `preflight` gate run (step 3), and the `docker compose restart` reconnect check (step 8).
+Steps 4–7 could not have produced the results above without a working database, `.env`, and applied
+migrations, so those preconditions clearly held — but "clearly held" is an inference and the gates'
+own output was not pasted. Run `python3 -m verify.preflight` and confirm it exits zero with no
+`SKIP`, and the record is complete.
 
 **PHASE 1 IS COMPLETE AND VERIFIED ON THE INSTANCE, as of 2026-08-10.** Recorded here late — see
 the process note at the end of `§ Up Next`, which exists because of this. What was confirmed on
@@ -300,39 +326,25 @@ of `§ Current state` was stale for exactly that reason, and the Phase 2 session
 it and wrote a discrepancy note about work that had in fact already been done. Running the
 verification and not recording the result is not finishing the verification.
 
-**Phase 2 live verification — on the instance. Now a harness, not a checklist.**
+**Phase 2 live verification — DONE, 2026-08-11.** The step list that lived here is retired; the
+outcomes are recorded at the top of `§ Current state`. Three items from it are still open and are
+listed there: the digest resolve/rewrite (steps 1–2), the full `preflight` gate run (step 3), and
+the `docker compose restart` reconnect check (step 8). Everything else passed.
 
-Every step below is a command that checks itself and exits non-zero when it should. Steps 6 and 7
-are the ones that matter; the rest is setup. A `SKIP` is not a pass — the run exits non-zero and
-says what was not checked. Nothing here has been run yet.
+The harness itself stays, and is rerunnable at any time — after a reboot, after a dependency bump,
+before trusting the stack again:
 
-1. `docker pull timescale/timescaledb:2.26.2-pg16` (the tag is in `docker-compose.yml`), then
-   `python3 -m verify.preflight --resolve-digest` — inspect the digest it prints.
-2. `python3 -m verify.preflight --write-digest`, review the printed `git diff`, commit it. **Do not
-   hand-edit the digest** — that is what failed twice. The tag stays on the line; the digest is the
-   pin and the tag is how the pin is re-derivable.
-3. `python3 -m verify.preflight` — all five gates. Expect the `.env` password-match gate, the
-   `st_dev` gate, and the migration-count gate to pass, and the run to exit **zero with no SKIP**.
-4. **Tamper test.** Append a blank line to `migrations/0001_extensions.sql`, run the migration
-   runner, confirm it aborts naming the file and both digests, `git checkout -- migrations/`, re-run,
-   confirm clean. A guard that has never been seen refusing is not a guard.
-5. Run the orchestration integration suite on the instance against the real database:
-   `python3 -m pytest tests/orchestration -q`. **Compare the count to the offline run** — offline it
-   is `14 passed, 24 skipped`; on the instance it must be `38 passed`. If the count has not risen,
-   the `integration` marker is skipping and nothing was verified here.
-6. `python3 -m verify.restart_recovery` — expect exactly one prompt catch-up fire. **This takes
-   about 6½ minutes** and that is not tunable downwards: the probe obeys the cadence contract, and
-   `CLAUDE.md § 12`'s grace-floor rule puts a 61-second minimum on any interval, so the defaults
-   are a 90s interval and a 270s outage. Paste the fire timestamps and
-   `select job_name, status, started_at from job_runs order by started_at desc limit 10`.
-7. `python3 -m verify.failure_survives` — expect a `failed` row carrying its message, and no
-   sentinel.
-8. `docker compose restart timescaledb`, then confirm the scheduler reconnects and the next
-   heartbeat records a row.
+    python3 -m verify.preflight            # exits non-zero on any FAIL *or* SKIP
+    python3 -m verify.restart_recovery     # ~6.5 minutes; see CLAUDE.md § 12 on why
+    python3 -m verify.failure_survives
 
-**Write the outcomes back into this file as their own small commit.** See the process note above.
+**When rerunning the orchestration suite on the instance, compare the count to the offline run.**
+Offline it is `15 passed, 24 skipped` for `tests/orchestration` and `101 passed, 24 skipped` for
+the whole repo; on the instance it must be `39 passed` and `125 passed`, with **zero skips**. If
+the skip count has not gone to zero, the `integration` marker is skipping and nothing was verified.
 
-**Host connectivity for steps 3 and 5–8, and it is a deliberate temporary deviation.**
+**Host connectivity for anything run from the host venv, and it is a deliberate temporary
+deviation — still in force.**
 `docker-compose.yml` publishes **no ports**, per `CLAUDE.md § 6`. The Phase 2 scheduler runs from a
 host venv, so it needs host reachability for now. Use an override file kept **outside the repo**,
 so it cannot be committed by accident and cannot outlive its reason:
@@ -348,7 +360,8 @@ Bring the stack up with `docker compose -f docker-compose.yml -f /root/dws-local
 Delete it once the `worker` service is containerized; at that point `DATABASE_URL` becomes
 `timescaledb:5432` and nothing needs a published port.
 
-Then, in order: Phase 3 USGS ingest and backfill — the USGS client, the gauge seed list (**the
+**Next is Phase 3**, and with Phase 2 verified there is nothing in front of it. Phase 3 USGS
+ingest and backfill — the USGS client, the gauge seed list (**the
 human's, per `CLAUDE.md § 1`**), the backfill, and enabling TimescaleDB compression with the ratio
 **measured, not quoted**; that measurement is what justifies TimescaleDB over a managed database
 and it must be a number taken here. Phase 3 is also where the still-open **raw 15-minute readings
