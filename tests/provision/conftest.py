@@ -175,6 +175,25 @@ def fake_os_release(tmp_path):
 
 
 @pytest.fixture
+def fake_interface_file(tmp_path):
+    """Return a builder: fake_interface_file("eth7") -> Path to a fixture single-line
+    /etc/dws/external-interface, standing in for the file discover_external_interface.py's boot
+    unit writes (CLAUDE.md § 10) for configure_firewall.py to read. Each call gets its own file,
+    so a test can build more than one independent fixture without one contaminating another. Pass
+    "" to build a file that exists but is empty — the fixture for decision 12's fatal-before-any-
+    command path.
+    """
+    counter = itertools.count()
+
+    def _build(interface: str) -> Path:
+        path = tmp_path / f"external-interface-{next(counter)}"
+        path.write_text(f"{interface}\n" if interface else "")
+        return path
+
+    return _build
+
+
+@pytest.fixture
 def fake_proc_net_route(tmp_path):
     """Return a builder: fake_proc_net_route([("eth0", "00000000"), ...]) -> Path to a fixture
     /proc/net/route with a real header row and one data row per (iface, destination_hex) pair.

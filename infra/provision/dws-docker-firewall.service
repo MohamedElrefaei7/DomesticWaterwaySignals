@@ -1,0 +1,13 @@
+[Unit]
+Description=Reapply interface-scoped DOCKER-USER firewall rules (raw iptables rules do not survive a reboot on their own)
+After=docker.service dws-external-interface.service
+Requires=docker.service
+Wants=dws-external-interface.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/python3 /opt/inland-waterway-signals/infra/provision/configure_firewall.py --docker-user-only --interface-file /etc/dws/external-interface
+
+[Install]
+WantedBy=multi-user.target

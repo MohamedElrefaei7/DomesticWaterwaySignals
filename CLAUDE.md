@@ -270,3 +270,43 @@ not the user-facing output.
   heuristic wrong the moment Docker is running, which is always, on this instance.
 - Interface discovery writes a single-line file at a fixed path via its own boot-ordered systemd
   unit; downstream consumers (the firewall commit) read the file rather than re-deriving the value.
+
+---
+
+## 11. Firewall conventions
+
+- ufw is `deny incoming`, **`allow outgoing`**. Outbound is the SSM path and there is no SSH key
+  pair on this instance; denying outbound makes it unrecoverable short of detaching the root
+  volume.
+- ufw rules are added before `ufw --force enable`, never after, and enable is always forced. Bare
+  `ufw enable` prompts on stdin and hangs or aborts non-interactively, leaving the firewall in an
+  indeterminate state that gets reported as configured.
+- The ufw port allowlist is asserted by exact set equality (`{22, 80, 443}`), never as a denylist.
+  SSH is scoped to `--admin-cidr`; there is no bare `ufw allow 22` or `ufw allow ssh` anywhere.
+- ufw filters the host; `DOCKER-USER` filters containers. Neither substitutes for the other —
+  published container ports are DNAT'd and traverse `FORWARD`, bypassing ufw entirely.
+- Every `DOCKER-USER` rule is interface-scoped, using the interface read from
+  `/etc/dws/external-interface` — never hardcoded, never a default. A conntrack
+  `RELATED,ESTABLISHED` `RETURN` on `-i` is always the first rule; without it, replies to a
+  container's own outbound traffic hit the terminal `DROP` and the container hangs instead of
+  erroring. The terminal `DROP` is always `-i`-scoped, never bare.
+- `DOCKER-USER` rules use `RETURN`, not `ACCEPT`, so Docker's own per-container and
+  port-publishing chains still apply.
+- The chain is flushed before rules are appended, so re-running provisioning is idempotent. This
+  project owns `DOCKER-USER` by convention — Docker creates it and never writes to it — so
+  flushing it is safe.
+- `ip6tables` always receives the identical rule set. Turning IPv6 off is not a way of satisfying
+  a firewall requirement — Docker's IPv6 support being off by default today is exactly what makes
+  skipping `ip6tables` look harmless until someone enables it.
+- Docker is restarted after `ufw enable` and before `DOCKER-USER` rules are applied — `ufw
+  enable`'s `iptables-restore` discards Docker's own chains, and Docker only rebuilds them on
+  daemon restart.
+- A missing or empty interface file is fatal, before a single command is issued — no fallback, no
+  guessed default. A partially-applied firewall looks configured and is not, which is worse than
+  none.
+- Raw iptables/ip6tables rules do not persist across reboot the way ufw's own configuration does.
+  Any raw-iptables configuration is reapplied by a boot-ordered systemd unit
+  (`dws-docker-firewall.service`, `Requires=docker.service`,
+  `Wants=dws-external-interface.service`) invoking the script with `--docker-user-only`, which
+  never touches ufw. Reboot-persistence is verified by an actual reboot, not inferred from rule
+  presence.

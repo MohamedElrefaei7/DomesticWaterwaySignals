@@ -3,14 +3,50 @@
 This is the **log**: current state, decisions as they are made, and `§ Up Next`. Stable contracts
 live in `CLAUDE.md`. If something here hardens into an invariant, move it there and note the move.
 
-**Last updated:** 2026-08-10 (provisioning 2 of 3)
+**Last updated:** 2026-08-10 (provisioning 3 of 3)
 
 ---
 
 ## Current state
 
-**Provisioning 2 of 3 written and unit-tested, not yet run against the instance.** Phase 1
+**Provisioning 3 of 3 written and unit-tested, not yet run against the instance.** Phase 1
 (Terraform) is defined but not applied; no `terraform apply` has run.
+
+- `infra/provision/configure_firewall.py` configures ufw (host) and `DOCKER-USER` (containers) as
+  two gates in series — see `CLAUDE.md § 11`. ufw is `deny incoming`/`allow outgoing`, all rules
+  added before a forced `ufw --force enable`, port allowlist `{22, 80, 443}` with SSH scoped to
+  `--admin-cidr` (required, no default). `DOCKER-USER` rules are read from the interface file
+  provisioning 2 writes, flushed then re-appended (conntrack `RETURN` first, terminal `DROP` last,
+  both `-i`-scoped; `RETURN` never `ACCEPT`), applied identically to `iptables` and `ip6tables`. A
+  missing or empty interface file raises before a single command runs. Docker is restarted after
+  `ufw enable` and before `DOCKER-USER` rules are (re)applied, since ufw's table rewrite discards
+  Docker's own chains. `--docker-user-only` reapplies just the `DOCKER-USER` half (never touches
+  ufw) and is what `dws-docker-firewall.service` (`Type=oneshot`, `RemainAfterExit=yes`,
+  `After=docker.service dws-external-interface.service`) invokes at boot, because raw iptables
+  rules — unlike ufw's own config — do not survive a reboot on their own.
+- `tests/provision/` — 65 tests green (46 from provisioning 1+2 plus 19 new: `test_ufw_rules.py`
+  and `test_docker_user_rules.py`). All 19 required mutation-table rows confirmed: each performed,
+  observed to turn its named test red, then restored, and the full suite re-verified green
+  afterward. `conftest.py` extended with a `fake_interface_file` builder (same pattern as
+  `fake_os_release`/`fake_proc_net_route`), reusing the existing `fake_runner`/`FakeCommandRunner`
+  fixture rather than restructuring it.
+- One interface-design correction made while writing the CLI, not called out explicitly in the
+  spec: `--admin-cidr` can't be unconditionally `required=True` in argparse, because
+  `dws-docker-firewall.service`'s boot-time `--docker-user-only` invocation never passes it (it
+  never touches ufw and has no CIDR to scope). `--admin-cidr` defaults to `None` at the argparse
+  level; `main()` enforces "required unless `--docker-user-only`" explicitly before calling into
+  `configure()`.
+- CLI wiring verified end-to-end under `--dry-run` against a real fixture interface file (no
+  `ufw`/`iptables` on this dev machine, so `--dry-run` is as close to the real CLI path as is
+  reachable off-instance): full-run ordering, `--docker-user-only` (confirmed no `ufw` command
+  appears), missing-interface-file, empty-interface-file, and missing-`--admin-cidr` all print/exit
+  as designed.
+- Not yet done, and out of scope for this write-up: the live verification steps (SSM session
+  check, `--dry-run` review, the real `sudo` run, the post-enable and post-reboot checks) — those
+  require the instance and are the human's, per `CLAUDE.md § 1` and § 9's "no agent connects to
+  the server."
+- `DOCKER-USER`/ufw and the Compose systemd unit are no longer "not started" as of this commit —
+  the code and unit exist; they are simply not yet applied anywhere.
 
 - `infra/provision/install_docker.py` installs Docker Engine and the Compose plugin at exact
   pinned versions (explicit `pkg=version` install strings, `apt-mark hold` after), via Docker's
@@ -55,6 +91,9 @@ live in `CLAUDE.md`. If something here hardens into an invariant, move it there 
   window — only the security group, unaffected by any of this. Not a defect; schedule provisioning
   3 promptly rather than leaving a freshly-Dockerized instance unattended.
 - `DOCKER-USER`/ufw and the Compose systemd unit are explicitly **not started** — provisioning 3.
+  **Resolved as of provisioning 3, above:** `configure_firewall.py` and
+  `dws-docker-firewall.service` now exist and close this risk window once applied on the instance;
+  the Compose systemd unit remains a later commit (Phase 2 brings up the stack it would start).
 
 - `infra/provision/mount_data_volume.py` identifies the data volume by AWS volume ID matched
   against the NVMe block-device serial (dash-stripped), formats it only if `blkid` reports no
@@ -80,8 +119,8 @@ live in `CLAUDE.md`. If something here hardens into an invariant, move it there 
   is reachable off-instance): both the "already formatted" and "no filesystem yet" branches print
   the expected actions, fstab is untouched, and the mount point is not created.
 - (At the time provisioning 1 landed: Docker install and interface discovery were not yet
-  started. Both landed in provisioning 2, above; `DOCKER-USER`/ufw and the Compose systemd unit
-  remain provisioning 3.)
+  started. Both landed in provisioning 2; `DOCKER-USER`/ufw landed in provisioning 3, above. The
+  Compose systemd unit remains a later commit.)
 
 - `CLAUDE.md` seeded with the contracts carried forward from the prior project (`Trade_Analysis_Project`).
 - `.gitignore` committed, verified not self-excluding.
@@ -157,21 +196,38 @@ confidence gating that says "insufficient history" rather than manufacturing con
 
 ## § Up Next
 
-**Provisioning 3 — ufw with the admin-CIDR SSH rule, plus interface-scoped `DOCKER-USER` rules
-reading `/etc/dws/external-interface`.** The lockout-risk commit; only start it after a human has
-confirmed SSM Session Manager works on the instance (that's the recovery path if the boot sequence
-goes wrong), and only after provisioning 2 has actually run — until then the instance is in the
-accepted temporary risk window described in its commit report: Docker's own `DOCKER-USER` chain
-exists with no restriction, and only the security group is firewalling anything.
+**Provisioning 3 is written and unit-tested but not yet applied anywhere.** A human needs to run,
+on the instance, in this order — this is the lockout-risk commit, so the order below is not
+optional:
 
-A human needs to: configure the AWS budget alert; fill in real values in
-`infra/terraform/terraform.tfvars` (region, AZ, `ssh_admin_cidr`, a verified current, region- and
-architecture-matched Ubuntu 24.04 AMI ID — `terraform.tfvars` still does not exist, this is a human
-decision and blocks `apply`); run `terraform apply`; then run provisioning 1
+1. Confirm an SSM session works right now, and open a second one and leave it open for the
+   duration.
+2. Arm an auto-revert before touching anything: `sudo systemd-run --on-active=10min
+   /usr/sbin/ufw --force disable` — note the unit name; cancel it with `sudo systemctl stop <unit>`
+   only after step 6 below passes.
+3. `configure_firewall.py --admin-cidr <the same value as terraform.tfvars> --dry-run` — inspect
+   every command, confirm `allow outgoing` is present, confirm the SSH rule carries the CIDR,
+   confirm rule ordering. Send this output to a reviewer before the real run.
+4. The real run, under `sudo`, without `--dry-run`.
+5. `sudo ufw status verbose` — confirm `Default: deny (incoming), allow (outgoing)` and exactly
+   three rules.
+6. Confirm both SSM sessions still respond, and open a third. This is the go/no-go point; cancel
+   the auto-revert timer only now.
+7. `sudo iptables -L DOCKER-USER -n -v --line-numbers` and the same for `ip6tables` — confirm four
+   rules in the specified order, all interface-scoped.
+8. `sudo docker run --rm alpine wget -qO- https://example.com >/dev/null && echo EGRESS_OK` —
+   proves container egress survived the terminal `DROP`.
+9. `sudo reboot`, reconnect, then repeat steps 5, 7, and 8, plus `systemctl status
+   dws-docker-firewall.service` (expect `active (exited)`) — only the reboot proves the
+   `DOCKER-USER` rules persist.
+
+A human also still needs to, before any of the above: configure the AWS budget alert; fill in real
+values in `infra/terraform/terraform.tfvars` (region, AZ, `ssh_admin_cidr`, a verified current,
+region- and architecture-matched Ubuntu 24.04 AMI ID — `terraform.tfvars` still does not exist,
+this is a human decision and blocks `apply`); run `terraform apply`; then run provisioning 1
 (`mount_data_volume.py`) and provisioning 2 (`install_docker.py`, `discover_external_interface.py`)
-on the instance per the live-verification steps in their commit reports — provisioning 2's install
-script needs real version strings from `apt-cache madison` first, the placeholder versions in its
-report are not verified current values.
+per their own commit reports — provisioning 2's install script needs real version strings from
+`apt-cache madison` first, the placeholder versions in its report are not verified current values.
 
 **Process note:** after any Claude Code session reports a commit, run `git log --oneline
 origin/main` from your own terminal before treating the work as real — three separate sessions
@@ -193,3 +249,13 @@ managed database, and it must be a number taken here, not a vendor claim.
   scope for Phase 1. If `terraform.tfstate` is lost, `prevent_destroy` protects nothing, because
   Terraform no longer knows the data volume or the EIP exist. Do not treat local state as durable
   once anything has actually been applied.
+- **The `DOCKER-USER` terminal `DROP` is not observable from outside while the security group is
+  tighter than it.** The security group already blocks every ingress port `DOCKER-USER` would
+  drop, so proving the drop end-to-end would require temporarily widening the security group,
+  which is out of scope for this commit. What live verification step 7 (above) actually confirms
+  is rule presence, order, and interface scoping — plus step 8's proof that legitimate egress
+  still flows. This is a real verification gap, not a claim of end-to-end proof.
+- `docker-ce-rootless-extras` remains installed unpinned and unheld (provisioning 2 pins and holds
+  `docker-ce`, `docker-ce-cli`, `containerd.io`, `docker-compose-plugin` only).
+- Copying `infra/provision/*.service` unit files into `/etc/systemd/system/` and running `systemctl
+  enable` is a manual step on the instance until a deploy script exists to do it.
