@@ -42,7 +42,7 @@ services:
     # The all-zero digest below is deliberate: it is syntactically valid, so `docker compose
     # config` parses, and it cannot possibly resolve, so `docker compose pull` fails loudly
     # instead of silently falling back to a floating tag.
-    image: timescale/timescaledb:2.26.2-pg16@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    image: timescale/timescaledb:2.26.2-pg16@sha256:332b99870c99c20d0d852ec600c097ee00ac93f5e0c75a8e83673394cdb36bfd
 
     restart: unless-stopped
 
