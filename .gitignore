@@ -68,4 +68,15 @@ Thumbs.db
 .idea/
 .vscode/*
 !.vscode/extensions.json
-!.vscode/settings.jsondocker-compose.override.yml
+!.vscode/settings.json
+
+# ---------------------------------------------------------------------------
+# Local Compose overrides — machine-specific, never shared.
+# ---------------------------------------------------------------------------
+# docker-compose.override.yml is applied automatically by `docker compose` with
+# no flag, so anything in it changes what runs while being invisible in
+# docker-compose.yml. Phase 2 uses one to publish 5432 on loopback for the
+# host-venv scheduler; committing that would put a published database port
+# into every environment silently. See CLAUDE.md § 6.
+docker-compose.override.yml
+
