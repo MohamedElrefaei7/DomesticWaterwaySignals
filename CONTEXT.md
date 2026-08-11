@@ -3,11 +3,75 @@
 This is the **log**: current state, decisions as they are made, and `§ Up Next`. Stable contracts
 live in `CLAUDE.md`. If something here hardens into an invariant, move it there and note the move.
 
-**Last updated:** 2026-08-10 (provisioning 3 of 3)
+**Last updated:** 2026-08-10 (Phase 2 — orchestration skeleton)
 
 ---
 
 ## Current state
+
+**Phase 2 orchestration skeleton written; unit tier green with no database, integration tier green
+against a real Postgres 16 + TimescaleDB 2.26.2.** 99 tests green across the repo (61 from Phase 1,
+38 new: 14 unit, 24 integration). Nothing in Phase 2 has run on the instance — see `§ Up Next` for
+the live verification that is the actual point of the commit.
+
+- **A spec/repo discrepancy, flagged rather than silently accepted:** the Phase 2 brief states
+  Phase 1 "landed and was verified on the instance." This log says otherwise and nothing has
+  changed it — Terraform is defined but **not applied**, no `terraform apply` has run, and
+  provisioning 1/2/3 are written and unit-tested but **not run against any instance**. Phase 2 was
+  written on that basis: it touches nothing under `infra/`, and every step needing a machine is
+  left to the human. If Phase 1 really was applied, this file needs updating by whoever did it.
+
+- `migrations/` + `app/orchestration/migrate.py` — three numbered migrations and the runner that
+  applies them. `schema_migrations` is bootstrapped by the runner outside the numbered sequence;
+  checksums of every already-applied file are verified before anything pending is applied; one
+  transaction per file with the record inside it; `-- migrate:no-transaction` honoured only on
+  line 1 and exercised by a real migration (`0003`, a `CREATE INDEX CONCURRENTLY`) rather than
+  only by a test; a pending version below the highest applied one is a hard failure. See
+  `CLAUDE.md § 12`.
+- `app/orchestration/job.py` — the `@job` decorator. Bookkeeping on its own connection, `running`
+  row committed before the wrapped function is called, always re-raises. `rows_written`
+  distinguishes `NULL` from `0` in both the decorator and the column.
+- `app/orchestration/cadence.py`, `scheduler.py`, `heartbeat.py` — one cadence entry (`heartbeat`,
+  15 min, overdue after 45 min, grace 450s), APScheduler with `SQLAlchemyJobStore`, an
+  `EVENT_JOB_MISSED` listener writing `missed` rows, and a heartbeat that imports the cadence
+  table and defines no threshold of its own.
+- `docker-compose.yml` — the database service only. **The image digest is a deliberately
+  unresolvable all-zero placeholder** and must be replaced with one resolved on the instance
+  (`§ Up Next` step 1). It parses, and it cannot pull.
+- All 23 mutation-table rows confirmed: each performed, observed to turn its named test red with
+  the message recorded, then restored, and the suite re-verified green.
+
+- **A real bug was found by live measurement and fixed, and it is worth reading in full because it
+  is `CLAUDE.md § 2` theme 2 happening again inside the commit that cites it.** The scheduler
+  originally registered jobs with `add_job(..., replace_existing=True)`, which is the form every
+  APScheduler example uses. `_real_add_job` computes a fresh `next_run_time` from now, and
+  `update_job` writes it over the persisted one — so a restart after an outage **discarded the
+  past-due fire time before APScheduler's misfire handling ever saw it**. The job neither caught
+  up nor recorded a miss; it silently resumed on a clean schedule. Measured with a 20-second
+  interval: stopped 00:53:15, restarted 00:54:05, next run scheduled 00:54:25 — a full fresh
+  interval later, no `missed` row. **All three configuration tests (`coalesce=True`,
+  `misfire_grace_time=450`, `SQLAlchemyJobStore`) were green throughout**, which is precisely the
+  prior project's "ten green scheduler tests" failure reproduced. Fixed by `register_jobs()`:
+  add-if-absent, modify-if-present, so a past-due `next_run_time` survives into the new process.
+  Re-measured after the fix: three missed slots collapsed into **one prompt catch-up**, then
+  normal cadence. Guarded by `test_a_past_due_next_run_time_survives_a_restart`, which was itself
+  mutation-confirmed — it turns red under the old implementation while all seven configuration
+  tests stay green.
+- Two tests were found to be **vacuous by mutation and strengthened**, not worked around:
+  `test_applying_records_version_filename_and_checksum` compared the recorded checksum against
+  `migrate.checksum_of()`, so a runner recording a constant satisfied both sides of the equality;
+  it now computes SHA-256 independently and asserts the digest shape.
+  `test_running_row_survives_a_rollback_inside_the_wrapped_work` only rolled back and returned,
+  which a shared-session decorator survives; the wrapped work now rolls back **and raises**, which
+  is the path where a shared session actually unwinds the bookkeeping row.
+- `pytest.ini` was added to register the `integration` marker. It is **not in the commit brief's
+  file list**, but the brief's Tests section requires the marker be registered, and `pytest.ini` is
+  where that goes. Verified it changes nothing else: identical pass/skip counts with and without
+  it, differing only in the four `PytestUnknownMarkWarning`s it removes.
+- The integration tier **skips with a stated reason** when `DATABASE_URL` is absent — never
+  silently passing. Its schema reset drops only non-extension-owned objects (filtered on
+  `pg_depend.deptype = 'e'`) rather than `DROP SCHEMA public CASCADE`, which deadlocked against
+  TimescaleDB's background workers roughly one run in four.
 
 **Provisioning 3 of 3 written and unit-tested, not yet run against the instance.** Phase 1
 (Terraform) is defined but not applied; no `terraform apply` has run.
@@ -233,16 +297,92 @@ per their own commit reports — provisioning 2's install script needs real vers
 origin/main` from your own terminal before treating the work as real — three separate sessions
 today reported committed work that had not been pushed.
 
-Then, in order: Phase 2 orchestration skeleton (migration runner, `job_runs`, `@job`, APScheduler with
-persistent store, cadence table, heartbeat) **before the first ingest client**, so the first data that
-ever lands is already observed. Phase 3 USGS ingest and backfill, including enabling TimescaleDB
-compression and **measuring** the ratio — that measurement is what justifies TimescaleDB over a
-managed database, and it must be a number taken here, not a vendor claim.
+**Phase 2 live verification — on the instance, once the above is done.** Steps 7 and 8 are the
+ones that matter; the rest is setup. Nothing here has been run.
+
+1. **Resolve and pin the image digest.** `docker pull timescale/timescaledb:2.26.2-pg16`, then
+   `docker image inspect timescale/timescaledb:2.26.2-pg16 --format '{{index .RepoDigests 0}}'`.
+   Paste the result into `docker-compose.yml`, replacing the all-zero placeholder, and report it
+   back. `docker compose config` must then show a digest, not a floating tag.
+2. `cp .env.example .env`, generate the password with **`openssl rand -hex 32`** (not `base64` —
+   `/` and `+` break `DATABASE_URL` parsing), and put the same value in both `POSTGRES_PASSWORD`
+   and the password field of `DATABASE_URL`.
+3. `mkdir -p /mnt/data/timescaledb`, `docker compose up -d timescaledb`, then `docker compose ps`
+   and `docker compose logs timescaledb | tail`.
+4. **Confirm the data is on the data volume, not the root disk:**
+   `df -h /mnt/data && du -sh /mnt/data/timescaledb`.
+5. Run the migration runner from the host venv, then
+   `docker compose exec timescaledb psql -U waterway -d waterway -c 'select version, filename,
+   applied_at from schema_migrations order by version'` — expect three rows.
+6. **Tamper test.** Append a blank line to `migrations/0001_extensions.sql`, re-run the runner,
+   confirm it aborts naming that file and both checksums, then `git checkout -- migrations/`. A
+   guard that has never been seen refusing is not a guard. (Rehearsed off-instance against a
+   throwaway database: it aborts with exit 1 and prints both digests. Not yet seen on the real
+   data.)
+7. **Restart-recovery test — the point of this commit.** Start the scheduler, confirm a `job_runs`
+   row appears for the heartbeat. Stop the process for **longer than one 15-minute interval**.
+   Start it again. Confirm the job fires **once, promptly** — not once per missed slot, not never
+   — then paste `select job_name, status, started_at from job_runs order by started_at desc limit
+   10`. Configuration tests cannot prove this; only this can, and this commit already caught one
+   real bug that only this kind of test can see.
+8. **Failure-survives test.** Register a temporary job that inserts a row and then raises. Run it.
+   Confirm `job_runs` holds a `failed` row **with the message**, and that the row it inserted is
+   **gone** — the work rolled back, the record did not.
+9. `docker compose restart timescaledb`, then confirm the scheduler reconnects and the next
+   heartbeat still records a row.
+
+**Host connectivity for steps 5–9, and it is a deliberate temporary deviation.**
+`docker-compose.yml` publishes **no ports**, per `CLAUDE.md § 6`. The Phase 2 scheduler runs from a
+host venv, so it needs host reachability for now. Use an override file kept **outside the repo**,
+so it cannot be committed by accident and cannot outlive its reason:
+
+```yaml
+# /root/dws-local-ports.yml — TEMPORARY, Phase 2 verification only
+services:
+  timescaledb:
+    ports: ["127.0.0.1:5432:5432"]
+```
+
+Bring the stack up with `docker compose -f docker-compose.yml -f /root/dws-local-ports.yml up -d`.
+Delete it once the `worker` service is containerized; at that point `DATABASE_URL` becomes
+`timescaledb:5432` and nothing needs a published port.
+
+Then, in order: Phase 3 USGS ingest and backfill — the USGS client, the gauge seed list (**the
+human's, per `CLAUDE.md § 1`**), the backfill, and enabling TimescaleDB compression with the ratio
+**measured, not quoted**; that measurement is what justifies TimescaleDB over a managed database
+and it must be a number taken here. Phase 3 is also where the still-open **raw 15-minute readings
+vs. hourly aggregates** decision has to be made (see `§ Open questions`), and where the
+freshness-registry requirement in `CLAUDE.md § 12` first binds: no ingest client is complete until
+it registers its table.
 
 ---
 
 ## Housekeeping — open, non-blocking
 
+- **`apscheduler_jobs` must be EXCLUDED from dumps when backups land in Phase 11.** Restoring a
+  stale scheduler state is worse than restoring none: the rows carry `next_run_time` values from
+  whenever the dump was taken, and a job store full of long-past fire times interacts with
+  `coalesce` and misfire grace in ways nobody reasoned about. `pg_dump --exclude-table`.
+- **The scheduler runs from a host venv, not a container.** Containerizing it as the `worker`
+  service is a later commit, and it **will need its own restart-recovery verification** — being
+  inside a container with `restart: unless-stopped` changes the process lifetime this entire
+  design is about, and this commit has already demonstrated that the settings can all be correct
+  while the behaviour is not.
+- **Data-liveness checks are deferred to Phase 3 and are now a contract requirement there**
+  (`CLAUDE.md § 12`). The Phase 2 heartbeat checks job overdue-ness only. An empty freshness
+  registry was deliberately not built: it would report healthy because it checks nothing.
+- The heartbeat's first-ever run alerts about itself — it has no successful run on record yet, and
+  "never succeeded" is deliberately treated as overdue rather than as quiet. Expected once, on
+  first start; it goes quiet after the first success.
+- **`missed` rows are only reachable for jobs whose grace is shorter than their interval.** With
+  `coalesce=True` APScheduler evaluates only the last missed fire time, which is never more than
+  one interval old, so any job hitting the 60-second grace floor always catches up instead of
+  recording a miss. The heartbeat (900s interval, 450s grace) can produce both. An absence of
+  `missed` rows is not by itself evidence that nothing was missed.
+- `infra/terraform/terraform.tfstate` exists in the working tree. **Checked, and clean:** it is
+  untracked, correctly matched by `.gitignore:16` (`*.tfstate`), and `git log --all -- '*.tfstate'`
+  is empty, so it has never been committed. Noted only because Terraform state carries secrets in
+  plaintext and its presence next to a clean `git status` invites the assumption without the check.
 - AWS budget alert not yet configured. Blocks `terraform apply`.
 - Domain not purchased. Blocks Phase 10 only.
 - **State is local this commit.** No S3 backend, no state locking — that is explicitly out of

@@ -310,3 +310,75 @@ not the user-facing output.
   `Wants=dws-external-interface.service`) invoking the script with `--docker-user-only`, which
   never touches ufw. Reboot-persistence is verified by an actual reboot, not inferred from rule
   presence.
+
+---
+
+## 12. Orchestration conventions
+
+**Migrations**
+
+- `schema_migrations` is **bootstrapped by the runner**, idempotently, outside the numbered
+  sequence — the table that records applied migrations cannot itself be an applied migration.
+  Every other schema change is a numbered file. This bootstrap is the only DDL the runner issues
+  that is not backed by one.
+- **Checksums of all already-applied migrations are verified before any pending migration is
+  applied.** Not the pending ones — those have nothing to compare against. On mismatch the entire
+  run aborts, naming the file and both checksums, before the first change is made.
+- **One transaction per migration file, with the `schema_migrations` insert inside it.** Never
+  all-pending-in-one (a late failure rolls back files that had already succeeded), and never
+  commit-then-record (a crash in the window leaves a migration applied and unrecorded).
+- `-- migrate:no-transaction` is honoured **only as the literal first line**, and that path is
+  **knowingly non-atomic** — a crash between the statement and the record leaves the migration
+  applied and unrecorded. That is why it is opt-in per file rather than the default.
+- A pending migration numbered **below the highest applied version** is a hard failure, naming
+  both. It is neither applied out of order nor skipped.
+- There is **no re-runnable `schema.sql`**, and a test asserts none exists anywhere in the repo.
+- **Migrations never run on container start.** The runner is a CLI a human invokes; no Compose
+  `command`, `entrypoint`, or healthcheck references it, and a test asserts that.
+
+**Jobs**
+
+- **`@job` bookkeeping always uses a separate connection, committed before the work starts, and
+  always re-raises.** Sharing the work's session means a rollback in the work takes the failure
+  record with it — the failure that most needs a record is the one guaranteed not to have one.
+- `rows_written` means **rows written to the database**. `NULL` and `0` are distinct and both
+  meaningful, in the decorator and in the column (no `NOT NULL`, no `DEFAULT 0`).
+- `job_runs.status` is **constrained by the database**; the table is **append-only by trigger**,
+  with **`UPDATE` permitted** so a job can close the row it opened. A human making the one-off
+  correction the contract allows must explicitly disable the trigger.
+- Exactly one `@job` per scheduled unit, **never nested**, enforced at runtime by a `ContextVar`
+  that names both jobs when it fires.
+- **Missed runs are recorded by a scheduler event listener, never by the decorator** — a misfired
+  job never invokes the function, so the decorator never sees it.
+
+**Scheduling**
+
+- The **cadence table is the single source of truth for trigger timing and overdue thresholds.**
+  The heartbeat imports it and defines none of its own, and that is guarded behaviourally — by a
+  test that mutates an entry and asserts the verdict flips — not by grepping for literals.
+- `coalesce=True`, and `misfire_grace_time` **derived from the interval**, never the library
+  default of one second.
+- The job store is **persistent**, and **configuration tests cannot prove it works.** Jobs are
+  reconciled into it with `add`-if-absent / `modify`-if-present, **never
+  `add_job(replace_existing=True)`** — the latter recomputes `next_run_time` from now and
+  overwrites the persisted past-due value, so a restart after an outage silently discards the
+  missed run while every setting still reads correctly. Restart recovery is verified by stopping
+  a real process, not by a test.
+
+**Monitoring**
+
+- **"Last success" is the most recent `success` row's `finished_at`** — never the most recent row
+  of any status.
+- A job with no successful run on record is **overdue**, not quiet.
+- **No ingest client is complete until it registers its table in the heartbeat's freshness
+  registry.** Liveness is measured from the data (`MAX(ts)` on the ingested table), never from the
+  process. An empty registry is worse than none: it reports healthy because it checks nothing.
+- **Alert-delivery failures are logged and swallowed; they never fail the monitoring job.** This
+  is the only place in the orchestration layer where swallowing is correct, and it is commented as
+  such because it contradicts the `@job` decorator directly.
+
+**Infrastructure**
+
+- Container images are **pinned by digest, resolved on the machine that runs them.** A placeholder
+  digest in a committed file must be one that cannot resolve, so a missed step fails loudly rather
+  than falling back to a floating tag.

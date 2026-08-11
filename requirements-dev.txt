@@ -1,2 +1,11 @@
 pytest==8.3.4
 python-hcl2==8.1.2
+
+# Runtime dependencies are in requirements.txt and are also needed to run the test suite: the
+# orchestration tests import app/, and the integration tier talks to a real Postgres. Install both:
+#
+#   pip install -r requirements.txt -r requirements-dev.txt
+#
+# The integration tier needs DATABASE_URL pointing at a THROWAWAY database - tests/orchestration/
+# drops this project's tables between tests. Without it those tests skip with a stated reason
+# rather than passing silently.

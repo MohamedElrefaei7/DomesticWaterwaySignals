@@ -1,0 +1,80 @@
+# Inland Waterway Signals — the database, and only the database.
+#
+# CLAUDE.md § 6 fixes the final stack at five containers; `worker`, `api`, and `caddy` are later
+# commits and are deliberately absent here. This file defines exactly one service.
+#
+# Three things in here are load-bearing and easy to "tidy" into being wrong:
+#
+#   1. NO `ports:` KEY. CLAUDE.md § 6 marks this service internal-only. Publishing 5432 — even
+#      bound to 127.0.0.1 — puts the database on the host's network namespace, which is a
+#      different security posture from "reachable only over the compose network". Phase 2's
+#      scheduler runs from a host venv and therefore does need host reachability while it is being
+#      verified; that is handled by an override file kept OUTSIDE this repo (see the live
+#      verification steps in the commit report), not by adding a port here where it would outlive
+#      the reason for it.
+#
+#   2. NO `user:` KEY. The official Postgres entrypoint starts as root, chowns PGDATA to the
+#      postgres user, and only then drops privileges. Setting `user:` skips the chown, and initdb
+#      then fails against a root-owned bind mount with an error that reads like a bug in the image
+#      rather than like a configuration mistake here.
+#
+#   3. NO `command:` OR `entrypoint:` KEY, and in particular nothing that invokes the schema
+#      runner. CLAUDE.md § 3: schema changes never run on container start, because `restart:
+#      unless-stopped` would turn a crash loop into a schema-change loop. The runner is a CLI a
+#      human invokes. tests/orchestration/test_migration_ordering.py asserts this file's
+#      non-comment text never names it.
+
+services:
+  timescaledb:
+    # PINNED BY DIGEST — and the digest below is a PLACEHOLDER that must be replaced.
+    #
+    # CLAUDE.md § 5: every image tag is pinned and resolved *from the machine that runs it*, never
+    # from a developer laptop's cache and never from an agent's recollection. `latest` on a
+    # database image resolved to two different TimescaleDB versions three months apart on the
+    # prior project and cost a full session.
+    #
+    # Resolve it on the instance and paste the result here:
+    #   docker pull timescale/timescaledb:2.26.2-pg16
+    #   docker image inspect timescale/timescaledb:2.26.2-pg16 \
+    #     --format '{{index .RepoDigests 0}}'
+    # (or `docker buildx imagetools inspect timescale/timescaledb:2.26.2-pg16`)
+    #
+    # The all-zero digest below is deliberate: it is syntactically valid, so `docker compose
+    # config` parses, and it cannot possibly resolve, so `docker compose pull` fails loudly
+    # instead of silently falling back to a floating tag.
+    image: timescale/timescaledb:2.26.2-pg16@sha256:0000000000000000000000000000000000000000000000000000000000000000
+
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-waterway}
+      POSTGRES_USER: ${POSTGRES_USER:-waterway}
+      # `:?` makes an unset password a hard startup failure rather than a container that comes up
+      # with an empty one. The value lives in .env, which is gitignored; see .env.example.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is unset - copy .env.example to .env and fill it in}
+
+    volumes:
+      # The separate EBS data volume from Phase 1, mounted by UUID via fstab (CLAUDE.md § 5).
+      # Not a named Docker volume: a named volume lives under /var/lib/docker on the ROOT disk,
+      # which is exactly the disk this project went to the trouble of not storing data on.
+      - /mnt/data/timescaledb:/var/lib/postgresql/data
+
+    healthcheck:
+      # -U/-d are required: bare `pg_isready` checks with the wrong default user and reports a
+      # server that is up and rejecting us as healthy.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-waterway} -d ${POSTGRES_DB:-waterway}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+    # Postgres uses shared memory for parallel query and hash joins; Docker's 64MB default is far
+    # below what a 16-core-adjacent planner will try to take, and the failure is a runtime
+    # "could not resize shared memory segment" during a large query, not a startup error.
+    shm_size: 256mb
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
