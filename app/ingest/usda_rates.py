@@ -7,20 +7,33 @@ this is the series those claims are checked against.
 Shaped like usgs_daily_ingest.py on purpose - parse, upsert, resume from the data, one @job - so a
 reader who has found their way around one ingest client finds this one where they expect it.
 
+THE HORIZON IS A PROPERTY OF THE DATASET, NOT OF THE RECORD
+-----------------------------------------------------------
+USDA publishes THREE datasets, one per horizon, with identical field lists. It does not publish
+one dataset with a horizon column - which is what Phase 4 assumed and what migration 0016
+corrected against a measurement.
+
+So `horizon` is assigned by WHICH DATASET a row came from, through HORIZON_BY_DATASET_KEY below,
+and is never read out of a record. The mapping is total in both directions and a test asserts it,
+because the failure mode of an incomplete one is a fourth rates dataset quietly defaulting to
+`nearby` and mixing two different facts under one key - a series that is wrong in a way no
+aggregate reveals.
+
 THREE THINGS THIS MODULE REFUSES TO DO
 --------------------------------------
-1. CONVERT THE UNIT. `pct_of_tariff` is stored exactly as published: 112.5 stays 112.5, never
-   1.125 and never 113. Dividing by 100 in ingest is a modelling decision in the wrong layer, and
-   its symptom is a chart that looks fine and a threshold two orders of magnitude out.
+1. CONVERT THE UNIT. `pct_of_tariff` is stored exactly as published: `582.1428` stays 582.1428,
+   never 5.821428 and never 582.14. Dividing by 100 or rounding in ingest is a modelling decision
+   in the wrong layer, and its symptom is a chart that looks fine and a threshold two orders of
+   magnitude out.
 
 2. TREAT A MISSING FIELD AS AN ABSENT VALUE. A record without the rate field raises naming the
-   fields it does carry. The field names below are PROVISIONAL - the datasets are unresolved
-   (migration 0013) - and a mapping that silently produced NULLs would be a client reporting
-   success over an empty table.
+   fields it does carry. That tripwire is what made this module's correction cheap: every one of
+   Phase 4's assumed field names was wrong, and `required_field` meant that arrived as a loud
+   failure on the first record rather than as a table of NULLs.
 
-3. GUESS A HORIZON. A published label this module does not recognise raises rather than being
-   filed under `nearby`. Nearby and three-month-forward rates move differently, and mixing them
-   under one key produces a series that is wrong in a way no aggregate reveals.
+3. DERIVE `rate_month` INTO AN OFFSET. The forward datasets publish the calendar month the quoted
+   rate applies to. It is stored as that month. Turning it into "months ahead" is a derivation,
+   and derivations belong downstream of ingest.
 """
 
 from __future__ import annotations
@@ -35,6 +48,7 @@ from app.ingest import socrata_client
 from app.ingest.socrata_client import (
     MalformedResponseError,
     SocrataClient,
+    SocrataError,
     parse_period_label,
     required_field,
 )
@@ -44,38 +58,107 @@ logger = logging.getLogger(__name__)
 
 JOB_NAME = "usda_rates_ingest"
 TABLE = "barge_rates"
-DATASET_KEY = "barge_rates"
 
-# THE SOCRATA COLUMN NAMES, AND THEY ARE PROVISIONAL.
+# ---------------------------------------------------------------------------------------------
+# THE ONE PLACE A HORIZON IS ASSIGNED.
+# ---------------------------------------------------------------------------------------------
 #
-# The dataset is unresolved (migration 0013 seeds a NULL id), so these names come from the shape
-# the fixtures were written to and NOT from the live catalog. They are collected here, in one
-# dict, precisely so that confirming them at live verification step 3 is one edit rather than a
-# search - and every read of them goes through `required_field`, which raises naming the fields a
-# record actually has. A wrong name here fails loudly on the first record; it never writes NULLs.
+# Measured 2026-08-14: three datasets, identical field lists, ~8,260 rows each spanning
+# 2004-01-07 to 2026-08-11.
+#
+#   deqi-uken  barge_rates_nearby   nearby
+#   svms-9yya  barge_rates_1month   1_month
+#   uuhv-5etw  barge_rates_3month   3_month
+#
+# The ids themselves live in `usda_datasets` (migration 0016), not here: an id is a human-resolved
+# fact about the world, and this is a mapping between two of this project's own names.
+#
+# ONE PLACE, and tests/ingest/test_usda_field_maps.py asserts the mapping is TOTAL AND INJECTIVE
+# against both the dataset keys and 0014's horizon CHECK. A second copy of this - a per-call
+# default, a `.get(key, "nearby")`, a branch in the backfill - is how a fourth rates dataset would
+# land silently in an existing series.
+HORIZON_BY_DATASET_KEY: dict[str, str] = {
+    "barge_rates_nearby": "nearby",
+    "barge_rates_1month": "1_month",
+    "barge_rates_3month": "3_month",
+}
+
+# The order the weekly job fetches them in. A tuple rather than a set so the log reads the same way
+# every run.
+DATASET_KEYS: tuple[str, ...] = tuple(HORIZON_BY_DATASET_KEY)
+
+# The horizon vocabulary, taken FROM the mapping rather than restated beside it. Restating it is
+# how the two drift, and the drift is invisible: both lists look right in isolation.
+HORIZONS: frozenset[str] = frozenset(HORIZON_BY_DATASET_KEY.values())
+
+# The two datasets that publish `rate_month`. Derived from the mapping, for the same reason.
+FORWARD_DATASET_KEYS: frozenset[str] = frozenset(
+    key for key, horizon in HORIZON_BY_DATASET_KEY.items() if horizon != "nearby"
+)
+
+
+class UnknownRatesDatasetError(SocrataError):
+    """A dataset key with no horizon. Raised rather than defaulted.
+
+    Its own class because the fix is specific: measure the new dataset, decide its horizon
+    deliberately, and extend both HORIZON_BY_DATASET_KEY and 0014's CHECK in a migration. A
+    ValueError here would read like a bad argument rather than like a missing decision.
+    """
+
+
+# ---------------------------------------------------------------------------------------------
+# THE SOCRATA FIELD NAMES, MEASURED 2026-08-14 AGAINST THE LIVE API.
+# ---------------------------------------------------------------------------------------------
+#
+# A verbatim record from deqi-uken:
+#
+#   {"date":"2026-08-11T00:00:00.000","week":"32","month":"8","year":"2026",
+#    "location":"Cairo-Memphis","rate":"582.1428"}
+#
+# and from svms-9yya, which adds one field:
+#
+#   {"date":"2026-08-11T00:00:00.000","week":"32","month":"8","year":"2026",
+#    "location":"Twin Cities","rate_month":"9","rate":"925"}
+#
+# EVERY NAME PHASE 4 ASSUMED WAS WRONG. `segment`, `week_ending`, `horizon` and
+# `rate_pct_of_tariff` were all built from the shape the fixtures were written to, which Phase 4
+# disclosed in writing. Every read went through `required_field`, so the wrongness arrived as an
+# exception naming the fields a record actually carries.
+#
+# TWO COLUMN NAMES DELIBERATELY DIVERGE FROM THE SOURCE, and both are arguments, not oversights:
+#
+#   date -> week_ending    The source calls it `date`. It is the week-ending LABEL, and
+#                          `week_ending` says what the value MEANS where `date` says only what
+#                          type it is. "Rename the column to match the source" is the
+#                          reasonable-looking tidy this comment exists to answer: it would trade a
+#                          name that carries a fact for one that carries none, and every consumer
+#                          would then have to know that `date` means the end of the week rather
+#                          than a day of observation.
+#
+#   rate -> pct_of_tariff  Same argument. The published unit is percent of tariff (0014), the
+#                          value is stored unconverted and unrounded, and `rate` alone would let a
+#                          reader assume dollars.
+#
+# WHAT IS DELIBERATELY NOT MAPPED: `week`, `month` and `year`. All three are derivable from `date`,
+# and storing them would be three more copies of one fact that can disagree with it after a
+# revision. The project has a rule about two records of the same thing; this is that rule at
+# column scale.
 FIELDS = {
-    "segment": "segment",
-    "week_ending": "week_ending",
-    "horizon": "horizon",
-    "pct_of_tariff": "rate_pct_of_tariff",
+    "location": "location",
+    "week_ending": "date",
+    "pct_of_tariff": "rate",
+    "rate_month": "rate_month",
 }
 
 # The column paging is ordered by. Every Socrata query in this project carries one (§ 16).
-ORDER_COLUMN = FIELDS["week_ending"]
-
-# PUBLISHED LABEL -> THE KEY VOCABULARY 0014's CHECK CONSTRAINT ENFORCES.
 #
-# Normalizing here is not the unit conversion refused above: the horizon is part of the primary
-# key, and a key vocabulary has to be closed for the constraint to mean anything. What matters is
-# that the mapping is EXPLICIT and CLOSED - an unrecognised label raises. Defaulting to 'nearby'
-# would be a silent misfiling of the exact distinction the key exists to preserve.
-HORIZON_LABELS = {
-    "nearby": "nearby",
-    "1 month forward": "1_month",
-    "1-month forward": "1_month",
-    "3 month forward": "3_month",
-    "3-month forward": "3_month",
-}
+# NOTE FOR LIVE VERIFICATION: `date` is also a SoQL type name. If the service rejects it as a bare
+# identifier in `$order` or `$where`, the rejection arrives as an ERROR DOCUMENT and
+# socrata_client.parse_page raises SocrataResponseError carrying Socrata's own message - loudly,
+# not as an empty page. The fix would be to quote it (`date`) in one place, here and in
+# since_clause. Left unquoted because the measured queries against these datasets used bare
+# identifiers, and this project does not guess syntax it has not seen.
+ORDER_COLUMN = FIELDS["week_ending"]
 
 # How far back the weekly poll reaches beyond the newest week it already holds.
 #
@@ -92,48 +175,51 @@ COLD_START_WEEKS = 12
 BATCH_SIZE = 500
 
 
+def horizon_for(dataset_key: str) -> str:
+    """The horizon this dataset publishes, or raise. THE ONLY WAY A HORIZON IS OBTAINED."""
+    horizon = HORIZON_BY_DATASET_KEY.get(dataset_key)
+    if horizon is None:
+        raise UnknownRatesDatasetError(
+            f"no horizon mapped for rates dataset key {dataset_key!r}. Known keys: "
+            f"{sorted(HORIZON_BY_DATASET_KEY)}.\n"
+            f"  NOT DEFAULTED TO 'nearby'. USDA publishes one dataset per horizon, so an "
+            f"unmapped key is a dataset nobody has decided the meaning of - and filing its rows "
+            f"under an existing horizon mixes two different facts under one primary key, which "
+            f"produces a series that is wrong in a way no aggregate reveals.\n"
+            f"  A fourth rates dataset needs its horizon decided deliberately here AND admitted "
+            f"by barge_rates_horizon_known in a new migration."
+        )
+    return horizon
+
+
 @dataclass(frozen=True)
 class BargeRate:
     """One published weekly rate.
 
-    `week_ending` is a CALENDAR DATE carrying no timezone, and `pct_of_tariff` is a Decimal
-    carrying the published digits. Both types are chosen to make the two refusals above
-    structural: there is no timezone to apply and no float to round.
+    `week_ending` is a CALENDAR DATE carrying no timezone, `pct_of_tariff` is a Decimal carrying
+    the published digits, and `rate_month` is an int or None. Every type is chosen to make the
+    refusals structural: there is no timezone to apply, no float to round, and no offset to
+    compute.
     """
 
-    segment: str
+    location: str
     week_ending: date
     horizon: str
     pct_of_tariff: Decimal
-
-
-def parse_horizon(raw) -> str:
-    """A published horizon label into the key vocabulary, or raise."""
-    if not isinstance(raw, str) or not raw.strip():
-        raise MalformedResponseError(
-            f"horizon is {raw!r}, expected a published label. A rate with no horizon cannot be "
-            f"keyed - the same week carries a nearby and two forward rates, and they are "
-            f"different facts (migration 0014)."
-        )
-
-    horizon = HORIZON_LABELS.get(raw.strip().lower())
-    if horizon is None:
-        raise MalformedResponseError(
-            f"unrecognised horizon label {raw!r}. Known labels: {sorted(HORIZON_LABELS)}.\n"
-            f"  NOT defaulted to 'nearby': nearby and forward rates move differently, and filing "
-            f"one under the other produces a series that is wrong in a way no aggregate reveals.\n"
-            f"  If USDA publishes a label this project has not seen, add it here deliberately - "
-            f"and if it is a genuinely new horizon, it needs a migration extending 0014's CHECK."
-        )
-    return horizon
+    # NONE ON NEARBY ROWS, AND THAT NONE IS CORRECT RATHER THAN MISSING. The nearby dataset
+    # publishes no such field; synthesizing one from the publication date would invent a quoted
+    # month USDA never quoted (migration 0016's rate_month/horizon CHECK is the same guard at the
+    # database).
+    rate_month: int | None
 
 
 def parse_rate(raw) -> Decimal:
     """The published percent-of-tariff, EXACTLY as published.
 
-    Decimal via str, never float: `float('112.5')` is fine but `float('1050.10')` is not exactly
-    1050.10, and a numeric column fed a float inherits the binary artefact. The published digits
-    are the fact.
+    Decimal via str, never float: `float('112.5')` is fine but `float('582.1428')` is not exactly
+    582.1428, and a numeric column fed a float inherits the binary artefact. The published digits
+    are the fact - and the measured data really does carry four decimal places, so this is not a
+    theoretical precision argument.
     """
     if raw is None or (isinstance(raw, str) and not raw.strip()):
         raise MalformedResponseError(
@@ -156,31 +242,78 @@ def parse_rate(raw) -> Decimal:
     return value
 
 
-def rate_from(record: dict) -> BargeRate:
-    """One Socrata record into a BargeRate, or raise naming what the record carries."""
-    context = "barge rate record"
+def parse_rate_month(raw) -> int:
+    """The published calendar month, 1-12. NOT an offset from anything.
+
+    The samples show `rate_month` 9 and 11 against a publication month of 8 - so this is not
+    "months ahead" wearing a month's clothes, and subtracting the publication month here would
+    bake a derivation into ingest that the feature layer is the right place to make.
+    """
+    try:
+        month = int(Decimal(str(raw).strip()))
+    except (InvalidOperation, ValueError, AttributeError) as exc:
+        raise MalformedResponseError(
+            f"rate_month {raw!r} is not an integer: {exc}. Not defaulted and not dropped - a "
+            f"forward rate whose quoted month cannot be read is not a nearby rate."
+        ) from exc
+
+    if not 1 <= month <= 12:
+        raise MalformedResponseError(
+            f"rate_month {raw!r} is not a calendar month (1-12). If USDA has started publishing "
+            f"an OFFSET in this field rather than a month, that is a measurement to take and a "
+            f"deliberate change - not a value to coerce."
+        )
+    return month
+
+
+def rate_from(record: dict, *, dataset_key: str) -> BargeRate:
+    """One Socrata record into a BargeRate, or raise naming what the record carries.
+
+    `dataset_key` is REQUIRED and keyword-only. That is the horizon's only source: there is no
+    signature of this function that lets a caller obtain a rate without stating which dataset it
+    came from, which is what keeps decision 1 structural rather than conventional.
+    """
+    context = f"barge rate record ({dataset_key})"
+    horizon = horizon_for(dataset_key)
+
+    if dataset_key in FORWARD_DATASET_KEYS:
+        # REQUIRED, not `.get`. A forward dataset that stopped publishing `rate_month` - or that
+        # renamed it - would otherwise write NULLs indistinguishable from nearby's legitimate
+        # ones, in the one column where NULL is a normal value. That is exactly the shape of
+        # failure `required_field` exists for.
+        rate_month = parse_rate_month(
+            required_field(record, FIELDS["rate_month"], context=context)
+        )
+    else:
+        # NOT SYNTHESIZED. The nearby dataset publishes no quoted month, and None is the complete
+        # and correct answer.
+        rate_month = None
+
     return BargeRate(
-        segment=str(required_field(record, FIELDS["segment"], context=context)).strip(),
+        location=str(required_field(record, FIELDS["location"], context=context)).strip(),
         week_ending=parse_period_label(
             required_field(record, FIELDS["week_ending"], context=context), field="week_ending"
         ),
-        horizon=parse_horizon(required_field(record, FIELDS["horizon"], context=context)),
+        horizon=horizon,
         pct_of_tariff=parse_rate(
             required_field(record, FIELDS["pct_of_tariff"], context=context)
         ),
+        rate_month=rate_month,
     )
 
 
-def parse_rates(records) -> list[BargeRate]:
-    return [rate_from(record) for record in records]
+def parse_rates(records, *, dataset_key: str) -> list[BargeRate]:
+    return [rate_from(record, dataset_key=dataset_key) for record in records]
 
 
 UPSERT_SQL = """
-INSERT INTO barge_rates (segment, week_ending, horizon, pct_of_tariff)
+INSERT INTO barge_rates (location, week_ending, horizon, pct_of_tariff, rate_month)
 VALUES {placeholders}
-ON CONFLICT (segment, week_ending, horizon) DO UPDATE
-    SET pct_of_tariff = EXCLUDED.pct_of_tariff
-    WHERE barge_rates.pct_of_tariff IS DISTINCT FROM EXCLUDED.pct_of_tariff
+ON CONFLICT (location, week_ending, horizon) DO UPDATE
+    SET pct_of_tariff = EXCLUDED.pct_of_tariff,
+        rate_month = EXCLUDED.rate_month
+    WHERE (barge_rates.pct_of_tariff, barge_rates.rate_month)
+       IS DISTINCT FROM (EXCLUDED.pct_of_tariff, EXCLUDED.rate_month)
 RETURNING 1
 """
 
@@ -193,7 +326,7 @@ def _deduplicate(rates):
     """
     by_key = {}
     for rate in rates:
-        by_key[(rate.segment, rate.week_ending, rate.horizon)] = rate
+        by_key[(rate.location, rate.week_ending, rate.horizon)] = rate
     return list(by_key.values())
 
 
@@ -214,19 +347,37 @@ def upsert_rates(conn, rates) -> int:
     written = 0
     for start in range(0, len(deduplicated), BATCH_SIZE):
         batch = deduplicated[start : start + BATCH_SIZE]
-        placeholders = ", ".join(["(%s, %s, %s, %s)"] * len(batch))
+        placeholders = ", ".join(["(%s, %s, %s, %s, %s)"] * len(batch))
         params: list = []
         for rate in batch:
-            params.extend([rate.segment, rate.week_ending, rate.horizon, rate.pct_of_tariff])
+            params.extend(
+                [
+                    rate.location,
+                    rate.week_ending,
+                    rate.horizon,
+                    rate.pct_of_tariff,
+                    rate.rate_month,
+                ]
+            )
         cursor = conn.execute(UPSERT_SQL.format(placeholders=placeholders), params)
         written += len(cursor.fetchall())
 
     return written
 
 
-def latest_week(conn) -> date | None:
-    """MAX(week_ending), or None when the table is empty. The resume point, from the data."""
-    row = conn.execute(f"SELECT max(week_ending) FROM {TABLE}").fetchone()
+def latest_week(conn, horizon: str | None = None) -> date | None:
+    """MAX(week_ending), or None when there is nothing. The resume point, from the data.
+
+    PER HORIZON when one is given, because the three datasets are three independent publications:
+    a corridor-wide MAX would let the freshest of the three decide where the other two resume,
+    and a dataset that fell a month behind would never be asked for the weeks it is missing.
+    """
+    if horizon is None:
+        row = conn.execute(f"SELECT max(week_ending) FROM {TABLE}").fetchone()
+    else:
+        row = conn.execute(
+            f"SELECT max(week_ending) FROM {TABLE} WHERE horizon = %s", (horizon,)
+        ).fetchone()
     return row[0] if row else None
 
 
@@ -240,38 +391,35 @@ def since_clause(start: date) -> str:
     return f"{FIELDS['week_ending']} >= '{start.isoformat()}T00:00:00.000'"
 
 
-def ingest(conn, client: SocrataClient | None = None, today: date | None = None) -> int:
-    """Fetch and write recent rates. Returns rows actually written.
+def ingest_dataset(
+    conn, dataset_key: str, client: SocrataClient, today: date
+) -> int:
+    """Fetch and write recent rates for ONE of the three horizon datasets."""
+    horizon = horizon_for(dataset_key)
+    dataset = socrata_client.resolve_dataset(conn, dataset_key)
 
-    Resumes from MAX(week_ending) in the data minus the revision overlap - never a checkpoint
-    (CLAUDE.md § 14).
-    """
-    client = SocrataClient() if client is None else client
-    today = datetime.now(timezone.utc).date() if today is None else today
-
-    dataset = socrata_client.resolve_dataset(conn, DATASET_KEY)
-
-    newest = latest_week(conn)
+    newest = latest_week(conn, horizon)
     if newest is None:
         start = today - timedelta(weeks=COLD_START_WEEKS)
         logger.warning(
-            "%s is EMPTY; polling only the last %d weeks. This job does not backfill - run "
-            "`python3 -m app.ingest.usda_backfill --dataset %s` for history.",
+            "%s holds no %s rows; polling only the last %d weeks. This job does not backfill - "
+            "run `python3 -m app.ingest.usda_backfill --dataset %s` for history.",
             TABLE,
+            horizon,
             COLD_START_WEEKS,
-            DATASET_KEY,
+            dataset_key,
         )
     else:
         start = newest - timedelta(weeks=OVERLAP_WEEKS)
 
     records = client.fetch_all(dataset, order=ORDER_COLUMN, where=since_clause(start))
-    rates = parse_rates(records)
+    rates = parse_rates(records, dataset_key=dataset_key)
     written = upsert_rates(conn, rates)
-    conn.commit()
 
     logger.info(
-        "%s: %d record(s) received from %s, %d row(s) written",
+        "%s/%s: %d record(s) received from %s, %d row(s) written",
         TABLE,
+        horizon,
         len(records),
         start.isoformat(),
         written,
@@ -279,15 +427,44 @@ def ingest(conn, client: SocrataClient | None = None, today: date | None = None)
     return written
 
 
+def ingest(conn, client: SocrataClient | None = None, today: date | None = None) -> int:
+    """Fetch and write recent rates from ALL THREE datasets. Returns rows actually written.
+
+    Resumes from MAX(week_ending) per horizon in the data minus the revision overlap - never a
+    checkpoint (CLAUDE.md § 14).
+
+    THREE DATASETS IN ONE SCHEDULED UNIT, AND THAT IS NOT THE THING CLAUDE.md § 4 FORBIDS. The
+    rule is one @job per scheduled unit, never nested; this is one scheduled unit. The three
+    horizons are one logical publication on one weekly schedule, `rows_written` is meaningful
+    summed across them, and a reader asking "did the rates land this week" is asking one question.
+    Splitting them into three jobs would produce three job_runs rows nobody reads separately and
+    three heartbeat entries for one table.
+
+    That is the opposite case from rates-versus-movements, which ARE separate jobs: those are two
+    independent sources, and one job over both would produce a status that is the AND of two
+    things with a heartbeat unable to say which went quiet.
+    """
+    client = SocrataClient() if client is None else client
+    today = datetime.now(timezone.utc).date() if today is None else today
+
+    written = sum(
+        ingest_dataset(conn, dataset_key, client, today) for dataset_key in DATASET_KEYS
+    )
+    conn.commit()
+
+    logger.info("%s: %d row(s) written across %d dataset(s)", TABLE, written, len(DATASET_KEYS))
+    return written
+
+
 @job(JOB_NAME)
 def usda_rates_ingest_job(url: str | None = None, client=None, today: date | None = None) -> int:
     """The scheduled unit. Returns rows written, which @job records as rows_written.
 
-    SEPARATE FROM THE MOVEMENTS JOB, not one job fetching both datasets. CLAUDE.md § 4 requires
-    one @job per scheduled unit, and the operational reason is sharper than the rule: a failure
-    fetching movements must not mark rates as failed. Two datasets in one job produce one
-    job_runs row whose status is the AND of two independent things, and the heartbeat then cannot
-    say which source went quiet.
+    SEPARATE FROM THE MOVEMENTS JOB, not one job fetching both sources. CLAUDE.md § 4 requires one
+    @job per scheduled unit, and the operational reason is sharper than the rule: a failure
+    fetching movements must not mark rates as failed. Two SOURCES in one job produce one job_runs
+    row whose status is the AND of two independent things, and the heartbeat then cannot say which
+    one went quiet. The three rates datasets are not two sources - see ingest().
     """
     with db.connection(url) as conn:
         return ingest(conn, client=client, today=today)

@@ -177,6 +177,15 @@ CADENCES: tuple[Cadence, ...] = (
         # no fresher answer partway through, and polling daily would make seven requests for one
         # row and write nothing on six of them.
         #
+        # ONE ENTRY COVERING THREE DATASETS, and that is one scheduled unit rather than a
+        # violation of the one-@job rule. USDA publishes the nearby, 1-month and 3-month rates as
+        # three sibling datasets (migration 0016) on ONE schedule, into ONE table, where
+        # `rows_written` is meaningful summed across them and "did the rates land this week" is
+        # one question. Three cadence entries would produce three job_runs rows nobody reads
+        # apart and three heartbeat entries for a single table.
+        #
+        # The MOVEMENTS entry below is separate for the opposite reason: it is a different source.
+        #
         # The poll's own eight-week trailing window (app/ingest/usda_rates.py, OVERLAP_WEEKS) is
         # what catches USDA's revisions, not frequency - the same relationship the USGS entries
         # have with their overlaps.
@@ -194,11 +203,15 @@ CADENCES: tuple[Cadence, ...] = (
         job_name="usda_movements_ingest",
         # Weekly, same publication cadence and same reasoning as the rates job.
         #
-        # A SEPARATE ENTRY RATHER THAN ONE JOB FETCHING BOTH DATASETS. CLAUDE.md § 4 requires one
+        # A SEPARATE ENTRY RATHER THAN ONE JOB FETCHING BOTH SOURCES. CLAUDE.md § 4 requires one
         # @job per scheduled unit, and the operational reason is sharper than the rule: one job
-        # over two datasets produces one job_runs row whose status is the AND of two independent
-        # sources, so a movements outage would mark rates failed and the heartbeat could not say
+        # over two SOURCES produces one job_runs row whose status is the AND of two independent
+        # things, so a movements outage would mark rates failed and the heartbeat could not say
         # which one went quiet.
+        #
+        # The distinction against the rates entry's three datasets: those are three publications
+        # of ONE fact into one table, this is a different fact from a different dataset into a
+        # different table, with its own freshness entry.
         interval=timedelta(seconds=604800),
         overdue_after=timedelta(days=14),
     ),

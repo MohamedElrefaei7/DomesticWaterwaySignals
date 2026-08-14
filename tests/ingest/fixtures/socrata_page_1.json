@@ -1,26 +1,29 @@
 [
   {
-    "week_ending": "2021-01-02T00:00:00.000",
-    "lock_id": "Lock 27",
-    "grain_type": "Corn",
-    "direction": "Down",
-    "barges": "41",
-    "tons": "61500"
+    "date": "2026-08-08T00:00:00.000",
+    "week": "31",
+    "month": "8",
+    "year": "2026",
+    "commodity": "Corn",
+    "lock": "IL La Grange",
+    "tons": "136400"
   },
   {
-    "week_ending": "2021-01-02T00:00:00.000",
-    "lock_id": "Lock 27",
-    "grain_type": "Soybeans",
-    "direction": "Down",
-    "barges": "18",
+    "date": "2026-08-08T00:00:00.000",
+    "week": "31",
+    "month": "8",
+    "year": "2026",
+    "commodity": "Soybeans",
+    "lock": "MS Locks 27",
     "tons": "27000"
   },
   {
-    "week_ending": "2021-01-09T00:00:00.000",
-    "lock_id": "Lock 27",
-    "grain_type": "Corn",
-    "direction": "Down",
-    "barges": "0",
+    "date": "2026-08-01T00:00:00.000",
+    "week": "30",
+    "month": "8",
+    "year": "2026",
+    "commodity": "Corn",
+    "lock": "MS Locks 27",
     "tons": "0"
   }
 ]

@@ -615,3 +615,27 @@ pages. Every bullet describes a failure that reports success.
   neighbouring table.** Phase 3's own compression measurement concluded that at ~290k rows
   Postgres alone would have been adequate; a weekly table of ten thousand rows does not become a
   hypertable because the table beside it is one.
+- **Where a dimension is split across sibling datasets rather than carried as a column, the
+  dimension's value is assigned per dataset from a single total mapping, never inferred from record
+  content.** USDA publishes the three rate horizons as three datasets with identical field lists,
+  not as one dataset with a horizon column. A mapping that is merely sufficient — covering today's
+  keys, defaulting the rest — lets a fourth sibling dataset land silently in an existing series,
+  writing two different facts onto one primary key. Assert the mapping is total in both directions;
+  a new dataset must fail loudly rather than default.
+- **Source vocabularies are stored verbatim, including inconsistencies, and guarded with a `CHECK`
+  that is a tripwire for unseen values — never normalized on ingest.** USDA publishes `MS Locks 27`
+  beside `MS Lock 15`; the plural is stable and it is stored. A normalization step is where the
+  join breaks the week a value arrives that the mapping does not cover, and the failure surfaces as
+  **missing weeks** rather than as an unmapped value — a shape that reads like a source problem and
+  gets investigated as one. The `CHECK` is not the vocabulary: when it fires, measure the new value
+  and add it in a new migration, never drop the constraint and never bend the arriving value.
+- **A column that would always be NULL is not created. A field the source does not publish is
+  recorded as absent in the log, not as an empty column.** An always-NULL column looks like data,
+  and every query filtering on it returns nothing forever with nothing to say why. If the value is
+  wanted later it comes from whatever source actually publishes it, as its own commit with its own
+  measurement.
+- **Row counts measured at seed time are stored so a backfill can be checked against them; landing
+  fewer rows than the source reported is a truncation signal.** The count goes stale in the safe
+  direction — these sources only grow — so it is a floor, and comparing against a floor is the
+  cheapest check that the pager did not stop early. Compare **records received**, not rows written:
+  rows written counts only what changed, so a correct rerun writes nothing.

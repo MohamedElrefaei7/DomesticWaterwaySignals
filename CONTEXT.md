@@ -4,7 +4,139 @@ This is the **log**: current state, decisions as they are made, and `§ Up Next`
 live in `CLAUDE.md`. If something here hardens into an invariant, move it there and note the move.
 
 **Last updated:** 2026-08-14 (Phase 3 VERIFIED ON THE INSTANCE and written back; Phase 4 USDA
-ingest written offline)
+ingest written offline, then CORRECTED against the live USDA API — see the section directly below)
+
+---
+
+## Phase 4 correction — the real USDA identifiers and field maps, measured 2026-08-14
+
+**THE DATASET IDENTIFIERS ARE RESOLVED. EVERY FIELD NAME PHASE 4 ASSUMED WAS WRONG.** Migration
+`0016` lands the measured ids, bounds, and row counts, and corrects the two table schemas to the
+shape USDA actually publishes. Nothing below has run against the live API yet — the identifiers and
+counts are the human's measurement; the ingest against them is live verification's job.
+
+### What was measured, on 2026-08-14
+
+| Key | Dataset ID | Rows | Range | Fields |
+|---|---|---|---|---|
+| `barge_rates_nearby` | `deqi-uken` | 8,260 | 2004-01-07 → 2026-08-11 | `date`, `week`, `month`, `year`, `location`, `rate` |
+| `barge_rates_1month` | `svms-9yya` | 8,260 | 2004-01-07 → 2026-08-11 | same, plus `rate_month` |
+| `barge_rates_3month` | `uuhv-5etw` | 8,260 | 2004-01-07 → 2026-08-11 | same, plus `rate_month` |
+| `lock_movements` | `n4pw-9ygw` | 26,144 | 2003-01-04 → 2026-08-08 | `date`, `week`, `month`, `year`, `commodity`, `lock`, `tons` |
+| `cost_indicators` | `8uye-ieij` | not measured | not measured | not measured — seeded, not fetched |
+
+**The `required_field` tripwire is what made this correction cheap.** Phase 4 disclosed in writing
+that `usda_rates.FIELDS` and `usda_movements.FIELDS` came from the shape the fixtures were written
+to rather than from USDA, and routed every read through `required_field`. So all nine wrong names
+(`segment`, `week_ending`, `horizon`, `rate_pct_of_tariff`, `lock_id`, `grain_type`, `direction`,
+`barges`, and the `barges`/`tons` pairing) were a field map and a migration, not an investigation.
+Had the reads used `.get`, this would have been a backfill that reported success over a table of
+NULLs — `CLAUDE.md § 2`, theme 1, exactly as written.
+
+### The three structural findings
+
+1. **The three horizons are THREE DATASETS, not a column.** `horizon` stays in the rates primary
+   key — 0014's reasoning was right — but its value is assigned by which dataset a row came from,
+   through one total mapping (`usda_rates.HORIZON_BY_DATASET_KEY`), and is never read out of a
+   record. A test asserts the mapping is total and injective, so a fourth rates dataset fails
+   loudly rather than defaulting into an existing series.
+2. **Movements publishes TONS ONLY — no barge count and no direction.** The dataset is
+   "Downbound Barge Grain Movements (Tons)": downbound by construction, so there is no direction
+   dimension to key on, and no barge count is published at all. Both columns are dropped. **A barge
+   count, if it is ever wanted, is a DIFFERENT dataset and a separate commit with its own
+   measurement** — not a NULL column held open as a placeholder. New key:
+   `(lock, week_ending, commodity)`.
+3. **`rate_month` is a published calendar month, stored nullable, and is not an offset.** The
+   forward datasets quote month 9 and 11 against a publication month of 8. Nearby rows have no such
+   field and store NULL, which is correct rather than missing; a database `CHECK` enforces the
+   pairing in both directions.
+
+### The two vocabularies, verbatim
+
+**Locks** (all seven measured, with counts): `AK Lock 1` (4,928), `IL La Grange` (2,840),
+`MS Lock 15` (2,840), `MS Lock 25` (2,840), `MS Lock 26` (2,840), `MS Locks 27` (4,928),
+`OH Olmsted` (4,928). **Note `MS Locks 27` — plural — beside three singular siblings.** That
+inconsistency is USDA's, it is stable, and it is stored exactly as published. Normalizing it is the
+tidy that breaks the join as *missing weeks* for the joint-largest lock in the dataset.
+
+**Locations** (seeded from the handoff): Twin Cities, Mid-Mississippi, Illinois River, St. Louis,
+Cincinnati, Lower Ohio, Cairo-Memphis. **ONLY `Cairo-Memphis` AND `Twin Cities` ARE MEASURED** —
+they appear verbatim in captured records. The other five are unconfirmed spellings, and **live
+verification step 2 confirms all seven before any backfill runs. Where the API disagrees, the API
+wins and the correction lands in `0017`.**
+
+Both vocabularies carry a `CHECK` that is a **tripwire, not a vocabulary**: an unseen value is a
+loud insert failure, and the fix is to measure it and add it in a new migration — never to drop the
+constraint.
+
+### Decisions worth reading before changing anything here
+
+- **`0014` and `0015` were EMPTY when altered.** No ingest had ever run — there was no resolved
+  dataset id to run one against. So `0016`'s renames and drops are ordinary `ALTER`s, not `§ 3`
+  archival operations, and **there is no archive table to go looking for.** Stated in the migration
+  itself for the same reason.
+- **`0013`–`0015` are not edited.** The checksum guard would refuse, but that is not the reason: a
+  migration records what was believed when it was written. Same argument `0011` makes about `0008`.
+- **The `barge_rates` dataset key was RENAMED to `barge_rates_nearby` by `UPDATE`, not replaced.**
+  This project does not delete rows (`§ 1`), and the nearby dataset is the direct successor of what
+  the old key meant.
+- **`source_row_count` is stored, and it will go stale.** That is fine and is the point: these
+  datasets only grow, so the seeded count is a **floor**, and a backfill landing fewer records than
+  the floor truncated. The backfill compares **records received** rather than rows written, because
+  a correct rerun writes nothing.
+- **`cost_indicators` has a real id and NULL bounds.** It was found in the same catalog query and
+  nothing has counted it; seeding an unmeasured bound is the Phase 3 failure repeated (`§ 15`). It
+  stays out of the ingest path — its id being resolved is not a promise that it is loaded.
+- **The column stays `week_ending` although the source field is `date`.** A deliberate divergence:
+  `week_ending` says what the value means where `date` says only what type it is. Recorded in the
+  field map's comment and guarded by a test, because "rename the column to match the source" is an
+  otherwise reasonable-looking tidy.
+- **The three rates datasets are ONE `@job` (`usda_rates_ingest`), not three.** One publication, one
+  schedule, one table, one meaningful `rows_written`. That is one scheduled unit, so it does not
+  violate `§ 4` — the rule's target is two independent SOURCES sharing a status, which is why
+  movements remains its own job.
+- **`date` is also a SoQL type name.** If the service rejects it as a bare identifier in `$order` or
+  `$where`, the rejection arrives as an error document and raises `SocrataResponseError` carrying
+  Socrata's own message — loudly, never as an empty page. The fix would be to quote it in the two
+  places it is built. Left unquoted because this project does not guess syntax it has not measured.
+
+### Files touched outside the brief's list, and why
+
+- **`tests/ingest/test_socrata_client.py`** — held `test_usda_datasets_seed_has_three_keys_with_null_ids`,
+  which `0016` makes false. Replaced by test 11 (five keys, real ids, exact set equality on the
+  ids and the counts). The unresolved-id path is still exercised, now against a row the test
+  inserts rather than against the seed, because no seeded row is unresolved any more. Its fixture
+  reference moved from `rates_ok` to `rates_nearby`. `app/ingest/socrata_client.py` itself is
+  untouched, as the brief required.
+- **`app/ingest/usda_backfill.py` gained a test** (`test_the_backfill_reads_three_rates_datasets_and_checks_itself_against_the_seed`).
+  Live verification step 3 runs this code and nothing exercised it: the three-dataset wiring, the
+  horizon-from-key, and the truncation comparison are all new in this commit, and shipping them
+  unexercised would mean finding a typo by hand on the instance.
+- **`seeded_row_count` is read by a small query in `usda_backfill.py`** rather than added to
+  `socrata_client.Dataset`, because the brief fenced that file. The count is the CLI's business
+  only — nothing on the request path consults it — so this is not a worse home for it, but it is a
+  second reader of `usda_datasets` and worth knowing about.
+
+### Status
+
+- **231 tests green with zero skips** against a throwaway local TimescaleDB container on the pinned
+  image; offline the same suite is `162 passed, 69 skipped`. The pre-correction baseline was 218.
+- **All 11 mutation-table rows confirmed**, each watched red on its own assertion, restored, and
+  `__pycache__` cleared between restore and re-run. **Row 11 needed a second pass** — see below.
+- **`0016` is new; nothing in `0001`–`0015` was edited.**
+
+### Mutation note — row 11 needed a second pass
+
+**"Add `direction` back to the movements key"** first went red for the wrong reason. Adding the
+column and putting it in the primary key left the upsert's `ON CONFLICT` naming a key with no
+matching unique index, so the test failed on a database error inside `upsert_movements` rather than
+on the assertion about the table's columns. That proves the test runs, not that the guard works
+(`CLAUDE.md § 0`).
+
+Re-done consistently — column, primary key, dataclass, field map, upsert, dedup key, with the
+constant `'Down'` the dataset would imply — the writes succeed and the test fails on its own
+assertion: `lock_movements holds ['commodity', 'direction', 'lock', 'tons', 'week_ending']`. Both
+passes are reported.
 
 ---
 
@@ -88,8 +220,15 @@ framing in this file no longer matches the data:
 
 ## Phase 4 — USDA ingest (written offline, 2026-08-14)
 
+**THIS SECTION IS SUPERSEDED BY THE PHASE 4 CORRECTION AT THE TOP OF THIS FILE.** The identifiers
+are resolved, every field name below was wrong, and the two table schemas changed. It is kept as
+the record of what Phase 4 believed and of what the honest disclosure bought — the provisional-field
+note at the end of this section is the reason the correction cost a field map rather than a
+debugging session.
+
 **THE DATASET IDENTIFIERS ARE UNRESOLVED AND THE INGEST CANNOT RUN UNTIL A HUMAN RESOLVES THEM.**
-That is the state migration `0013` seeds deliberately, not an incomplete commit.
+That is the state migration `0013` seeds deliberately, not an incomplete commit. *(Superseded:
+`0016` resolves all five.)*
 
 - `0013` `usda_datasets` — three keys (`barge_rates`, `lock_movements`, `cost_indicators`), every
   `dataset_id` **NULL**, every period bound NULL. A Socrata id is a four-four token and this
@@ -820,39 +959,53 @@ Bring the stack up with `docker compose -f docker-compose.yml -f /root/dws-local
 Delete it once the `worker` service is containerized; at that point `DATABASE_URL` becomes
 `timescaledb:5432` and nothing needs a published port.
 
-**PHASE 4'S LIVE VERIFICATION IS THE NEXT THING TO DO. Steps 2 and 3 are the ones nothing can
-proceed without — the ingest cannot run until the dataset ids exist.**
+**PHASE 4'S LIVE VERIFICATION IS THE NEXT THING TO DO, against the corrected identifiers. The ids
+are resolved now, so the ingest can actually run — STEP 2 IS THE ONE THAT GATES EVERYTHING ELSE,
+because five of the seven seeded `location` strings are unmeasured.**
 
-1. `python3 -m app.orchestration.migrate` — expect **0013, 0014, 0015** applied, **fifteen total**.
-2. **Resolve the three dataset ids.** Browse the AgTransport Socrata catalog, identify the datasets
-   for barge rates, lock movements and cost indicators, and record each four-four id. **While
-   there, record the COLUMN NAMES** — `usda_rates.FIELDS` and `usda_movements.FIELDS` are
-   provisional and any that differ is a one-line correction in that dict.
-3. **Establish coverage per dataset with a COUNTED FULL-RANGE query** — `$select=count(*)`, plus
-   min and max of the date column. `CLAUDE.md § 15`: not a sampled window, not the dataset's
-   description, not its web page. Phase 3 seeded a period of record from sampled windows and was
-   wrong at three of four sites.
-4. Land the ids and the period bounds in a **new numbered migration (`0016`)**, then re-run the
-   migration runner. The seed is human-owned; nothing in the ingest path writes to
-   `usda_datasets`.
-5. Backfill rates: `python3 -m app.ingest.usda_backfill --dataset barge_rates`. **Report row count
-   and wall time.**
-6. Backfill movements likewise. Report both.
-7. Sanity: `select segment, count(*), min(week_ending), max(week_ending) from barge_rates group
-   by 1 order by 1;` — expect the seven segments named in the handoff, and compare min/max against
-   the bounds from step 3.
-8. **CHECK THE 2022 EVENT IS VISIBLE IN THE TARGET.** Pull Cairo–Memphis `nearby` rates for
-   2022-08-01 to 2022-12-31 and look at whether they rise. This is the first time the thesis's two
-   halves can be looked at together — discharge on one side, freight rates on the other. **Report
-   what you see, including if it is not what the thesis predicts** (`CLAUDE.md § 0`: when a
-   measurement contradicts the plan, the measurement wins).
+1. `python3 -m app.orchestration.migrate` — expect **0016** applied, **sixteen total**.
+2. **CONFIRM THE SEVEN `location` STRINGS BEFORE TRUSTING THE `CHECK`:**
+
+   ```
+   curl -sS "https://agtransport.usda.gov/resource/deqi-uken.json?\$select=location,count(*)&\$group=location&\$order=location"
+   ```
+
+   Only `Cairo-Memphis` and `Twin Cities` are measured; the other five come from the handoff. **If
+   any string differs from what `0016` seeds, THE API WINS** — correct it in `0017`, do not bend
+   the arriving value and do not drop the constraint. Getting this wrong makes the rates backfill
+   abort on its first unlisted location, which is the tripwire working, not a defect.
+3. **Backfill rates — all three datasets:** `python3 -m app.ingest.usda_backfill --dataset
+   barge_rates_nearby --dataset barge_rates_1month --dataset barge_rates_3month` (or no `--dataset`
+   for all four). **Report rows per horizon and wall time.** Expect ~8,260 per horizon, ~24,780
+   total.
+4. Backfill movements: expect ~26,144.
+5. **Compare landed rows against `source_row_count` per dataset.** The CLI does this itself and
+   exits non-zero if any dataset came up short — landing fewer than the seeded count means the
+   pager truncated, which is the whole reason that column exists.
+6. Per-segment sanity:
+   `select location, horizon, count(*), min(week_ending), max(week_ending) from barge_rates group
+   by 1,2 order by 1,2;`
+7. Per-lock sanity, compared against the seven measured counts: `AK Lock 1` 4,928,
+   `IL La Grange` 2,840, `MS Lock 15` 2,840, `MS Lock 25` 2,840, `MS Lock 26` 2,840,
+   `MS Locks 27` 4,928, `OH Olmsted` 4,928.
+8. **LOOK AT THE THESIS FOR THE FIRST TIME.** Pull Cairo-Memphis `nearby` for 2022-08-01 to
+   2022-12-31 alongside `gauge_series` discharge at Memphis for the same window. **Report what you
+   see, including if rates moved BEFORE discharge fell** — that would be the "operators price the
+   forecast" risk from the handoff arriving as a real finding, and **it is a result, not a
+   failure** (`CLAUDE.md § 0`: when a measurement contradicts the plan, the measurement wins).
 9. `python3 -m verify.preflight` — six gates green. Its migration-count gate reads the directory,
-   so fifteen migrations need no change to it.
-10. Start the scheduler; confirm **both** USDA jobs register and write `job_runs` rows. A first run
-    writing 0 rows is not necessarily wrong — but with an unresolved dataset it will RAISE, which
-    is the intended failure.
-11. **Write the outcome back in the same session.** Part 1 of this commit exists because that did
-    not happen last time.
+   so sixteen migrations need no change to it.
+10. Start the scheduler; confirm **both** USDA jobs write `job_runs` rows. The rates job fetches
+    all three datasets in one run, so it produces one row with one summed `rows_written`.
+11. **Write the outcome back in the same session.**
+
+**Known risk worth watching at step 3:** `date` is a SoQL type name as well as the column name. If
+the service rejects it as a bare identifier, `parse_page` raises `SocrataResponseError` carrying
+Socrata's own message — loudly, never as an empty page — and the fix is to quote it in
+`usda_rates.ORDER_COLUMN`/`since_clause` and the movements pair. **Also at step 3:** a forward-rate
+record missing `rate_month` aborts the run by design, because in that column a silent NULL is
+indistinguishable from a legitimate nearby one. If it fires, measure what those rows look like
+before changing anything.
 
 **Phase 3's close-out verification — DONE on the instance 2026-08-14.** Its outcomes are recorded
 at the top of `§ Current state`; the step list is retained below for the record of what was asked.

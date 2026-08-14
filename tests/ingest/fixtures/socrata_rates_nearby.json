@@ -1,0 +1,26 @@
+[
+  {
+    "date": "2026-08-11T00:00:00.000",
+    "week": "32",
+    "month": "8",
+    "year": "2026",
+    "location": "Cairo-Memphis",
+    "rate": "582.1428"
+  },
+  {
+    "date": "2026-08-11T00:00:00.000",
+    "week": "32",
+    "month": "8",
+    "year": "2026",
+    "location": "Twin Cities",
+    "rate": "925"
+  },
+  {
+    "date": "2026-08-04T00:00:00.000",
+    "week": "31",
+    "month": "8",
+    "year": "2026",
+    "location": "Cairo-Memphis",
+    "rate": "601"
+  }
+]

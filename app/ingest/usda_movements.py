@@ -1,25 +1,44 @@
-"""Barged grain movements through the locks: parsing, writing, and the weekly poll.
+"""Downbound barged grain movements through the locks: parsing, writing, and the weekly poll.
 
 The volume side of the target. Sibling of usda_rates.py and deliberately the same shape.
 
+WHAT THIS DATASET DOES NOT PUBLISH
+----------------------------------
+Measured 2026-08-14 against n4pw-9ygw, "Downbound Barge Grain Movements (Tons)":
+
+  NO DIRECTION.   The dataset is downbound-only by construction - it is what the title says. There
+                  is no direction dimension to key on, and a column holding 'Down' on all 26,144
+                  rows would add nothing a reader of the table name does not already have.
+
+  NO BARGE COUNT. Tons only. Phase 4 carried a `barges` column on the strength of the handoff's
+                  wording; migration 0016 drops it. A column that is ALWAYS NULL is worse than an
+                  absent one - it looks like data, and `WHERE barges IS NOT NULL` returns nothing
+                  forever with nothing to say why. A barge count, if it is ever wanted, comes from
+                  a DIFFERENT dataset and is a separate commit with its own measurement.
+
+The published fields are `date`, `week`, `month`, `year`, `commodity`, `lock`, `tons`.
+
 ZERO IS A VALUE. NULL IS THE ABSENCE OF ONE.
 --------------------------------------------
-This module exists to keep those two apart, and both directions of collapsing them are one line
-long:
+0015 argued this about `barges`; the argument was right and now belongs to `tons`, which is the
+measure that exists. Both directions of collapsing them are one line long:
 
-    skipping rows where barges == 0    deletes the event this project studies. During the 2022
-                                       low-water event, near-zero movement IS the signal - a tow
-                                       that could not sail is the physical fact behind the thesis.
-                                       The gap it leaves is indistinguishable from a week nobody
-                                       reported.
+    skipping rows where tons == 0    deletes the event this project studies. During the 2022
+                                     low-water event, near-zero movement IS the signal - a tow that
+                                     could not sail is the physical fact behind the thesis. The gap
+                                     it leaves is indistinguishable from a week nobody reported.
 
-    coalescing NULL to 0               invents a surveyed zero out of silence, in the same column,
-                                       in the opposite direction. Every average over the series is
-                                       then dragged toward zero by weeks nobody measured.
+    coalescing NULL to 0             invents a surveyed zero out of silence, in the same column, in
+                                     the opposite direction. Every average over the series is then
+                                     dragged toward zero by weeks nobody measured.
 
-`barges` and `tons` are nullable in 0015 for exactly this reason, and the CHECK is `>= 0` rather
-than `> 0` so a real reported zero satisfies it. tests/ingest/test_usda_movements.py holds both
-behaviours at once, because two separate tests can each be satisfied by one wrong implementation.
+THE LOCK STRING IS STORED VERBATIM
+----------------------------------
+The published vocabulary contains `MS Locks 27` - plural - beside `MS Lock 15`, `MS Lock 25` and
+`MS Lock 26`, singular. That inconsistency is USDA's, it is stable, and NOTHING IN THIS MODULE
+NORMALIZES IT. A normalization step is where the join silently breaks the week USDA publishes a
+value the mapping does not cover, and the symptom is missing weeks rather than an unmapped value.
+0016's CHECK is the tripwire for an eighth lock.
 """
 
 from __future__ import annotations
@@ -45,18 +64,32 @@ JOB_NAME = "usda_movements_ingest"
 TABLE = "lock_movements"
 DATASET_KEY = "lock_movements"
 
-# PROVISIONAL Socrata column names - see the identical note in usda_rates.py. Confirmed at live
-# verification step 3, when the dataset is resolved. Every read goes through `required_field`, so
-# a wrong name here fails loudly on the first record rather than writing NULLs.
+# THE SOCRATA FIELD NAMES, MEASURED 2026-08-14 AGAINST THE LIVE API.
+#
+# A verbatim record from n4pw-9ygw:
+#
+#   {"date":"2026-08-08T00:00:00.000","week":"31","month":"8","year":"2026",
+#    "commodity":"Corn","lock":"IL La Grange","tons":"136400"}
+#
+# EVERY NAME PHASE 4 ASSUMED WAS WRONG - `lock_id`, `week_ending`, `grain_type`, `direction`,
+# `barges`. Two of those five name things the source does not publish at all, which is why this
+# correction is a migration and not just a dict.
+#
+# `date` MAPS TO `week_ending` DELIBERATELY, and the reasoning is written out once in
+# usda_rates.FIELDS rather than twice: the source name says what type the value is, ours says what
+# it means, and "rename the column to match the source" is the tidy that would lose that.
+#
+# `week`, `month` and `year` are deliberately not mapped - all three are derivable from `date`, and
+# a stored copy of a derivable fact is a second record that can disagree with the first.
 FIELDS = {
-    "lock_id": "lock_id",
-    "week_ending": "week_ending",
-    "grain_type": "grain_type",
-    "direction": "direction",
-    "barges": "barges",
+    "lock": "lock",
+    "week_ending": "date",
+    "commodity": "commodity",
     "tons": "tons",
 }
 
+# See the note in usda_rates: `date` is also a SoQL type name, and a rejection would arrive as an
+# error document raising SocrataResponseError, never as an empty page.
 ORDER_COLUMN = FIELDS["week_ending"]
 
 OVERLAP_WEEKS = 8
@@ -66,23 +99,24 @@ BATCH_SIZE = 500
 
 @dataclass(frozen=True)
 class LockMovement:
-    """One published weekly movement through one lock.
+    """One published week of downbound movement through one lock, for one commodity.
 
-    `barges` and `tons` are OPTIONAL, and None means "not reported" while 0 means "reported as
-    none". The Optional is the whole point of the type: a plain int would force a value for a week
-    that has none, and the only values available to force are zero and a lie.
+    `tons` is OPTIONAL, and None means "not reported" while 0 means "reported as none". The
+    Optional is the whole point of the type: a plain Decimal would force a value for a week that
+    has none, and the only values available to force are zero and a lie.
+
+    THERE IS NO `direction` AND NO `barges` FIELD HERE, and their absence is the schema decision
+    from migration 0016 made structural. Neither is published.
     """
 
-    lock_id: str
+    lock: str
     week_ending: date
-    grain_type: str
-    direction: str
-    barges: int | None
+    commodity: str
     tons: Decimal | None
 
 
-def parse_optional_int(raw, *, field: str) -> int | None:
-    """A reported count, or None when nothing was reported. 0 IS A COUNT.
+def parse_optional_decimal(raw, *, field: str) -> Decimal | None:
+    """A reported tonnage, or None when nothing was reported. 0 IS A TONNAGE.
 
     The ordering of these branches is the decision. `if not raw: return None` would be shorter and
     would map the string '0' and the integer 0 to None - turning every reported zero into a
@@ -97,57 +131,41 @@ def parse_optional_int(raw, *, field: str) -> int | None:
             return None
         raw = text
     try:
-        return int(Decimal(str(raw)))
-    except (InvalidOperation, ValueError) as exc:
-        raise MalformedResponseError(
-            f"{field} {raw!r} is not an integer: {exc}. Not defaulted to 0 - a count this module "
-            f"cannot read is not a count of none."
-        ) from exc
-
-
-def parse_optional_decimal(raw, *, field: str) -> Decimal | None:
-    """A reported tonnage, or None. Same reasoning as parse_optional_int, same trap."""
-    if raw is None:
-        return None
-    if isinstance(raw, str):
-        text = raw.strip()
-        if not text:
-            return None
-        raw = text
-    try:
         return Decimal(str(raw))
     except InvalidOperation as exc:
         raise MalformedResponseError(
-            f"{field} {raw!r} is not a number: {exc}. Not defaulted to 0."
+            f"{field} {raw!r} is not a number: {exc}. Not defaulted to 0 - a tonnage this module "
+            f"cannot read is not a tonnage of none."
         ) from exc
 
 
 def movement_from(record: dict) -> LockMovement:
     """One Socrata record into a LockMovement, or raise naming what the record carries.
 
-    The four key fields are REQUIRED and raise when absent; the two measures are OPTIONAL and
-    become None. That asymmetry is deliberate: a row that cannot be keyed is a row nothing can
-    ever correct or supersede, while a row with no measure is an ordinary unreported week.
+    The three key fields are REQUIRED and raise when absent; the measure is OPTIONAL and becomes
+    None. That asymmetry is deliberate: a row that cannot be keyed is a row nothing can ever
+    correct or supersede, while a row with no measure is an ordinary unreported week.
+
+    `lock` IS PASSED THROUGH WITH ONLY WHITESPACE STRIPPED. No title-casing, no singularizing of
+    `MS Locks 27`, no mapping to an internal id.
     """
     context = "lock movement record"
     return LockMovement(
-        lock_id=str(required_field(record, FIELDS["lock_id"], context=context)).strip(),
+        lock=str(required_field(record, FIELDS["lock"], context=context)).strip(),
         week_ending=parse_period_label(
             required_field(record, FIELDS["week_ending"], context=context), field="week_ending"
         ),
-        grain_type=str(required_field(record, FIELDS["grain_type"], context=context)).strip(),
-        direction=str(required_field(record, FIELDS["direction"], context=context)).strip(),
+        commodity=str(required_field(record, FIELDS["commodity"], context=context)).strip(),
         # `.get`, not `required_field`: an absent measure IS the unreported case, and it is the
         # one case in this module where a missing field is not an error.
-        barges=parse_optional_int(record.get(FIELDS["barges"]), field="barges"),
         tons=parse_optional_decimal(record.get(FIELDS["tons"]), field="tons"),
     )
 
 
 def parse_movements(records) -> list[LockMovement]:
-    """Every record, INCLUDING the zero-barge weeks.
+    """Every record, INCLUDING the zero-tonnage weeks.
 
-    There is no filter in this function and there must never be one. A `if movement.barges:`
+    There is no filter in this function and there must never be one. A `if movement.tons:`
     anywhere on this path drops both the unreported weeks and the reported-zero weeks, and the
     second kind is the signal.
     """
@@ -155,13 +173,11 @@ def parse_movements(records) -> list[LockMovement]:
 
 
 UPSERT_SQL = """
-INSERT INTO lock_movements (lock_id, week_ending, grain_type, direction, barges, tons)
+INSERT INTO lock_movements (lock, week_ending, commodity, tons)
 VALUES {placeholders}
-ON CONFLICT (lock_id, week_ending, grain_type, direction) DO UPDATE
-    SET barges = EXCLUDED.barges,
-        tons = EXCLUDED.tons
-    WHERE (lock_movements.barges, lock_movements.tons)
-       IS DISTINCT FROM (EXCLUDED.barges, EXCLUDED.tons)
+ON CONFLICT (lock, week_ending, commodity) DO UPDATE
+    SET tons = EXCLUDED.tons
+    WHERE lock_movements.tons IS DISTINCT FROM EXCLUDED.tons
 RETURNING 1
 """
 
@@ -169,19 +185,17 @@ RETURNING 1
 def _deduplicate(movements):
     by_key = {}
     for movement in movements:
-        by_key[
-            (movement.lock_id, movement.week_ending, movement.grain_type, movement.direction)
-        ] = movement
+        by_key[(movement.lock, movement.week_ending, movement.commodity)] = movement
     return list(by_key.values())
 
 
 def upsert_movements(conn, movements) -> int:
     """Write movements, returning the number that ACTUALLY changed the database.
 
-    `IS DISTINCT FROM` over the pair, which is also what makes a revision from NULL to 0 count as
-    a change: `NULL = 0` is NULL and would compare as "no change", so a week going from
-    unreported to reported-zero would be written and reported as nothing. That is the same
-    distinction this whole module is about, appearing one more time in the SQL.
+    `IS DISTINCT FROM`, which is also what makes a revision from NULL to 0 count as a change:
+    `NULL = 0` is NULL and would compare as "no change", so a week going from unreported to
+    reported-zero would be written and reported as nothing. That is the same distinction this
+    whole module is about, appearing one more time in the SQL.
     """
     deduplicated = _deduplicate(movements)
     if not deduplicated:
@@ -190,16 +204,14 @@ def upsert_movements(conn, movements) -> int:
     written = 0
     for start in range(0, len(deduplicated), BATCH_SIZE):
         batch = deduplicated[start : start + BATCH_SIZE]
-        placeholders = ", ".join(["(%s, %s, %s, %s, %s, %s)"] * len(batch))
+        placeholders = ", ".join(["(%s, %s, %s, %s)"] * len(batch))
         params: list = []
         for movement in batch:
             params.extend(
                 [
-                    movement.lock_id,
+                    movement.lock,
                     movement.week_ending,
-                    movement.grain_type,
-                    movement.direction,
-                    movement.barges,
+                    movement.commodity,
                     movement.tons,
                 ]
             )
@@ -246,12 +258,12 @@ def ingest(conn, client: SocrataClient | None = None, today: date | None = None)
     conn.commit()
 
     logger.info(
-        "%s: %d record(s) received from %s, %d row(s) written (%d reported zero barges)",
+        "%s: %d record(s) received from %s, %d row(s) written (%d reported zero tons)",
         TABLE,
         len(records),
         start.isoformat(),
         written,
-        sum(1 for m in movements if m.barges == 0),
+        sum(1 for m in movements if m.tons == 0),
     )
     return written
 
