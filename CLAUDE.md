@@ -658,3 +658,18 @@ pages. Every bullet describes a failure that reports success.
   column that was measured.** A column made nullable on the strength of a neighbour's finding is a
   guess that later reads as verified, because the commit that made it cites a measurement of
   something else.
+- **Where a source publishes both an explicit zero and an absent field for the same measure, they
+  are two distinct claims and both are preserved. A zero is a measurement; an absence is not.**
+  Measure both populations before deciding what either means: USDA publishes `tons = 0` on 8,218 of
+  26,144 lock-movement records and omits `tons` on 108, so zero is the *routine* way the source says
+  "nothing moved" and silence is therefore saying something else entirely. Where a source has a way
+  of stating a zero and uses it, coalescing its silences into zeros fabricates measurements at
+  exactly the rate the source declines to report — and it does so in the ingest layer, below every
+  gate that exists to catch a fabricated number.
+- **The MEANING of a NULL is established per column by measurement, and two columns given the same
+  three-state handling may mean entirely different things by it.** `barge_rates.pct_of_tariff` and
+  `lock_movements.tons` receive identical absent/null/unparseable treatment; a NULL rate is winter
+  navigation closure, seasonal and physical, while a NULL tonnage is a reporting gap that says
+  nothing about the river. **A column comment copied from the sibling asserts something unverified**,
+  and it is worse than an absent comment: it reads as measured, it is the thing the next reader
+  reasons from, and the two shapes look identical in the diff. Same handling is not same meaning.

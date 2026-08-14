@@ -4,8 +4,130 @@ This is the **log**: current state, decisions as they are made, and `§ Up Next`
 live in `CLAUDE.md`. If something here hardens into an invariant, move it there and note the move.
 
 **Last updated:** 2026-08-14 (Phase 3 VERIFIED ON THE INSTANCE and written back; Phase 4 USDA
-ingest written offline, then corrected against the live USDA API TWICE — the second correction,
-from the first backfill attempt, is directly below)
+ingest written offline, then corrected against the live USDA API TWICE, then closed out — the
+close-out, which answers the open `tons` measurement, is directly below)
+
+---
+
+## Phase 4 close-out — `tons` nullability measured, and the analogy was wrong, 2026-08-14
+
+**The previous commit left `tons` alone on the stated grounds that its nullability was an analogy to
+`rate` rather than a measurement. It has now been measured, and the analogy would have been wrong.**
+The *shape* of the handling is the same; the *meaning* is not, and a comment copied from the rates
+module would have asserted something false.
+
+### Finding 1 — `tons` is absent on 108 of 26,144 records (0.4%), on three locks only
+
+| Lock | Nulls | Rows |
+|---|---|---|
+| AK Lock 1 | 71 | 4,928 |
+| OH Olmsted | 26 | 4,928 |
+| MS Locks 27 | 11 | 4,928 |
+| IL La Grange, MS Lock 15, MS Lock 25, MS Lock 26 | 0 | 2,840 each |
+
+**By year — 96 of 108 fall in 2015–2016:** 2003 (6), 2006 (2), 2012 (2), 2014 (1), **2015 (79)**,
+**2016 (17)**, 2021 (1).
+
+**By month — flat:** 16, 9, 11, 6, 3, 14, 11, 1, 7, 9, 7, 14.
+
+**By commodity — spread across all four:** Corn 46, Other Grain 38, Wheat 19, Soybeans 5.
+
+### Finding 2 — `tons = 0` appears on 8,218 records (31%). This is the finding that matters
+
+USDA publishes explicit zeros **routinely**, on nearly a third of all records. So zero is the
+*normal, published* way of saying "no grain moved through this lock this week" — and **a NULL is
+therefore not the same statement, and not a rarer spelling of it.** The source has a way to say
+"none moved" and uses it 8,218 times; the 108 records that say nothing at all are saying something
+else.
+
+### The two NULLs mean different things, and that is the whole commit
+
+| Column | What a NULL means | Evidence |
+|---|---|---|
+| `barge_rates.pct_of_tariff` | **Seasonal and physical** — winter navigation closure | 774 records, 661 in Dec–Mar, 729 on the two upper segments |
+| `lock_movements.tons` | **A reporting gap. It says nothing about the river.** | 108 records, flat across months, three locks, 96 in 2015–2016 |
+
+**Do not reuse the winter-closure language for `tons`.** `0018`'s column comment states the reporting
+gap explicitly and names the rates column as *not* the same thing, so the two cannot be read across.
+
+**Why this matters more here than it did for rates.** The three affected locks are the **summary**
+locks — `MS Locks 27` is the Mississippi's main southbound gate and the single most load-bearing
+series in the dataset. Coalescing a NULL to `0` would assert "no grain moved through Lock 27 that
+week" for eleven weeks USDA simply did not report. That is a **fabricated zero**, and it is exactly
+the failure `CLAUDE.md § 7`'s confidence gate exists to prevent — arriving in the ingest layer,
+where no gate is watching.
+
+### OPEN, UNEXPLAINED — the 2015–2016 concentration
+
+96 of the 108 gaps fall in a two-year window, on three locks, flat across months. **The cause is
+unknown and nothing in this commit acts on it.**
+
+**Deliberately not built:** no `gauge_known_gaps`-style table for it, and those weeks are **not
+excluded**. A 0.4% gap falling outside both labelled events (2022 and 2023) does not warrant the
+machinery, and building the machinery would imply a conclusion about the cause that nobody has
+reached. It is recorded here as an observation, and that is all it is.
+
+### Decisions worth reading before changing anything here
+
+- **`tons` uses `optional_field`, not `record.get`.** Absent key and explicit null both become NULL;
+  an unparseable value **raises, naming the value**. The blanket `.get` is one call shorter and would
+  file a corrupt tonnage as a reporting gap — with 108 legitimate gaps on the summary locks to hide
+  among.
+- **A blank `tons` RAISES rather than becoming NULL, and this is the one condition here argued
+  rather than measured.** USDA omits the key when it reports nothing and publishes an explicit `0`
+  when nothing moved; a present-but-empty cell is a third spelling nobody has seen. Same call the
+  rates module made, for the same camouflage reason. **If it fires on the live backfill, measure what
+  those records look like before changing anything** — the run stops, which is the point.
+- **The zero test became load-bearing and gained its inverse.** It was written against a
+  hypothetical; it now guards a real 8,218-record population against a real 108-record one, and a
+  parsed `0` is asserted to survive to the database **as `0` and not as NULL**. Only one direction
+  was ever covered.
+- **`0018` contains no `ALTER COLUMN … DROP NOT NULL`, and the absence is deliberate.** `0015`
+  created `tons` nullable and `0016` never added a NOT NULL, so the ALTER would be a no-op that reads
+  like a change. What was missing was the **meaning**, not the structure. The precondition is
+  *verified* instead, by a `DO` block that hard-fails if the column has acquired a NOT NULL —
+  confirmed to fire by setting one and watching it raise.
+- **`lock_movements_tons_non_negative` is left alone.** `0015` already wrote it as
+  `tons IS NULL OR tons >= 0`, with both cases spelled out, so `0017`'s rewrite of
+  `barge_rates_pct_positive` has no counterpart here.
+- **The completeness report prints THREE counts per lock — landed, reported zero, not reported.**
+  Never one combined "no data" figure: at 31% zeros a combined number is nearly all zeros, reads as
+  an alarming gap, and conceals the 108 rows that are the actual gap. Visibility, not enforcement.
+- **`source_row_count` is compared against RECORDS RECEIVED, not rows written.** Restated because
+  this is the commit where it first runs against a large dataset: a correct rerun writes zero rows,
+  so comparing `rows_written` would report catastrophic truncation on every second run.
+
+### Status
+
+- **244 tests green with zero skips** against a throwaway local TimescaleDB container on the pinned
+  image; offline the same suite is `170 passed, 74 skipped`. The previous baseline was 239.
+- **All 7 mutation-table rows confirmed**, each watched red on its own assertion, restored, with
+  `__pycache__` cleared between restore and re-run.
+- **`0018` is new; nothing in `0001`–`0017` was edited.** Eighteen migrations apply clean.
+- **NOT YET RUN ON THE INSTANCE.** The movements backfill, the per-lock confirmation, and **step 9 —
+  the first look at the thesis — are all outstanding.** See `§ Up Next`.
+
+### Mutation notes — two rows needed a second pass
+
+- **Row 1 (blanket `record.get`)** first went red with a `NameError`, because deleting the
+  `optional_field` call left the `tons=` expression referencing a name that no longer existed. That
+  proves only that the test runs (`CLAUDE.md § 0`). Redone as a coherent `tons=record.get(...)`
+  implementation, it went red on test 3's own assertion — `DID NOT RAISE`.
+- **Row 6 (combined figure)** was first applied as "stop counting nulls", which is a different
+  mutation. Redone as the actual merge (`if row.tons is None or row.tons == 0`), it produced
+  `('MS Locks 27', 3, 2, 0)` — the two populations added together into the single figure the decision
+  forbids — and went red on the structural assertion.
+
+### Two files deviate from the brief's list
+
+- **`tests/ingest/fixtures/socrata_movements.json` is NEW, not modified.** It did not exist; the
+  movements records lived in `socrata_page_1.json`, which `test_socrata_client.py` also uses as its
+  generic two-page paging fixture with `page_limit=3` and an exact `len(records) == 3` assertion.
+  Adding records there would have broken a paging test for reasons having nothing to do with paging.
+  The new file follows the rates fixtures' naming, `socrata_page_1.json` is untouched and still the
+  paging fixture, and the movements parser tests now read the new one.
+- **`app/ingest/usda_movements.py`'s ingest log line** now reports reported-zero and not-reported
+  counts separately, for the same reason the completeness report does.
 
 ---
 
@@ -83,6 +205,12 @@ closes.
   whichever form was there.
 
 ### OPEN MEASUREMENT — does `lock_movements.tons` have the same structure?
+
+> **CLOSED by the Phase 4 close-out at the top of this file, 2026-08-14. It does not.** The
+> measurement came back 108 of 26,144, flat across months and confined to three locks — a reporting
+> gap, not a closure — and the 8,218 explicit zeros beside it are what make that reading
+> unavoidable. **The gate below is discharged; movements can be backfilled.** Retained as written
+> because refusing to act on the analogy is what made the finding possible.
 
 **Not touched by this commit, deliberately.** A lock with no reported movement in a closure week is
 the same shape of fact, and `tons` is already nullable — but **nothing has measured whether USDA
@@ -1058,58 +1186,97 @@ Bring the stack up with `docker compose -f docker-compose.yml -f /root/dws-local
 Delete it once the `worker` service is containerized; at that point `DATABASE_URL` becomes
 `timescaledb:5432` and nothing needs a published port.
 
-**PHASE 4'S LIVE VERIFICATION, TAKE 2. The location tripwire and the absent-rate finding are both
-corrected in `0017`, so the rates backfill should now run to completion. STEP 5 GATES STEP 6 — do
-not backfill movements until `tons` has been measured.**
+**PHASE 4 CLOSE-OUT — THE OUTSTANDING LIVE VERIFICATION, AND THE STEP THIS PROJECT HAS BEEN WORKING
+TOWARD. Take 2's steps 1–4 (migrate, the three rate backfills, the null-rate distribution) are
+done and recorded above; step 5's measurement is what `0018` lands. What remains is the movements
+backfill and the verification that has been accumulating across four commits.**
 
-1. `python3 -m app.orchestration.migrate` — expect **0017** applied, **seventeen total**.
-2. `python3 -m app.ingest.usda_backfill --dataset barge_rates_nearby` — expect **8,260 rows**, of
-   which **774 carry a NULL rate**. Both numbers are measured; a mismatch means something changed
-   at the source and is worth understanding before proceeding rather than after.
-3. Confirm the null distribution matches the measured shape:
+**When this passes, both halves of the thesis exist in one database for the first time, and
+`§ Up Next` becomes Phase 5 — the normalizer and features.**
+
+1. `python3 -m app.orchestration.migrate` — expect **0018** applied, **eighteen total**.
+2. **Movements backfill:** `time python3 -m app.ingest.usda_backfill --dataset lock_movements`.
+   Expect **26,144 rows**, of which **108 have NULL tons** and **8,218 have zero tons**. All three
+   numbers are measured; a mismatch is worth understanding before proceeding rather than after.
+3. Per-lock confirmation — the backfill prints this table itself, but run it against the database
+   too:
 
    ```sql
-   select location, count(*), count(*) filter (where pct_of_tariff is null) as nulls
-     from barge_rates where horizon = 'nearby' group by 1 order by 1;
+   select lock, count(*), count(*) filter (where tons = 0) as zeros,
+          count(*) filter (where tons is null) as nulls
+     from lock_movements group by 1 order by 1;
    ```
 
-   Expect **Twin Cities 426** and **Cairo-Memphis 3**. The backfill prints this table itself.
-4. Backfill the other two rate datasets. **Report rows and nulls for each — THEY HAVE NOT BEEN
-   MEASURED**, and the forward-rate datasets may distribute their absences differently.
-5. **MEASURE WHETHER `lock_movements` HAS THE SAME STRUCTURE** — the open question this commit
-   deliberately did not answer:
+   Expect **AK Lock 1 / MS Locks 27 / OH Olmsted at 4,928 rows each with nulls 71 / 11 / 26**, and
+   the other four at **2,840 with zero nulls**.
+4. Compare landed rows against `source_row_count` for **all four** ingested datasets. The CLI does
+   this itself and exits non-zero if any came up short. **It compares RECORDS RECEIVED, not rows
+   written** — a correct rerun writes zero rows.
+5. `python3 -m verify.preflight` — six gates green. Its migration-count gate reads the directory, so
+   eighteen migrations need no change to it.
+6. Start the scheduler. Confirm `usda_rates_ingest` **and** `usda_movements_ingest` both register,
+   fire, and write `job_runs` rows with plausible `rows_written`. **A rerun over already-loaded
+   weeks may legitimately write 0 — that is correct, not a failure.**
+7. Confirm the heartbeat reports both USDA tables fresh, **and that a winter week with NULL rates
+   does not read as stale** — the freshness-counts-rows guard from the previous commit, live.
+8. Confirm
+   `docker compose exec timescaledb psql -U waterway -d waterway -c "select count(*) from barge_rates"`
+   returns **24,780** (three horizons × 8,260).
 
-   ```
-   curl -sS 'https://agtransport.usda.gov/resource/n4pw-9ygw.json?$select=count(*)&$where=tons%20IS%20NULL'
-   ```
+### 9. FIRST CONTACT WITH THE THESIS
 
-   Report the number. If it is non-zero, `tons` needs the same three-condition treatment in a
-   follow-up commit, measured rather than assumed.
-6. Backfill movements — expect ~26,144 — **but only if step 5 returns zero. If it does not, stop
-   and report.**
-7. Compare landed rows against `source_row_count` for every dataset. The CLI does this itself and
-   exits non-zero if any dataset came up short.
-8. **LOOK AT THE THESIS FOR THE FIRST TIME** — finally reachable. Pull Cairo-Memphis `nearby` for
-   2022-08-01 to 2022-12-31 alongside `gauge_series` discharge at Memphis for the same window.
-   **Report what you see, including if rates moved BEFORE discharge fell** — that would be the
-   "operators price the forecast" risk from the handoff arriving as a real finding, and **it is a
-   result, not a failure** (`CLAUDE.md § 0`: when a measurement contradicts the plan, the
-   measurement wins). The 26 NULL rates in that window are ordinary winter closure and are not
-   part of the event.
-9. `python3 -m verify.preflight` — six gates green. Its migration-count gate reads the directory,
-   so seventeen migrations need no change to it.
-10. Start the scheduler; confirm **both** USDA jobs write `job_runs` rows. The rates job fetches
-    all three datasets in one run, so it produces one row with one summed `rows_written`.
-11. **Write the outcome back in the same session, including the null-rate figures.**
+Both halves are now in one database. Run this and **report what it shows, including if it
+contradicts the thesis:**
+
+```sql
+select r.week_ending,
+       r.pct_of_tariff as cairo_memphis_nearby,
+       round(avg(g.value)) as memphis_discharge_cfs
+from barge_rates r
+left join gauge_series g
+  on g.usgs_site_id = '07032000'
+ and g.date between r.week_ending - interval '6 days' and r.week_ending
+where r.location = 'Cairo-Memphis'
+  and r.horizon = 'nearby'
+  and r.week_ending between '2022-07-01' and '2022-12-31'
+group by r.week_ending, r.pct_of_tariff
+order by r.week_ending;
+```
+
+What to look for, **in order of what would change the project**:
+
+- **Does the rate rise as discharge falls?** That is the thesis.
+- **Does the rate rise *before* discharge falls?** That is the "operators price the forecast" risk
+  named in the handoff. It is a **finding, not a failure** — it changes the claim from "the physical
+  signal leads" to "the market prices the forecast," and that reversal becomes the story
+  (`CLAUDE.md § 0`: when a measurement contradicts the plan, the measurement wins).
+- **Does nothing happen?** Also a result. Report it.
+
+Run the same query for **2023-07-01 to 2023-12-31**, the second labelled event.
+
+**DO NOT TUNE ANYTHING ON THE BASIS OF WHAT THIS SHOWS.** It is an observation. Phase 6's lead-lag
+sweep is where the relationship gets measured properly, with a walk-forward gap. This step exists so
+that a surprise arrives now rather than after three more phases have been built on an assumption.
+
+10. **Write the outcome back in the same session**, including **the step 9 query output verbatim**,
+    and set `§ Up Next` to Phase 5.
+
+**STEP 9 OUTPUT — NOT YET RUN.** Nothing has looked at the two series together. This slot stays
+empty until the instance run fills it, and an empty slot is the honest state: `CLAUDE.md § 0`'s
+"report what you verified, not what you intended", and the process note above about this file
+sitting three commits behind reality.
 
 **Known risks worth watching.** `date` is a SoQL type name as well as the column name; if the
 service rejects it as a bare identifier, `parse_page` raises `SocrataResponseError` carrying
 Socrata's own message — loudly, never as an empty page — and the fix is to quote it in
 `usda_rates.ORDER_COLUMN`/`since_clause` and the movements pair. A forward-rate record missing
 `rate_month` aborts the run by design, because in that column a silent NULL is indistinguishable
-from a legitimate nearby one. And a `rate` present but **blank** raises rather than being stored as
-NULL: this source expresses "no rate" by omitting the key, so a blank is a different and unmeasured
-condition — if it fires, measure what those records look like before changing anything.
+from a legitimate nearby one. And **in both USDA modules a present-but-blank measure raises rather
+than being stored as NULL** — `rate` and now `tons` alike. Each source expresses "no value" by
+omitting the key, and `tons` additionally publishes an explicit `0` on 31% of records, so a blank is
+a different and unmeasured condition in both. **If either fires, measure what those records look
+like before changing anything.** For `tons` specifically this will stop the movements backfill dead;
+that is the intended behaviour, and the 108 gaps it protects sit on the summary locks.
 
 **Phase 3's close-out verification — DONE on the instance 2026-08-14.** Its outcomes are recorded
 at the top of `§ Current state`; the step list is retained below for the record of what was asked.

@@ -96,6 +96,46 @@ def completeness_by_location(rows) -> list[tuple[str, int, int, float]]:
     ]
 
 
+def completeness_by_lock(rows) -> list[tuple[str, int, int, int]]:
+    """Per lock: rows landed, rows REPORTED ZERO, and rows NOT REPORTED. THREE COUNTS, NEVER TWO.
+
+    THE SPLIT IS THE WHOLE POINT OF THIS FUNCTION (migration 0018, decision 3). A combined "no
+    data" figure would be shorter, would read as a tidier report, and would hide precisely the
+    distinction the movements ingest exists to preserve - in the one output a human actually
+    reads. The two populations are not the same size and they do not mean the same thing:
+
+        tons = 0        8,218 of 26,144 records (31%)   USDA saying nothing moved
+        tons IS NULL      108 of 26,144 records (0.4%)  USDA saying nothing at all
+
+    Reported, never enforced, for the same reason the rate report is: 31% zeros is ordinary
+    publication behaviour and any threshold over it would fire constantly. What a threshold cannot
+    do, a printed number can - if USDA's behaviour changes, the shape of this table changes with it
+    and somebody reading a backfill log sees it.
+
+    Sorted by lock so two runs are diffable. Returns an empty list for a dataset whose rows carry
+    no tonnage concept, so the rates backfill prints nothing rather than a table of zeros.
+    """
+    if not rows or not hasattr(rows[0], "tons"):
+        return []
+
+    landed: dict[str, int] = {}
+    zeros: dict[str, int] = {}
+    absent: dict[str, int] = {}
+    for row in rows:
+        landed[row.lock] = landed.get(row.lock, 0) + 1
+        if row.tons is None:
+            # FIRST, and `is None` rather than a falsy test. `if not row.tons` would count every
+            # published zero as an absence and merge the two populations inside the very function
+            # that exists to keep them apart.
+            absent[row.lock] = absent.get(row.lock, 0) + 1
+        elif row.tons == 0:
+            zeros[row.lock] = zeros.get(row.lock, 0) + 1
+
+    return [
+        (lock, landed[lock], zeros.get(lock, 0), absent.get(lock, 0)) for lock in sorted(landed)
+    ]
+
+
 def seeded_row_count(conn, dataset_key: str) -> int | None:
     """`usda_datasets.source_row_count` for this key, or None if never measured.
 
@@ -153,6 +193,10 @@ def backfill(conn, dataset_key: str, client: SocrataClient | None = None) -> dic
         "seeded_row_count": seeded_count,
         # Per-location completeness, for the log. Decision 4: visibility, not enforcement.
         "completeness": completeness_by_location(rows),
+        # And per-lock, for movements. A SEPARATE KEY rather than one polymorphic "completeness":
+        # the two reports carry different columns and mean different things, and a shared key
+        # would make `describe` guess which one it had from the tuple width.
+        "lock_completeness": completeness_by_lock(rows),
         # Compared against RECORDS RECEIVED rather than rows written: `rows_written` counts only
         # rows that changed the database, so a second run legitimately writes 0 and would look
         # like total truncation. What the seed is a floor for is what the pager returned.
@@ -213,6 +257,31 @@ def describe(result: dict) -> str:
             lines.append(
                 f"        {location:<18} {landed:>6} row(s), {absent:>5} with no rate "
                 f"({pct:5.1f}%)"
+            )
+
+    # ------------------------------------------------------------------------------------------
+    # The movements report. TWO POPULATIONS, PRINTED AS TWO NUMBERS.
+    # ------------------------------------------------------------------------------------------
+    #
+    # A single "no data" column would be shorter and would be wrong: 0 is USDA reporting that
+    # nothing moved (31% of records) and NULL is USDA not reporting at all (0.4%, on three locks).
+    # Adding them together produces a figure that is nearly all zeros, reads as an alarming gap,
+    # and conceals the 108 rows that are the actual gap (migration 0018, decision 3).
+    lock_completeness = result.get("lock_completeness") or []
+    if lock_completeness:
+        total_zero = sum(zeros for _lock, _rows, zeros, _nulls in lock_completeness)
+        total_absent = sum(nulls for _lock, _rows, _zeros, nulls in lock_completeness)
+        lines.append(
+            f"      TONNAGE, TWO DISTINCT POPULATIONS across {result['records_received']} "
+            f"record(s): {total_zero} REPORTED ZERO (USDA surveyed the lock and nothing moved - a "
+            f"measurement, and the signal during a low-water event) and {total_absent} NOT "
+            f"REPORTED (USDA published nothing for that lock-week - a reporting gap, NOT a "
+            f"closure, migration 0018). NEVER added together, and not alerted on:"
+        )
+        for lock, landed, zeros, nulls in lock_completeness:
+            lines.append(
+                f"        {lock:<18} {landed:>6} row(s), {zeros:>5} reported zero, "
+                f"{nulls:>4} not reported"
             )
 
     return "\n".join(lines)

@@ -32,6 +32,29 @@ measure that exists. Both directions of collapsing them are one line long:
                                      the opposite direction. Every average over the series is then
                                      dragged toward zero by weeks nobody measured.
 
+AND THE MEASUREMENT SAYS 0 IS THE COMMON CASE, NOT THE EDGE CASE
+-----------------------------------------------------------------
+Measured 2026-08-14 across all 26,144 records (migration 0018):
+
+    tons = 0        8,218 records (31%)   USDA's PUBLISHED way of saying nothing moved.
+    tons absent       108 records (0.4%)  Three locks only - AK Lock 1 (71), OH Olmsted (26),
+                                          MS Locks 27 (11). 96 of them in 2015-2016. FLAT ACROSS
+                                          MONTHS: 16 9 11 6 3 14 11 1 7 9 7 14.
+
+Because the source says "none moved" explicitly 8,218 times, THE 108 SILENT RECORDS ARE SAYING
+SOMETHING ELSE. Flat across months and confined to three locks in a two-year window, they are a
+REPORTING GAP - they say nothing whatsoever about the river.
+
+DO NOT REUSE usda_rates.py's LANGUAGE FOR THIS COLUMN. There, a NULL is winter navigation closure:
+seasonal, physical, and a fact about the river. Here it is not. The handling is the same shape and
+the meaning is different, and a comment copied across would assert something the measurement
+contradicts (CLAUDE.md § 16).
+
+The three locks that carry the gap are the SUMMARY locks. `MS Locks 27` is the Mississippi's main
+southbound gate, and coalescing its eleven silent weeks to 0 would state that no grain moved
+through it - a fabricated zero in the most load-bearing series this project has, in a layer with no
+confidence gate watching.
+
 THE LOCK STRING IS STORED VERBATIM
 ----------------------------------
 The published vocabulary contains `MS Locks 27` - plural - beside `MS Lock 15`, `MS Lock 25` and
@@ -51,8 +74,10 @@ from decimal import Decimal, InvalidOperation
 from app import db
 from app.ingest import socrata_client
 from app.ingest.socrata_client import (
+    ABSENT,
     MalformedResponseError,
     SocrataClient,
+    optional_field,
     parse_period_label,
     required_field,
 )
@@ -101,9 +126,13 @@ BATCH_SIZE = 500
 class LockMovement:
     """One published week of downbound movement through one lock, for one commodity.
 
-    `tons` is OPTIONAL, and None means "not reported" while 0 means "reported as none". The
-    Optional is the whole point of the type: a plain Decimal would force a value for a week that
-    has none, and the only values available to force are zero and a lie.
+    `tons` is OPTIONAL, and None means "USDA DID NOT REPORT THIS LOCK-WEEK" while 0 means
+    "reported, and nothing moved". The Optional is the whole point of the type: a plain Decimal
+    would force a value for a week that has none, and the only values available to force are zero
+    and a lie.
+
+    None here is a REPORTING GAP, not a closure. 108 of 26,144 records, on three locks, flat
+    across months (0018). The rates module's None means the opposite kind of thing.
 
     THERE IS NO `direction` AND NO `barges` FIELD HERE, and their absence is the schema decision
     from migration 0016 made structural. Neither is published.
@@ -115,27 +144,41 @@ class LockMovement:
     tons: Decimal | None
 
 
-def parse_optional_decimal(raw, *, field: str) -> Decimal | None:
-    """A reported tonnage, or None when nothing was reported. 0 IS A TONNAGE.
+def parse_tons(raw, *, field: str = "tons") -> Decimal:
+    """A PUBLISHED tonnage, exactly as published. NEVER CALLED FOR AN ABSENT ONE. 0 IS A TONNAGE.
 
-    The ordering of these branches is the decision. `if not raw: return None` would be shorter and
-    would map the string '0' and the integer 0 to None - turning every reported zero into a
-    missing week, which is precisely the observation the low-water analysis needs.
+    Shaped like usda_rates.parse_rate and for the same structural reason: absence is decided
+    BEFORE the call, by `optional_field`, so everything arriving here is supposed to be a number
+    and anything that will not parse is a DATA ERROR that raises. That split is what stops a
+    corrupt value being filed as an unreported week.
+
+    THE FIRST BRANCH IS THE DECISION. `if not raw: return None` would be shorter and would map the
+    string '0' and the integer 0 onto the unreported case - turning 8,218 published zeros into
+    missing weeks, which is precisely the observation the low-water analysis is built on.
+
+    A BLANK VALUE RAISES RATHER THAN BECOMING NULL, and this is the one condition here that is
+    argued rather than measured. USDA expresses "no tonnage" by omitting the key (108 records), and
+    it expresses "none moved" with an explicit 0 (8,218 records); a present-but-empty cell is a
+    THIRD spelling that nothing has measured. Storing it as NULL would hide it among the 108
+    legitimate reporting gaps - camouflage that matters more here than for rates, because these
+    gaps sit on the summary locks. If this fires on a live backfill, MEASURE what those records
+    look like before changing anything.
     """
-    if raw is None:
-        return None
-    if isinstance(raw, str):
-        text = raw.strip()
-        if not text:
-            # An empty string is Socrata's "no value in this cell", not a zero.
-            return None
-        raw = text
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        raise MalformedResponseError(
+            f"{field} is {raw!r} - present but blank. NOT read as an unreported week: this source "
+            f"omits the `tons` key entirely when it reports nothing (108 of 26,144 records) and "
+            f"publishes an explicit 0 when nothing moved (8,218 records), so a blank is a third "
+            f"and unmeasured condition. Storing it as NULL would hide it among the legitimate "
+            f"reporting gaps at the summary locks (migration 0018)."
+        )
     try:
-        return Decimal(str(raw))
+        return Decimal(str(raw).strip())
     except InvalidOperation as exc:
         raise MalformedResponseError(
-            f"{field} {raw!r} is not a number: {exc}. Not defaulted to 0 - a tonnage this module "
-            f"cannot read is not a tonnage of none."
+            f"{field} {raw!r} is not a number: {exc}. Not defaulted to 0 and not stored as NULL - "
+            f"a tonnage this module cannot read is neither a tonnage of none nor an unreported "
+            f"week."
         ) from exc
 
 
@@ -150,15 +193,28 @@ def movement_from(record: dict) -> LockMovement:
     `MS Locks 27`, no mapping to an internal id.
     """
     context = "lock movement record"
+
+    # THREE CONDITIONS, KEPT APART (CLAUDE.md § 16). `optional_field` collapses an absent key and
+    # an explicit null into ABSENT - both are USDA not reporting this lock-week - and hands
+    # everything else to parse_tons, which raises on a value it cannot read.
+    #
+    # `record.get(FIELDS["tons"])` is the one-line version, it is one call shorter, and it is
+    # FORBIDDEN: it collapses the unparseable case into the absent one, so a corrupt value would be
+    # filed as a reporting gap. There are already 108 legitimate gaps for it to hide among, and
+    # they sit on the three summary locks.
+    published_tons = optional_field(record, FIELDS["tons"], context=context)
+
     return LockMovement(
         lock=str(required_field(record, FIELDS["lock"], context=context)).strip(),
         week_ending=parse_period_label(
             required_field(record, FIELDS["week_ending"], context=context), field="week_ending"
         ),
         commodity=str(required_field(record, FIELDS["commodity"], context=context)).strip(),
-        # `.get`, not `required_field`: an absent measure IS the unreported case, and it is the
-        # one case in this module where a missing field is not an error.
-        tons=parse_optional_decimal(record.get(FIELDS["tons"]), field="tons"),
+        # NOT `required_field`: an absent measure IS the unreported case, and it is the one field
+        # in this module whose absence is not an error. The three key fields stay required - a row
+        # that cannot be keyed can never be corrected or superseded, while a row with no measure
+        # is an ordinary unreported week.
+        tons=(None if published_tons is ABSENT else parse_tons(published_tons)),
     )
 
 
@@ -257,13 +313,18 @@ def ingest(conn, client: SocrataClient | None = None, today: date | None = None)
     written = upsert_movements(conn, movements)
     conn.commit()
 
+    # THE TWO POPULATIONS ARE LOGGED SEPARATELY, never as one "no data" figure. A reported zero is
+    # a measurement and an unreported week is not, and a combined count would hide the one
+    # distinction this module is arranged around in the line an operator actually reads.
     logger.info(
-        "%s: %d record(s) received from %s, %d row(s) written (%d reported zero tons)",
+        "%s: %d record(s) received from %s, %d row(s) written "
+        "(%d reported zero tons, %d not reported)",
         TABLE,
         len(records),
         start.isoformat(),
         written,
         sum(1 for m in movements if m.tons == 0),
+        sum(1 for m in movements if m.tons is None),
     )
     return written
 
