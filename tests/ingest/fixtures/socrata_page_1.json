@@ -1,0 +1,26 @@
+[
+  {
+    "week_ending": "2021-01-02T00:00:00.000",
+    "lock_id": "Lock 27",
+    "grain_type": "Corn",
+    "direction": "Down",
+    "barges": "41",
+    "tons": "61500"
+  },
+  {
+    "week_ending": "2021-01-02T00:00:00.000",
+    "lock_id": "Lock 27",
+    "grain_type": "Soybeans",
+    "direction": "Down",
+    "barges": "18",
+    "tons": "27000"
+  },
+  {
+    "week_ending": "2021-01-09T00:00:00.000",
+    "lock_id": "Lock 27",
+    "grain_type": "Corn",
+    "direction": "Down",
+    "barges": "0",
+    "tons": "0"
+  }
+]

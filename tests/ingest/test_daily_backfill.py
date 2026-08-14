@@ -74,19 +74,24 @@ class ScriptedDailyClient:
 
 
 class ConnStub:
-    """A connection standing in for an EMPTY daily table.
+    """A connection standing in for a daily table holding `newest` (default: EMPTY).
 
-    `execute` answers the resume query with NULL - which is the honest model of a site that has
-    no daily rows yet, and the state in which `resume_point` must fall back to that site's own
-    seeded floor. The real resume_point() therefore runs in these unit tests rather than being
-    bypassed; only the write is replaced.
+    `execute` answers the resume query with NULL by default - which is the honest model of a site
+    that has no daily rows yet, and the state in which `resume_point` must fall back to that
+    site's own seeded floor. The real resume_point() therefore runs in these unit tests rather
+    than being bypassed; only the write is replaced.
+
+    Passing `newest` models the OTHER state, a site that already has history: the walk then
+    resumes from the data and did not start at the seed, which is the distinction the run-versus-
+    record log wording depends on.
 
     It refuses any statement other than the resume query, so a test that started depending on
     some other database access fails loudly here instead of silently receiving NULL.
     """
 
-    def __init__(self):
+    def __init__(self, newest: date | None = None):
         self.commits = 0
+        self.newest = newest
         self.statements: list[str] = []
 
     def execute(self, sql, params=None):
@@ -97,10 +102,12 @@ class ConnStub:
                 f"database path it does not model: {sql!r}"
             )
 
+        newest = self.newest
+
         class _Result:
             @staticmethod
             def fetchone():
-                return (None,)
+                return (newest,)
 
         return _Result()
 
@@ -189,7 +196,8 @@ def test_first_data_date_is_logged_per_site(monkeypatch):
     assert result.seeded_floor == date(1990, 1, 1)
 
     described = result.describe()
-    assert "FIRST DATA 2000-03-15" in described, (
+    assert result.walked_from_seed, "this run started at the floor and should say so"
+    assert "FIRST DATA IN THE RECORD 2000-03-15" in described, (
         f"the summary omits the first-data date: {described}"
     )
     assert "1990-01-01" in described, (
@@ -265,6 +273,79 @@ def test_an_out_of_record_window_aborts_rather_than_advancing(monkeypatch):
         "an empty window stopped the run; empty windows are ordinary and must advance"
     )
     assert result.empty_windows == len(tiling) - 1
+
+
+def test_a_resumed_run_does_not_report_its_first_date_as_the_record_start(monkeypatch, caplog):
+    """A run that resumed from stored data must not invite seed reconciliation.
+
+    OBSERVED ON THE INSTANCE, 2026-08-14. A resumed Memphis run reported `FIRST DATA 2020-01-01`
+    against a *correct* seed of 2014-10-01, under a line stating that value is what the seed gets
+    reconciled against. The record went back to 2014 in the table; 2020 was simply where that run
+    picked up. Acting on the line as written means "correcting" a seed that is right - and the
+    seed is the thing the whole close-out commit existed to get right.
+
+    A log string, not behaviour: the walk was correct, the sentence about it was not.
+    """
+    monkeypatch.setattr(
+        usgs_daily_ingest, "upsert_daily_readings", lambda conn, readings: len(readings)
+    )
+
+    site = gauge(site_id="07032000", dv_record_start=date(2014, 10, 1))
+    stored = date(2020, 1, 1)
+
+    with caplog.at_level(logging.INFO, logger=daily_backfill.logger.name):
+        result = daily_backfill.backfill_site(
+            ConnStub(newest=stored),
+            client=ScriptedDailyClient(default=[daily(stored, site="07032000")]),
+            gauge=site,
+            end=date(2020, 12, 31),
+            window_days=1825,
+        )
+
+    assert result.first_data_date == stored
+    assert not result.walked_from_seed, (
+        "the run resumed from MAX(date) but reports having walked from the seed"
+    )
+
+    described = result.describe()
+    assert "THIS RUN" in described, f"the summary does not say the date is this run's: {described}"
+    assert "FIRST DATA IN THE RECORD" not in described, (
+        f"a resumed run claims to report the start of the record: {described}"
+    )
+    assert "reconcile" not in described.lower() or "not reconciled" in described.lower(), (
+        f"the summary invites reconciling the seed against a resumed run's first date: {described}"
+    )
+
+    logged = " ".join(record.getMessage() for record in caplog.records)
+    assert "NOT the start of the record" in logged, (
+        f"the log line does not distinguish this run's first date from the record's: {logged}"
+    )
+
+    # THE CONTROL: the same site walking from its floor DOES report the record and DOES invite
+    # reconciliation. Without this half, deleting the invitation everywhere would pass.
+    from_seed = daily_backfill.backfill_site(
+        ConnStub(),
+        client=ScriptedDailyClient(default=[daily(date(2014, 10, 1), site="07032000")]),
+        gauge=site,
+        end=date(2015, 12, 31),
+        window_days=1825,
+    )
+    assert from_seed.walked_from_seed
+    assert "FIRST DATA IN THE RECORD" in from_seed.describe()
+
+    # And an explicit --start is never a walk from the seed, even when the dates coincide: what
+    # makes a first-data date reconcilable is that nothing earlier was skipped.
+    overridden = daily_backfill.backfill_site(
+        ConnStub(),
+        client=ScriptedDailyClient(default=[daily(date(2014, 10, 1), site="07032000")]),
+        gauge=site,
+        end=date(2015, 12, 31),
+        window_days=1825,
+        start_override=date(2014, 10, 1),
+    )
+    assert not overridden.walked_from_seed, (
+        "a --start override that happens to equal the seed is still a skipped walk"
+    )
 
 
 def test_expected_and_unexplained_empty_windows_log_at_different_levels(caplog, monkeypatch):

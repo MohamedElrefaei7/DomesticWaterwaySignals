@@ -3,16 +3,126 @@
 This is the **log**: current state, decisions as they are made, and `§ Up Next`. Stable contracts
 live in `CLAUDE.md`. If something here hardens into an invariant, move it there and note the move.
 
-**Last updated:** 2026-08-14 (Phase 3 close-out: measured coverage, corrected seeds, known gaps;
-live steps outstanding)
+**Last updated:** 2026-08-14 (Phase 3 VERIFIED ON THE INSTANCE and written back; Phase 4 USDA
+ingest written offline)
 
 ---
 
 ## Current state
 
-**PHASE 3 CLOSE-OUT (MEASURED COVERAGE, CORRECTED SEEDS, KNOWN GAPS) IS WRITTEN AND VERIFIED
-OFFLINE, as of 2026-08-14. The two compression ratios are STILL UNMEASURED and are still the
-outstanding deliverable of Phase 3.**
+**PHASE 3 IS COMPLETE AND VERIFIED ON THE INSTANCE, 2026-08-14. The compression measurement —
+outstanding since Phase 3 was written — is taken, and both ratios are below.**
+
+### The daily backfill, on the instance
+
+- **30,539 rows across four sites in 12.5 seconds.** Per-site coverage matches the corrected seeds
+  **exactly**: St. Louis from 1990-01-01, Memphis from 2014-10-01 (92 days in 2014, full years
+  after), Vicksburg from 2008-01-01, Baton Rouge from 2004-03-17. The seeds corrected in `0011`
+  were right — `min(date)` per site agrees with each one.
+- **Instantaneous table: 258,739 rows** — St. Louis 2007-10-01 to present, plus one year of Baton
+  Rouge from the Phase 3 rehearsal.
+- **The `gauge_series` view was spot-checked at a seam.** Memphis 2015-06-15 resolves `dv`; St.
+  Louis 2015-06-15 resolves `iv` with a computed daily mean of 454695.652…. IV precedence holds and
+  the `source` column exposes which side of the seam a row came from — which is the whole reason
+  that column exists.
+
+### Compression, measured — both hypertables
+
+| Table | Chunks (compressed) | Before | After | Ratio |
+|---|---|---|---|---|
+| `gauge_readings_iv` | 986 (980) | 134,791,168 B | 40,140,800 B | **3.36:1, 70.2%** |
+| `gauge_readings_daily` | 37 (35) | 10,960,896 B | 1,433,600 B | **7.65:1, 86.9%** |
+
+**MOST OF THE WIN IS IN INDEXES, NOT TABLE DATA**, and recording that is the point rather than
+recording the two ratios. IV index bytes 70,369,280 → 16,056,320; daily index bytes 6,455,296 →
+573,440 (≈11:1). Table bytes compress far less: 56.4 → 16.1 MB and 4.2 → 0.57 MB.
+
+That explains the counterintuitive headline — **the smaller table compresses better** — which
+otherwise invites the wrong conclusion that daily data is somehow more compressible. It is not:
+the daily table is proportionally more index than the instantaneous one, and indexes are what
+columnar compression flattens.
+
+**The honest framing, and it belongs in any README text:** these are real measurements on a real
+~290k-row series and the reductions are genuine, **but at this volume Postgres alone would be
+entirely adequate.** TimescaleDB here is a demonstrated engineering choice, not a necessity the
+data forced. No README line may imply otherwise.
+
+**Tuning candidate, logged and NOT acted on:** 986 chunks for 258,739 IV rows is the main drag on
+that table's ratio — a 7-day interval across 1990–2026 with only one dense site leaves many sparse
+chunks carrying fixed per-chunk overhead. A 30-day interval would likely improve both the ratio and
+planning. **Chunk interval changes affect NEW chunks only**, so this is a deliberate future
+migration on a considered date, not a fix to slip in.
+
+### Two housekeeping items from the same session, both fixed in the Phase 4 commit
+
+1. **`daily_backfill`'s `FIRST DATA` line reported the first date of the RUN, not of the record.**
+   On a resumed run it printed `2020-01-01` for Memphis against a **correct** seed of `2014-10-01`,
+   under a sentence saying that value is what the seed reconciles against — which would prompt
+   "correcting" a seed the close-out commit had just got right. Fixed as a log-wording change (the
+   walk was correct; the sentence about it was not): the summary and the log now distinguish
+   **FIRST DATA IN THE RECORD** from **first date in THIS RUN**, and only a walk that actually
+   began at the seed invites reconciliation. `--start` never counts as such a walk, even when the
+   dates coincide, because what makes a date reconcilable is that nothing earlier was skipped.
+2. **Mutation confirmation must clear `__pycache__` between restore and re-run.** A restore once
+   still read red from stale bytecode, which is indistinguishable from a restore that did not
+   happen. Now in `CLAUDE.md § 0`, along with the rule that a mutation going red for the wrong
+   reason is not a confirmed guard.
+
+---
+
+## The thesis, as Phase 3 leaves it
+
+Phase 3 changed what this project can honestly claim. Restated plainly, because the earlier
+framing in this file no longer matches the data:
+
+- **The feature is DISCHARGE (`00060`), not stage.** Stage is unavailable via USGS IV at Memphis
+  and Vicksburg, and deriving it from a rating curve was rejected as fabrication, not deferred
+  (`CLAUDE.md § 14`).
+- **Corridor depth is uneven: one deep site (St. Louis, 1990→) and three shallower**, with roughly
+  **sixteen years of four-site overlap (2010→)**. Both labelled low-water events — 2022 and 2023 —
+  are covered at all four sites.
+- **Any baseline needing pre-2004 history runs on St. Louis alone.** Not "St. Louis and Memphis":
+  Memphis serves nothing between 1994 and 2014.
+
+---
+
+## Phase 4 — USDA ingest (written offline, 2026-08-14)
+
+**THE DATASET IDENTIFIERS ARE UNRESOLVED AND THE INGEST CANNOT RUN UNTIL A HUMAN RESOLVES THEM.**
+That is the state migration `0013` seeds deliberately, not an incomplete commit.
+
+- `0013` `usda_datasets` — three keys (`barge_rates`, `lock_movements`, `cost_indicators`), every
+  `dataset_id` **NULL**, every period bound NULL. A Socrata id is a four-four token and this
+  project does not guess identifiers (`CLAUDE.md § 1`); an invented one 404s and reads like a
+  network fault. Every client path raises `DatasetNotResolvedError` naming the key **before any
+  request is issued**, and a test asserts the request log is empty when it does.
+- `0014` `barge_rates` — key `(segment, week_ending, horizon)`; `pct_of_tariff` stored **exactly as
+  published**. `0015` `lock_movements` — key `(lock_id, week_ending, grain_type, direction)`;
+  `barges`/`tons` nullable, because **0 is a reported value and NULL is an unreported week**.
+- **Neither is a hypertable**, and that is decided by arithmetic rather than by consistency: these
+  are weekly series of thousands of rows, against the 290k where Phase 3's own measurement
+  concluded Postgres alone would have sufficed. A test reads the TimescaleDB catalog and fails if
+  either is converted.
+- `socrata_client.py` pages until an **empty** page — never a short one — and **raises** at its
+  page cap rather than returning a prefix. Every query carries an explicit `$order`.
+- Two cadence entries (`usda_rates_ingest`, `usda_movements_ingest`), weekly, **separate jobs**:
+  one job over two datasets produces one `job_runs` row whose status is the AND of two independent
+  sources, and the heartbeat could not then say which one went quiet. Both tables are in the
+  freshness registry at **10 days** — weekly publication plus a late holiday week must not alert,
+  two consecutive missed publications must.
+- **`cost_indicators` is seeded and deliberately not ingested.** No table, no cadence entry, and
+  `usda_backfill --dataset` refuses it by name rather than failing somewhere deeper.
+
+**The USDA Socrata field names in `usda_rates.FIELDS` and `usda_movements.FIELDS` are PROVISIONAL.**
+They come from the shape the fixtures were written to, not from the live catalog, and confirming
+them is part of live verification step 3. Every read goes through `required_field`, which raises
+naming the fields a record actually carries — so a wrong name fails loudly on the first record and
+never writes NULLs.
+
+
+**PHASE 3 CLOSE-OUT (MEASURED COVERAGE, CORRECTED SEEDS, KNOWN GAPS) — written 2026-08-14 and
+since VERIFIED ON THE INSTANCE; see the top of this section for the measured outcome. The
+"compression still unmeasured" line below is superseded: both ratios are recorded above.**
 
 - **194 tests green with zero skips** against a throwaway local TimescaleDB container on the
   pinned image; offline the same suite is `137 passed, 57 skipped`. Phase 3.5's baseline was
@@ -710,9 +820,42 @@ Bring the stack up with `docker compose -f docker-compose.yml -f /root/dws-local
 Delete it once the `worker` service is containerized; at that point `DATABASE_URL` becomes
 `timescaledb:5432` and nothing needs a published port.
 
-**THE PHASE 3 CLOSE-OUT LIVE VERIFICATION IS THE NEXT THING TO DO, and it supersedes Phase 3.5's
-steps 1, 3, 5 and 6.** Phase 3.5's step 2 (read the rename back from the catalog) and step 7 (the
-view seam spot-check) are still worth running and are not repeated here. Run this in order:
+**PHASE 4'S LIVE VERIFICATION IS THE NEXT THING TO DO. Steps 2 and 3 are the ones nothing can
+proceed without — the ingest cannot run until the dataset ids exist.**
+
+1. `python3 -m app.orchestration.migrate` — expect **0013, 0014, 0015** applied, **fifteen total**.
+2. **Resolve the three dataset ids.** Browse the AgTransport Socrata catalog, identify the datasets
+   for barge rates, lock movements and cost indicators, and record each four-four id. **While
+   there, record the COLUMN NAMES** — `usda_rates.FIELDS` and `usda_movements.FIELDS` are
+   provisional and any that differ is a one-line correction in that dict.
+3. **Establish coverage per dataset with a COUNTED FULL-RANGE query** — `$select=count(*)`, plus
+   min and max of the date column. `CLAUDE.md § 15`: not a sampled window, not the dataset's
+   description, not its web page. Phase 3 seeded a period of record from sampled windows and was
+   wrong at three of four sites.
+4. Land the ids and the period bounds in a **new numbered migration (`0016`)**, then re-run the
+   migration runner. The seed is human-owned; nothing in the ingest path writes to
+   `usda_datasets`.
+5. Backfill rates: `python3 -m app.ingest.usda_backfill --dataset barge_rates`. **Report row count
+   and wall time.**
+6. Backfill movements likewise. Report both.
+7. Sanity: `select segment, count(*), min(week_ending), max(week_ending) from barge_rates group
+   by 1 order by 1;` — expect the seven segments named in the handoff, and compare min/max against
+   the bounds from step 3.
+8. **CHECK THE 2022 EVENT IS VISIBLE IN THE TARGET.** Pull Cairo–Memphis `nearby` rates for
+   2022-08-01 to 2022-12-31 and look at whether they rise. This is the first time the thesis's two
+   halves can be looked at together — discharge on one side, freight rates on the other. **Report
+   what you see, including if it is not what the thesis predicts** (`CLAUDE.md § 0`: when a
+   measurement contradicts the plan, the measurement wins).
+9. `python3 -m verify.preflight` — six gates green. Its migration-count gate reads the directory,
+   so fifteen migrations need no change to it.
+10. Start the scheduler; confirm **both** USDA jobs register and write `job_runs` rows. A first run
+    writing 0 rows is not necessarily wrong — but with an unresolved dataset it will RAISE, which
+    is the intended failure.
+11. **Write the outcome back in the same session.** Part 1 of this commit exists because that did
+    not happen last time.
+
+**Phase 3's close-out verification — DONE on the instance 2026-08-14.** Its outcomes are recorded
+at the top of `§ Current state`; the step list is retained below for the record of what was asked.
 
 1. `python3 -m app.orchestration.migrate` — expect **0011 and 0012** applied, **twelve total**.
 2. Confirm the corrected seeds and the NULL instantaneous starts:
@@ -833,8 +976,20 @@ record of what Phase 3 asked for.
    deleting data — `job_runs` and `gauge_readings` are not to be pruned by hand. A guard that has
    never been seen refusing is not a guard.
 
-**Then Phase 4.** The freshness-registry requirement in `CLAUDE.md § 12` now binds for every
-subsequent ingest client, and `CLAUDE.md § 14` is the contract each one is written against.
+**THEN PHASE 5 — the normalizer and the features.** Phase 4 is the last ingest phase: with rates
+and movements landed, both halves of the pair exist in the database and nothing further is needed
+from an external source to build a feature.
+
+Two things Phase 3 and 4 leave that Phase 5 must respect rather than rediscover:
+
+- **`gauge_known_gaps` exists so nothing interpolates across a hole.** A rolling mean or a seasonal
+  baseline computed straight over Memphis 1994–2014 draws a smooth line no gauge ever read. The
+  rows are queryable for exactly this reason (`CLAUDE.md § 15`).
+- **`0` and `NULL` in `lock_movements` are different facts** and a feature that averages them
+  together is wrong in the weeks that matter most (`CLAUDE.md § 16`).
+
+The freshness-registry requirement in `CLAUDE.md § 12` binds for every ingest client, and
+`CLAUDE.md § 14`, `§ 15` and `§ 16` are the contracts each one is written against.
 
 ---
 
@@ -849,11 +1004,17 @@ subsequent ingest client, and `CLAUDE.md § 14` is the contract each one is writ
   whether the IV backfill applies to rolling-retention sites at all.** The likely answer is that
   it does not and the incremental poll is the only path. First candidate for the next ingest
   commit.
-- **Both compression ratios are unmeasured and no number is written anywhere.** Live verification
-  step 7 of the close-out list. Nothing in the repo, the README, or the résumé may quote a ratio
-  until it is taken. **Expect the daily one to be unimpressive** — the corrected seeds put the
-  daily table at roughly 60k rows, where TimescaleDB is an engineering measurement on a real
-  series rather than a storage necessity. Report it anyway; the measurement wins (`CLAUDE.md § 0`).
+- ~~**Both compression ratios are unmeasured.**~~ **MEASURED on the instance 2026-08-14 and
+  recorded at the top of `§ Current state`: 3.36:1 on `gauge_readings_iv`, 7.65:1 on
+  `gauge_readings_daily`, with most of the win in index bytes.** What remains open from this item:
+  any README or résumé line quoting them must carry the honest framing — real measurements, real
+  reductions, and **at ~290k rows Postgres alone would have been adequate**. Also open: the
+  **30-day IV chunk-interval tuning candidate**, logged and deliberately not acted on, since a
+  chunk interval change affects new chunks only.
+- **The USDA dataset ids are NULL and the USDA ingest cannot run until a human resolves them.**
+  Live verification steps 2–4. `cost_indicators` is seeded with no ingest path at all, on purpose.
+  The Socrata **field names** in `usda_rates.FIELDS` / `usda_movements.FIELDS` are provisional and
+  are confirmed at the same visit to the catalog.
 - **`gauge_series` buckets instantaneous data by UTC date while USGS computes its daily mean over
   the site's LOCAL calendar day.** On the lower Mississippi that is a 5–6 hour offset at both
   edges of the window. Small for a river that moves in feet per day; not zero. Fixing it properly

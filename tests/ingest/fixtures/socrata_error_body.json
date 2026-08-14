@@ -1,0 +1,11 @@
+{
+  "code": "query.soql.no-such-column",
+  "error": true,
+  "message": "Column not found: week_endng",
+  "data": {
+    "data": {
+      "column": "week_endng",
+      "dataset": "abcd-1234"
+    }
+  }
+}

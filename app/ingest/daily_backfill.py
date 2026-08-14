@@ -114,7 +114,26 @@ def windows(start: date, end: date, window_days: int = DEFAULT_WINDOW_DAYS) -> l
     return tiles
 
 
-def resume_point(conn, gauge) -> tuple[date, str]:
+@dataclass(frozen=True)
+class ResumePoint:
+    """Where this site's walk starts, why, and WHETHER IT STARTED FROM THE SEED.
+
+    `from_seed` exists because of a real misreading on the instance, 2026-08-14: a resumed run
+    reported `FIRST DATA 2020-01-01` for Memphis against a correct seed of 2014-10-01, under a log
+    line saying that value is what the seed gets reconciled against. It is not - it is the first
+    date of THAT RUN, and the run began at MAX(date) in a table that already held the record back
+    to 2014. Acting on the line as written would mean "correcting" a seed that was right.
+
+    Only a walk that actually began at the floor produces a first-data date the seed can be
+    reconciled against, and only such a walk should invite it.
+    """
+
+    start: date
+    why: str
+    from_seed: bool
+
+
+def resume_point(conn, gauge) -> ResumePoint:
     """Where this site's daily backfill starts, and why. Per site, from the data.
 
     MAX(date) when the site has rows, its own `dv_record_start` floor when it does not. Never a
@@ -122,11 +141,16 @@ def resume_point(conn, gauge) -> tuple[date, str]:
     """
     newest = usgs_daily_ingest.latest_date(conn, gauge.usgs_site_id)
     if newest is not None:
-        return newest, f"resuming from MAX(date) in gauge_readings_daily ({newest.isoformat()})"
-    return (
+        return ResumePoint(
+            newest,
+            f"resuming from MAX(date) in gauge_readings_daily ({newest.isoformat()})",
+            from_seed=False,
+        )
+    return ResumePoint(
         gauge.dv_record_start,
         f"no daily rows stored; starting from this site's own dv_record_start floor "
         f"({gauge.dv_record_start.isoformat()})",
+        from_seed=True,
     )
 
 
@@ -147,6 +171,10 @@ class DailySiteResult:
     rows_written: int = 0
     first_data_date: date | None = None
 
+    # Whether this run's walk began at the seeded floor. False when it resumed from stored data,
+    # and then `first_data_date` is the first date THIS RUN saw - not the start of the record.
+    walked_from_seed: bool = False
+
     def describe(self) -> str:
         first = (
             self.first_data_date.isoformat()
@@ -154,13 +182,31 @@ class DailySiteResult:
             else "NEVER - no window returned any data"
         )
         floor = self.seeded_floor.isoformat() if self.seeded_floor else "(none)"
+
+        # TWO DIFFERENT FACTS, AND THE WORDING SAYS WHICH ONE THIS IS.
+        #
+        # A resumed run's earliest date is a property of where it started, not of the record, and
+        # reporting it under "reconcile the seed against this" is how a correct seed gets
+        # "corrected". Observed on the instance 2026-08-14: Memphis reported 2020-01-01 against a
+        # correct floor of 2014-10-01.
+        if self.walked_from_seed:
+            provenance = (
+                f"FIRST DATA IN THE RECORD {first} (walked from the seeded dv_record_start floor "
+                f"{floor} - THIS is what the seed reconciles against)"
+            )
+        else:
+            provenance = (
+                f"first date in THIS RUN {first} (resumed from stored data, so this is NOT the "
+                f"start of the record and the seed - {floor} - is not reconciled against it)"
+            )
+
         return (
             f"{self.site_id}: {self.windows_requested} window(s), "
             f"{self.empty_windows} empty "
             f"({self.unexplained_empty_windows} UNEXPLAINED), "
             f"{self.readings_received} value(s) received, "
             f"{self.rows_written} row(s) written. "
-            f"FIRST DATA {first} (seeded dv_record_start floor {floor})"
+            f"{provenance}"
         )
 
 
@@ -186,16 +232,25 @@ def backfill_site(
     """
     if start_override is not None:
         start = start_override
+        # An overridden start is never a walk from the seed, even when the two dates coincide:
+        # what makes a first-data date reconcilable is that nothing earlier was skipped, and
+        # --start is the flag that skips.
+        from_seed = False
         logger.warning(
             "%s: start OVERRIDDEN to %s by --start; the resume point in the data is being ignored",
             gauge.usgs_site_id,
             start_override.isoformat(),
         )
     else:
-        start, why = resume_point(conn, gauge)
-        logger.info("%s: %s", gauge.usgs_site_id, why)
+        resume = resume_point(conn, gauge)
+        start, from_seed = resume.start, resume.from_seed
+        logger.info("%s: %s", gauge.usgs_site_id, resume.why)
 
-    result = DailySiteResult(site_id=gauge.usgs_site_id, seeded_floor=gauge.dv_record_start)
+    result = DailySiteResult(
+        site_id=gauge.usgs_site_id,
+        seeded_floor=gauge.dv_record_start,
+        walked_from_seed=from_seed,
+    )
 
     for window in windows(start, end, window_days):
         result.windows_requested += 1
@@ -295,13 +350,26 @@ def backfill_site(
         earliest = min(r.date for r in readings)
         if result.first_data_date is None or earliest < result.first_data_date:
             result.first_data_date = earliest
-            logger.info(
-                "%s: FIRST DATA at %s (seeded dv_record_start floor is %s). This is what the "
-                "seed gets reconciled against - the backfill does NOT update it (CLAUDE.md § 15).",
-                gauge.usgs_site_id,
-                earliest.isoformat(),
-                gauge.dv_record_start.isoformat(),
-            )
+            if from_seed:
+                logger.info(
+                    "%s: FIRST DATA IN THE RECORD at %s. This walk began at the seeded "
+                    "dv_record_start floor (%s), so nothing earlier was skipped and THIS is what "
+                    "the seed gets reconciled against - the backfill does NOT update it "
+                    "(CLAUDE.md § 15).",
+                    gauge.usgs_site_id,
+                    earliest.isoformat(),
+                    gauge.dv_record_start.isoformat(),
+                )
+            else:
+                logger.info(
+                    "%s: first date in THIS RUN is %s. The walk resumed from stored data rather "
+                    "than from the seeded floor (%s), so this is NOT the start of the record and "
+                    "the seed is NOT reconciled against it - re-read min(date) from "
+                    "gauge_readings_daily for that.",
+                    gauge.usgs_site_id,
+                    earliest.isoformat(),
+                    gauge.dv_record_start.isoformat(),
+                )
 
         written = usgs_daily_ingest.upsert_daily_readings(conn, readings)
         conn.commit()
@@ -439,11 +507,21 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - the live-v
             f"MEASURE and seed as gaps before Phase 5's features interpolate across one."
         )
 
-    print(
-        "\nEach site's FIRST DATA date above is what its seeded dv_record_start gets reconciled\n"
-        "against. This backfill did NOT update the seed and must not: correct it deliberately,\n"
-        "in a NEW numbered migration (CLAUDE.md § 15)."
-    )
+    reconcilable = [r for r in results if r.walked_from_seed]
+    if reconcilable:
+        print(
+            "\nThe sites reporting FIRST DATA IN THE RECORD above walked from their seeded\n"
+            "dv_record_start, so those dates are what the seed reconciles against. This backfill\n"
+            "did NOT update the seed and must not: correct it deliberately, in a NEW numbered\n"
+            "migration (CLAUDE.md § 15)."
+        )
+    if len(reconcilable) < len(results):
+        print(
+            "\nThe remaining sites RESUMED FROM STORED DATA. Their earliest date above is a\n"
+            "property of this run, not of the record, and reconciling a seed against it would\n"
+            "'correct' a seed that is already right. Use:\n"
+            "  select usgs_site_id, min(date) from gauge_readings_daily group by 1 order by 1;"
+        )
     return 0
 
 

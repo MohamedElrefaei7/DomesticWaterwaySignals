@@ -487,22 +487,28 @@ def test_an_unqueryable_registered_table_alerts_rather_than_skipping(
     assert verdicts[1].error is None
 
 
-def test_freshness_registry_covers_both_reading_tables(migrated_db, database_url):
+def test_freshness_registry_covers_every_ingest_table(migrated_db, database_url):
     """Every ingest table is registered, and each names a job the cadence table schedules.
 
-    CLAUDE.md § 12: no ingest client is complete until it registers its table. Phase 3.5 adds a
-    second ingest table, and the failure it guards against is the cheap one - adding the daily
-    backbone, wiring its job, and never registering it, so the table that carries 35 years of
-    history is the one nothing watches. That table would then be reported healthy by omission:
-    the heartbeat's green light would mean "the one table I know about is fine."
+    CLAUDE.md § 12: no ingest client is complete until it registers its table. The failure this
+    guards against is the cheap one - adding an ingest client, wiring its job, and never
+    registering the table, so the newest source is the one nothing watches. It would then be
+    reported healthy by omission: the heartbeat's green light would mean "the tables I know about
+    are fine."
 
-    Asserted as exact set equality over the registered tables, not `>= 1`. A subset assertion
-    passes with the daily table missing, which is precisely the change this catches.
+    Asserted as EXACT SET EQUALITY, not `>=`. A subset assertion passes with a table missing,
+    which is precisely the change this catches - so a new ingest table turns this red until it is
+    named here, deliberately, in the commit that creates it. Phase 4 adds the two USDA tables.
     """
     registered = {f.table for f in heartbeat.FRESHNESS}
-    assert registered == {"gauge_readings_iv", "gauge_readings_daily"}, (
-        f"the freshness registry covers {sorted(registered)}. Both reading tables must be "
-        f"registered in the commit that creates them (CLAUDE.md § 12)."
+    assert registered == {
+        "gauge_readings_iv",
+        "gauge_readings_daily",
+        "barge_rates",
+        "lock_movements",
+    }, (
+        f"the freshness registry covers {sorted(registered)}. Every ingest table must be "
+        f"registered in the commit that creates it (CLAUDE.md § 12)."
     )
 
     # Every entry names a job that is actually scheduled - a freshness entry for a job nothing

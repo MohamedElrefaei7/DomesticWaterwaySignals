@@ -1,0 +1,32 @@
+[
+  {
+    "week_ending": "2022-10-04T00:00:00.000",
+    "segment": "Cairo-Memphis",
+    "horizon": "Nearby",
+    "rate_pct_of_tariff": "112.5"
+  },
+  {
+    "week_ending": "2022-10-04T00:00:00.000",
+    "segment": "Cairo-Memphis",
+    "horizon": "1 Month Forward",
+    "rate_pct_of_tariff": "1050"
+  },
+  {
+    "week_ending": "2022-10-04T00:00:00.000",
+    "segment": "Cairo-Memphis",
+    "horizon": "3 Month Forward",
+    "rate_pct_of_tariff": "780.25"
+  },
+  {
+    "week_ending": "2022-10-11T00:00:00.000",
+    "segment": "Cairo-Memphis",
+    "horizon": "Nearby",
+    "rate_pct_of_tariff": "1420"
+  },
+  {
+    "week_ending": "2022-10-04T00:00:00.000",
+    "segment": "St. Louis",
+    "horizon": "Nearby",
+    "rate_pct_of_tariff": "965"
+  }
+]

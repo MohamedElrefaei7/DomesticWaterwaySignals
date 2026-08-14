@@ -171,6 +171,37 @@ CADENCES: tuple[Cadence, ...] = (
         # three days silent is a pattern worth an alert.
         overdue_after=timedelta(days=3),
     ),
+    Cadence(
+        job_name="usda_rates_ingest",
+        # WEEKLY, because the source publishes weekly. A barge rate is a week's figure; there is
+        # no fresher answer partway through, and polling daily would make seven requests for one
+        # row and write nothing on six of them.
+        #
+        # The poll's own eight-week trailing window (app/ingest/usda_rates.py, OVERLAP_WEEKS) is
+        # what catches USDA's revisions, not frequency - the same relationship the USGS entries
+        # have with their overlaps.
+        interval=timedelta(seconds=604800),
+        # TWO INTERVALS, not the three every other entry uses, and the difference is deliberate.
+        #
+        # Three weeks of silence before saying anything is too long for a weekly series: the
+        # freshness registry's own threshold for this table is 10 days, so a three-week job
+        # threshold would let the DATA check speak twice before the JOB check spoke once, which
+        # inverts which of the two an operator reads first. Two weeks means one missed
+        # publication is a blip and two consecutive ones are a pattern.
+        overdue_after=timedelta(days=14),
+    ),
+    Cadence(
+        job_name="usda_movements_ingest",
+        # Weekly, same publication cadence and same reasoning as the rates job.
+        #
+        # A SEPARATE ENTRY RATHER THAN ONE JOB FETCHING BOTH DATASETS. CLAUDE.md § 4 requires one
+        # @job per scheduled unit, and the operational reason is sharper than the rule: one job
+        # over two datasets produces one job_runs row whose status is the AND of two independent
+        # sources, so a movements outage would mark rates failed and the heartbeat could not say
+        # which one went quiet.
+        interval=timedelta(seconds=604800),
+        overdue_after=timedelta(days=14),
+    ),
 )
 
 BY_NAME: dict[str, Cadence] = {c.job_name: c for c in CADENCES}

@@ -25,6 +25,13 @@ wrong, say so in the commit report and leave it in place.
   this by **mutation**: revert the decision, watch the named test fail, restore it, and report that
   you did. A test you asserted would catch a regression, without watching it catch one, is a comment
   wearing a test's clothes.
+- **Mutation confirmation clears `__pycache__` between the restore and the re-run**, or runs under
+  `PYTHONDONTWRITEBYTECODE=1`. A restored file whose stale bytecode is still loaded reads exactly
+  like a restore that did not happen — the test stays red, and the natural conclusion is that the
+  restore failed or that the test is flaky. Observed on 2026-08-14; it cost a confirmation pass.
+- **A mutation that goes red for the wrong reason is not a confirmed guard.** An import error, a
+  `NameError`, or a different assertion failing proves only that the test runs. Re-do the mutation
+  in a form that reaches the assertion the guard is about, and report both passes.
 - **Report what you verified, not what you intended.** Commit reports are checked against the repo
   with `git show` and `grep`. A report describing a change that did not land is worse than no report.
 - **When a measurement contradicts the plan, the measurement wins.** Report the contradiction; do not
@@ -566,3 +573,45 @@ governs a source that speaks through more than one endpoint.
   **A gap table is never consulted to decide what not to request:** that lets a human-maintained
   row skip real data with no request, no empty response, and no evidence it happened. Asking and
   receiving nothing is cheap and self-correcting.
+
+---
+
+## 16. Paged API conventions
+
+Learned reading USDA AgTransport through Socrata (Phase 4). § 14 governs any one ingest client and
+§ 15 governs a source with several endpoints; this governs a source that returns its answer in
+pages. Every bullet describes a failure that reports success.
+
+- **Pagination terminates on an EMPTY page, never on a short one, and a page cap RAISES rather
+  than returning a prefix.** `while len(page) == limit` is shorter, reads naturally, and silently
+  truncates a dataset: a filtered query or a server-side row cap can return a short page
+  mid-sequence, after which the job reports success with a row count nobody can distinguish from a
+  small dataset. Returning what was collected when the cap is hit reintroduces the same truncation
+  through the safety valve, in the case where something is already known to be wrong. **The offset
+  advances by the requested limit, never by the number of rows received** — advancing by the
+  received count looks like it handles short pages and instead overlaps the next page by the
+  shortfall, which the upsert absorbs invisibly.
+- **Every paged query carries an explicit `$order`; ordering is never left to the server's
+  default.** Without one, paging can repeat rows and omit others, and the symptom is not "paging is
+  broken" — it is duplicate-key noise on the upsert plus a few missing periods, which reads like a
+  source problem and gets investigated as one.
+- **An error document is distinguished from an empty page.** Both are valid JSON with a length.
+  A rejected query read as "a page with no rows" ends the walk and reports a successful read of
+  nothing — § 14's empty-payload failure in a different costume.
+- **External dataset identifiers are resolved by a human and stored in a table; a NULL identifier
+  raises BEFORE any request is issued.** An invented identifier does not fail as a wrong answer,
+  it fails as a 404 that reads like a network fault, and the investigation goes to the network.
+  Same rule as the AMI id, the image digest, and the gauge site list (§ 1).
+- **Published units are stored exactly as published.** Unit conversion is a modelling decision and
+  does not belong in ingest. A percent divided by 100 on the way in is two orders of magnitude out
+  in a direction that looks entirely reasonable on a chart, and both versions are smooth positive
+  series, so nothing downstream can tell.
+- **A reported zero is a value, never a skipped row, and is always distinguishable from NULL.**
+  `0` means "reported as none" and `NULL` means "not reported". Skipping zeros deletes exactly the
+  observations an extreme event produces; coalescing NULL to zero invents measurements out of
+  silence. Both are one line long, both look like tidying, and the upsert's change detection must
+  use `IS DISTINCT FROM` so a revision from NULL to 0 counts as a change.
+- **Storage technology is chosen per table with a measurement behind it, not for consistency with a
+  neighbouring table.** Phase 3's own compression measurement concluded that at ~290k rows
+  Postgres alone would have been adequate; a weekly table of ten thousand rows does not become a
+  hypertable because the table beside it is one.

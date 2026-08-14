@@ -96,6 +96,60 @@ def dv_raw_body():
 
 
 @pytest.fixture
+def socrata_body():
+    """Return a loader: socrata_body("page_1") -> the fixture's RAW TEXT.
+
+    Text, not a parsed object, because the Socrata paging tests are about what the client does
+    with a body: a page of rows, an empty page, and an error document are all valid JSON, and
+    handing the tests something already parsed would skip the one decision under test (CLAUDE.md
+    § 16).
+    """
+
+    def _load(name: str) -> str:
+        path = FIXTURES_DIR / f"socrata_{name}.json"
+        if not path.is_file():
+            raise AssertionError(
+                f"no fixture {path.name} in {FIXTURES_DIR}. Fixtures are captured from the live "
+                f"service by a human; this suite never calls it."
+            )
+        return path.read_text(encoding="utf-8")
+
+    return _load
+
+
+@pytest.fixture
+def recording_bodies():
+    """Return a builder: recording_bodies([body, ...]) -> (fetch_callable, calls list).
+
+    Separate from `recording_fetch` rather than sharing it: that one serializes payload OBJECTS,
+    and a Socrata page IS a list, so passing one there would be read as a list of payloads. This
+    takes bodies already in their wire form, which is also what lets a test supply a body that is
+    not JSON at all.
+
+    `calls` accumulates every URL requested. Several tests assert it is EMPTY - "no request was
+    issued" is the actual claim in the unresolved-dataset case, and only the request log can make
+    it.
+    """
+
+    def _build(bodies):
+        remaining = list(bodies)
+        calls: list[str] = []
+
+        def fetch(url, timeout=None):
+            calls.append(url)
+            if not remaining:
+                raise AssertionError(
+                    f"the client made {len(calls)} request(s) but only {len(bodies)} body/bodies "
+                    f"were provided. Extra request: {url}"
+                )
+            return remaining.pop(0)
+
+        return fetch, calls
+
+    return _build
+
+
+@pytest.fixture
 def recording_fetch():
     """Return a builder: recording_fetch(payload) -> (fetch_callable, calls list).
 

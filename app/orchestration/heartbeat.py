@@ -106,6 +106,38 @@ FRESHNESS: tuple[Freshness, ...] = (
         # speaks after two consecutive daily polls have produced nothing.
         max_staleness=timedelta(hours=48),
     ),
+    Freshness(
+        job_name="usda_rates_ingest",
+        table="barge_rates",
+        # The published week label. A calendar date, like the daily table's - see newest_row()
+        # for how an age is taken from one without inventing a time of day.
+        timestamp_column="week_ending",
+        # TEN DAYS, and the arithmetic is publication-shaped rather than poll-shaped.
+        #
+        # A weekly series' newest row is normally up to 7 days old before anything has gone
+        # wrong - the week just ended. Add a holiday week, which USDA publishes late, and 8 or 9
+        # days old is still healthy. Ten days therefore does not fire on ordinary lateness.
+        #
+        # What it DOES catch is two consecutive missed publications: at 14 days the newest row
+        # would be two weeks old and this has already spoken. That is the pair of numbers the
+        # threshold is chosen against - not "about a week and a half".
+        #
+        # Stated because a threshold with no reasoning behind it is the one that gets loosened the
+        # first time it fires, and the loosening is never measured either.
+        max_staleness=timedelta(days=10),
+    ),
+    Freshness(
+        job_name="usda_movements_ingest",
+        table="lock_movements",
+        timestamp_column="week_ending",
+        # Same publication cadence, same arithmetic, same threshold as the rates table.
+        #
+        # BOTH TABLES ARE REGISTERED, not one. A single registration covering "the USDA ingest"
+        # would report healthy while the other table received nothing - the heartbeat's green
+        # light would mean "the one table I know about is fine", which is CLAUDE.md § 2's theme 2
+        # exactly. They have separate jobs, so they have separate entries.
+        max_staleness=timedelta(days=10),
+    ),
 )
 
 

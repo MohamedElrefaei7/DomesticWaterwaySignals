@@ -35,7 +35,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 from app import db
-from app.ingest import usgs_daily_ingest, usgs_ingest
+from app.ingest import usda_movements, usda_rates, usgs_daily_ingest, usgs_ingest
 from app.orchestration import heartbeat
 from app.orchestration.cadence import CADENCES
 
@@ -58,9 +58,15 @@ JOB_FUNCTIONS = {
     "heartbeat": heartbeat.heartbeat_job,
     "usgs_ingest": usgs_ingest.usgs_ingest_job,
     "usgs_daily_ingest": usgs_daily_ingest.usgs_daily_ingest_job,
+    # TWO ENTRIES FOR THE TWO USDA DATASETS, not one covering both. See their cadence entries: one
+    # job over two sources produces one job_runs row whose status is the AND of two independent
+    # things, and the heartbeat then cannot say which source went quiet.
+    "usda_rates_ingest": usda_rates.usda_rates_ingest_job,
+    "usda_movements_ingest": usda_movements.usda_movements_ingest_job,
 }
 
-# NOT REGISTERED HERE, DELIBERATELY: app/ingest/backfill.py and app/ingest/daily_backfill.py.
+# NOT REGISTERED HERE, DELIBERATELY: app/ingest/backfill.py, app/ingest/daily_backfill.py and
+# app/ingest/usda_backfill.py.
 # Both are CLIs a human runs, both take hours, and max_instances=1 would leave a scheduled copy
 # permanently "running" rather than either working or broken — a job the heartbeat cannot
 # distinguish from a healthy one.
