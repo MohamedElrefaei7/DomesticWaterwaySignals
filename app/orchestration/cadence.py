@@ -137,6 +137,24 @@ CADENCES: tuple[Cadence, ...] = (
         # Three intervals. Two consecutive misses are a blip; three is a pattern.
         overdue_after=timedelta(minutes=45),
     ),
+    Cadence(
+        job_name="usgs_ingest",
+        # HOURLY, AND NOT FASTER, because USGS TRANSMITS hourly even where it RECORDS every 15
+        # minutes. The measured native cadences are 15, 30, and 60 minutes across the four
+        # seeded sites, but the readings arrive from the gauges in hourly batches — so polling
+        # every fifteen minutes would make four times the requests for the same rows, three
+        # times out of four writing nothing. It would also be four times the load on a public
+        # service this project has no agreement with.
+        #
+        # The poll's own overlap window (app/ingest/usgs_ingest.py, OVERLAP = 2h) is what
+        # actually guarantees nothing is lost between runs, and the upsert makes that overlap
+        # free. Frequency is not the mechanism that keeps this complete; overlap is.
+        interval=timedelta(seconds=3600),
+        # Three intervals, matching the heartbeat's reasoning. Generous relative to the interval
+        # because USGS transmission is hourly but not punctual, and an alert that fires whenever
+        # a public service runs twenty minutes late is an alert everyone mutes.
+        overdue_after=timedelta(hours=3),
+    ),
 )
 
 BY_NAME: dict[str, Cadence] = {c.job_name: c for c in CADENCES}

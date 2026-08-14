@@ -1,0 +1,133 @@
+{
+  "name": "ns1:timeSeriesResponseType",
+  "declaredType": "org.cuahsi.waterml.TimeSeriesResponseType",
+  "scope": "javax.xml.bind.JAXBElement$GlobalScope",
+  "value": {
+    "queryInfo": {
+      "queryURL": "http://waterservices.usgs.gov/nwis/iv/format=json,1.1&sites=07010000,07032000,07289000,07374000&parameterCd=00060&startDT=2026-08-01T00:00:00Z&endDT=2026-08-01T01:59:59Z",
+      "criteria": {
+        "locationParam": "[ALL:07010000, ALL:07032000, ALL:07289000, ALL:07374000]",
+        "variableParam": "[00060]",
+        "parameter": []
+      },
+      "note": [
+        {"value": "[ALL:07010000, ALL:07032000, ALL:07289000, ALL:07374000]", "title": "filter:sites"},
+        {"value": "methodIds=[ALL]", "title": "filter:methodId"},
+        {"value": "sqlserver", "title": "server"}
+      ]
+    },
+    "timeSeries": [
+      {
+        "sourceInfo": {
+          "siteName": "Mississippi River at St. Louis, MO",
+          "siteCode": [
+            {"value": "07010000", "network": "NWIS", "agencyCode": "USGS"}
+          ],
+          "geoLocation": {
+            "geogLocation": {"srs": "EPSG:4326", "latitude": 0.0, "longitude": 0.0},
+            "localSiteXY": []
+          },
+          "note": [],
+          "siteType": [],
+          "siteProperty": []
+        },
+        "variable": {
+          "variableCode": [
+            {
+              "value": "00060",
+              "network": "NWIS",
+              "vocabulary": "NWIS:UnitValues",
+              "variableID": 45807197,
+              "default": true
+            }
+          ],
+          "variableName": "Streamflow, ft&#179;/s",
+          "variableDescription": "Discharge, cubic feet per second",
+          "valueType": "Derived Value",
+          "unit": {"unitCode": "ft3/s"},
+          "options": {"option": [{"name": "Statistic", "optionCode": "00000"}]},
+          "note": [],
+          "noDataValue": -999999.0,
+          "variableProperty": [],
+          "oid": "45807197"
+        },
+        "values": [
+          {
+            "value": [
+              {
+                "value": "148000",
+                "qualifiers": ["P"],
+                "dateTime": "2026-08-01T00:00:00.000-05:00"
+              }
+            ],
+            "qualifier": [],
+            "qualityControlLevel": [],
+            "method": [{"methodDescription": "", "methodID": 69928}],
+            "source": [],
+            "offset": [],
+            "sample": [],
+            "censorCode": []
+          }
+        ],
+        "name": "USGS:07010000:00060:00000"
+      },
+      {
+        "sourceInfo": {
+          "siteName": "Mississippi River at Memphis, TN",
+          "siteCode": [
+            {"value": "07032000", "network": "NWIS", "agencyCode": "USGS"}
+          ],
+          "geoLocation": {
+            "geogLocation": {"srs": "EPSG:4326", "latitude": 0.0, "longitude": 0.0},
+            "localSiteXY": []
+          },
+          "note": [],
+          "siteType": [],
+          "siteProperty": []
+        },
+        "variable": {
+          "variableCode": [
+            {
+              "value": "00060",
+              "network": "NWIS",
+              "vocabulary": "NWIS:UnitValues",
+              "variableID": 45807197,
+              "default": true
+            }
+          ],
+          "variableName": "Streamflow, ft&#179;/s",
+          "variableDescription": "Discharge, cubic feet per second",
+          "valueType": "Derived Value",
+          "unit": {"unitCode": "ft3/s"},
+          "options": {"option": [{"name": "Statistic", "optionCode": "00000"}]},
+          "note": [],
+          "noDataValue": -999999.0,
+          "variableProperty": [],
+          "oid": "45807197"
+        },
+        "values": [
+          {
+            "value": [
+              {
+                "value": "163000",
+                "qualifiers": ["P"],
+                "dateTime": "2026-08-01T00:00:00.000-05:00"
+              }
+            ],
+            "qualifier": [],
+            "qualityControlLevel": [],
+            "method": [{"methodDescription": "", "methodID": 69929}],
+            "source": [],
+            "offset": [],
+            "sample": [],
+            "censorCode": []
+          }
+        ],
+        "name": "USGS:07032000:00060:00000"
+      }
+    ]
+  },
+  "nil": false,
+  "globalScope": true,
+  "typeSubstituted": false
+}

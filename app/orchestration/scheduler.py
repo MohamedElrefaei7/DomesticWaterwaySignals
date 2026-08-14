@@ -35,6 +35,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 from app import db
+from app.ingest import usgs_ingest
 from app.orchestration import heartbeat
 from app.orchestration.cadence import CADENCES
 
@@ -55,7 +56,12 @@ JOBSTORE_TABLE = "apscheduler_jobs"
 # if you know to expect it.
 JOB_FUNCTIONS = {
     "heartbeat": heartbeat.heartbeat_job,
+    "usgs_ingest": usgs_ingest.usgs_ingest_job,
 }
+
+# NOT REGISTERED HERE, DELIBERATELY: app/ingest/backfill.py. It is a CLI a human runs, it takes
+# hours, and max_instances=1 would leave a scheduled copy permanently "running" rather than
+# either working or broken — a job the heartbeat cannot distinguish from a healthy one.
 
 
 class SchedulerConfigurationError(RuntimeError):

@@ -1,0 +1,199 @@
+{
+  "name": "ns1:timeSeriesResponseType",
+  "declaredType": "org.cuahsi.waterml.TimeSeriesResponseType",
+  "scope": "javax.xml.bind.JAXBElement$GlobalScope",
+  "value": {
+    "queryInfo": {
+      "queryURL": "http://waterservices.usgs.gov/nwis/iv/format=json,1.1&sites=07010000,07374000&parameterCd=00060&startDT=2026-08-01T00:00:00Z&endDT=2026-08-01T01:59:59Z",
+      "criteria": {
+        "locationParam": "[ALL:07010000, ALL:07374000]",
+        "variableParam": "[00060]",
+        "parameter": []
+      },
+      "note": [
+        {"value": "[ALL:07010000, ALL:07374000]", "title": "filter:sites"},
+        {"value": "methodIds=[ALL]", "title": "filter:methodId"},
+        {"value": "sqlserver", "title": "server"}
+      ]
+    },
+    "timeSeries": [
+      {
+        "sourceInfo": {
+          "siteName": "Mississippi River at St. Louis, MO",
+          "siteCode": [
+            {"value": "07010000", "network": "NWIS", "agencyCode": "USGS"}
+          ],
+          "timeZoneInfo": {
+            "defaultTimeZone": {"zoneOffset": "-06:00", "zoneAbbreviation": "CST"},
+            "daylightSavingsTimeZone": {"zoneOffset": "-05:00", "zoneAbbreviation": "CDT"},
+            "siteUsesDaylightSavingsTime": true
+          },
+          "geoLocation": {
+            "geogLocation": {
+              "srs": "EPSG:4326",
+              "latitude": 0.0,
+              "longitude": 0.0
+            },
+            "localSiteXY": []
+          },
+          "note": [],
+          "siteType": [],
+          "siteProperty": [
+            {"value": "ST", "name": "siteTypeCd"},
+            {"value": "07140101", "name": "hucCd"}
+          ]
+        },
+        "variable": {
+          "variableCode": [
+            {
+              "value": "00060",
+              "network": "NWIS",
+              "vocabulary": "NWIS:UnitValues",
+              "variableID": 45807197,
+              "default": true
+            }
+          ],
+          "variableName": "Streamflow, ft&#179;/s",
+          "variableDescription": "Discharge, cubic feet per second",
+          "valueType": "Derived Value",
+          "unit": {"unitCode": "ft3/s"},
+          "options": {
+            "option": [{"name": "Statistic", "optionCode": "00000"}]
+          },
+          "note": [],
+          "noDataValue": -999999.0,
+          "variableProperty": [],
+          "oid": "45807197"
+        },
+        "values": [
+          {
+            "value": [
+              {
+                "value": "148000",
+                "qualifiers": ["P"],
+                "dateTime": "2026-08-01T00:00:00.000-05:00"
+              },
+              {
+                "value": "-999999",
+                "qualifiers": ["P", "e"],
+                "dateTime": "2026-08-01T00:30:00.000-05:00"
+              },
+              {
+                "value": "147500",
+                "qualifiers": ["P"],
+                "dateTime": "2026-08-01T01:00:00.000-05:00"
+              }
+            ],
+            "qualifier": [
+              {
+                "qualifierCode": "P",
+                "qualifierDescription": "Provisional data subject to revision.",
+                "qualifierID": 0,
+                "network": "NWIS",
+                "vocabulary": "uv_rmk_cd"
+              },
+              {
+                "qualifierCode": "e",
+                "qualifierDescription": "Value has been estimated.",
+                "qualifierID": 1,
+                "network": "NWIS",
+                "vocabulary": "uv_rmk_cd"
+              }
+            ],
+            "qualityControlLevel": [],
+            "method": [{"methodDescription": "", "methodID": 69928}],
+            "source": [],
+            "offset": [],
+            "sample": [],
+            "censorCode": []
+          }
+        ],
+        "name": "USGS:07010000:00060:00000"
+      },
+      {
+        "sourceInfo": {
+          "siteName": "Mississippi River at Baton Rouge, LA",
+          "siteCode": [
+            {"value": "07374000", "network": "NWIS", "agencyCode": "USGS"}
+          ],
+          "timeZoneInfo": {
+            "defaultTimeZone": {"zoneOffset": "-06:00", "zoneAbbreviation": "CST"},
+            "daylightSavingsTimeZone": {"zoneOffset": "-05:00", "zoneAbbreviation": "CDT"},
+            "siteUsesDaylightSavingsTime": true
+          },
+          "geoLocation": {
+            "geogLocation": {
+              "srs": "EPSG:4326",
+              "latitude": 0.0,
+              "longitude": 0.0
+            },
+            "localSiteXY": []
+          },
+          "note": [],
+          "siteType": [],
+          "siteProperty": [
+            {"value": "ST", "name": "siteTypeCd"},
+            {"value": "08070100", "name": "hucCd"}
+          ]
+        },
+        "variable": {
+          "variableCode": [
+            {
+              "value": "00060",
+              "network": "NWIS",
+              "vocabulary": "NWIS:UnitValues",
+              "variableID": 45807197,
+              "default": true
+            }
+          ],
+          "variableName": "Streamflow, ft&#179;/s",
+          "variableDescription": "Discharge, cubic feet per second",
+          "valueType": "Derived Value",
+          "unit": {"unitCode": "ft3/s"},
+          "options": {
+            "option": [{"name": "Statistic", "optionCode": "00000"}]
+          },
+          "note": [],
+          "noDataValue": -999999.0,
+          "variableProperty": [],
+          "oid": "45807197"
+        },
+        "values": [
+          {
+            "value": [
+              {
+                "value": "402000",
+                "qualifiers": ["A"],
+                "dateTime": "2026-08-01T00:00:00.000-06:00"
+              },
+              {
+                "value": "401000",
+                "qualifiers": ["A"],
+                "dateTime": "2026-08-01T00:15:00.000-06:00"
+              }
+            ],
+            "qualifier": [
+              {
+                "qualifierCode": "A",
+                "qualifierDescription": "Approved for publication -- Processing and review completed.",
+                "qualifierID": 0,
+                "network": "NWIS",
+                "vocabulary": "uv_rmk_cd"
+              }
+            ],
+            "qualityControlLevel": [],
+            "method": [{"methodDescription": "", "methodID": 69931}],
+            "source": [],
+            "offset": [],
+            "sample": [],
+            "censorCode": []
+          }
+        ],
+        "name": "USGS:07374000:00060:00000"
+      }
+    ]
+  },
+  "nil": false,
+  "globalScope": true,
+  "typeSubstituted": false
+}

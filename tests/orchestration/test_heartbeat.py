@@ -2,7 +2,8 @@
 
 Covers CLAUDE.md § 12 decisions 12 (missed rows come from a scheduler listener), 13 (the cadence
 table is the only source of overdue thresholds), 16 ("last success" means the last SUCCESS row),
-and 18 (alert delivery failures never fail the monitoring job).
+17 (data liveness is measured from the data, via the freshness registry), and 18 (alert delivery
+failures never fail the monitoring job).
 """
 
 from datetime import datetime, timedelta, timezone
@@ -13,13 +14,31 @@ from apscheduler.job import Job
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 
 from app import db
+from app.ingest import usgs_ingest
+from app.ingest.usgs_client import PARAM_DISCHARGE, Reading
 from app.orchestration import cadence as cadence_module
 from app.orchestration import heartbeat, scheduler as scheduler_module
 from app.orchestration.cadence import Cadence
+from app.orchestration.heartbeat import Freshness
 
 pytestmark = pytest.mark.integration
 
 FAKE_JOBSTORE_URL = "postgresql+psycopg://does-not-connect/unit"
+
+
+@pytest.fixture
+def no_freshness_registry(monkeypatch):
+    """Empty the freshness registry for tests that are about JOB overdue-ness only.
+
+    Needed because an ingest table with no rows is deliberately STALE, not quiet (see
+    heartbeat.check_freshness), so a freshly migrated database has a legitimately alerting
+    gauge_readings in it. The tests below that count alerts are about the cadence table; leaving
+    the real registry in place would have them passing or failing for a reason they are not
+    testing.
+
+    The tests that ARE about freshness install their own registry explicitly.
+    """
+    monkeypatch.setattr(heartbeat, "FRESHNESS", ())
 
 
 def test_missed_event_listener_writes_a_missed_row(migrated_db, database_url, job_runs):
@@ -226,7 +245,7 @@ def test_a_job_that_has_never_succeeded_is_overdue(migrated_db, database_url, mo
 
 
 def test_alert_sink_exception_does_not_fail_the_heartbeat_job(
-    migrated_db, database_url, job_runs, monkeypatch
+    migrated_db, database_url, job_runs, monkeypatch, no_freshness_registry
 ):
     """Decision 18: the one place in this commit where swallowing is correct.
 
@@ -264,7 +283,7 @@ def test_alert_sink_exception_does_not_fail_the_heartbeat_job(
 
 
 def test_heartbeat_job_records_itself_and_alerts_only_when_overdue(
-    migrated_db, database_url, job_runs, monkeypatch
+    migrated_db, database_url, job_runs, monkeypatch, no_freshness_registry
 ):
     """The end-to-end shape: @job wraps it, the cadence table drives it, the sink hears about it."""
     now = datetime.now(timezone.utc)
@@ -300,3 +319,168 @@ def test_heartbeat_job_records_itself_and_alerts_only_when_overdue(
     assert "fresh_job" in alerts[0]
     assert "OVERDUE" in alerts[0]
     assert len(job_runs.rows("heartbeat")) == 2
+
+
+# ---------------------------------------------------------------------------------------------
+# The freshness registry — CLAUDE.md § 12 decision 17, and § 14's last bullet.
+# ---------------------------------------------------------------------------------------------
+
+
+def _seed_reading(url, ts, site="07010000", value=148000.0):
+    """Write one reading straight through the real upsert, on its own connection."""
+    with db.connection(url) as conn:
+        usgs_ingest.upsert_readings(
+            conn, [Reading(site, ts, PARAM_DISCHARGE, value, ("P",))]
+        )
+        conn.commit()
+
+
+def test_freshness_registry_flags_a_stale_table(migrated_db, database_url, monkeypatch):
+    """An old MAX(ts) is reported stale; a recent one is not.
+
+    Guarded BEHAVIOURALLY, the same way the cadence table is: the registry entry's threshold is
+    mutated and the verdict has to follow it. A test that grepped heartbeat.py for '6 hours'
+    would pass on the day someone reintroduces the threshold as a constant in a third file.
+
+    The empty case is asserted too, and it is deliberately STALE rather than quiet: an ingest
+    table that has never received a row is the most alarming state it can be in, and treating a
+    NULL MAX(ts) as "nothing to report" is how a source that never once delivered stays silent.
+    """
+    now = datetime.now(timezone.utc)
+    registry = (
+        Freshness("usgs_ingest", "gauge_readings", "ts", timedelta(hours=6)),
+    )
+
+    # No rows at all -> stale, not quiet.
+    with db.connection(database_url) as conn:
+        empty = heartbeat.check_freshness(conn, now=now, registry=registry)
+    assert len(empty) == 1
+    assert empty[0].newest is None
+    assert empty[0].stale is True, "an ingest table with no rows at all was reported healthy"
+    assert "EMPTY" in empty[0].describe()
+
+    # A reading four hours old, against a six-hour threshold -> fresh.
+    _seed_reading(database_url, now - timedelta(hours=4))
+    with db.connection(database_url) as conn:
+        fresh = heartbeat.check_freshness(conn, now=now, registry=registry)
+    assert fresh[0].stale is False, (
+        f"a four-hour-old reading was called stale against a six-hour threshold: "
+        f"{fresh[0].describe()}"
+    )
+    assert fresh[0].age is not None and fresh[0].age < timedelta(hours=5)
+
+    # Same data, same code, one threshold tightened in the registry -> the verdict flips.
+    tightened = (
+        Freshness("usgs_ingest", "gauge_readings", "ts", timedelta(hours=1)),
+    )
+    with db.connection(database_url) as conn:
+        stale = heartbeat.check_freshness(conn, now=now, registry=tightened)
+    assert stale[0].stale is True, (
+        "the registry's max_staleness was tightened to one hour against a four-hour-old reading "
+        "and the verdict did not flip - the heartbeat is not reading the registry at call time"
+    )
+    assert "STALE" in stale[0].describe()
+
+
+def test_a_job_with_recent_runs_but_stale_data_is_still_flagged(
+    migrated_db, database_url, job_runs, monkeypatch
+):
+    """THIS IS THE TEST THAT CATCHES A SOURCE RETURNING 200 AND NOTHING.
+
+    The setup is the failure this project keeps hitting, written down: the job is running on
+    schedule, succeeding every time, writing clean `success` rows with no errors - and the table
+    it feeds has not received a row in four days. Every process-level signal is green. The prior
+    project ran two and a half months in exactly this state, with orchestration recording
+    "Completed" over a stack that was entirely down.
+
+    CLAUDE.md § 4: liveness is measured from the DATA, never from the process. A heartbeat that
+    checked only job_runs would report this as healthy, which is why the mutation table points
+    "have the heartbeat check only job_runs and not data freshness" at this test.
+    """
+    now = datetime.now(timezone.utc)
+
+    # The job is in perfect health by every process measure: three recent successful runs.
+    for minutes_ago in (150, 90, 30):
+        finished = now - timedelta(minutes=minutes_ago)
+        job_runs.seed(
+            "usgs_ingest",
+            "success",
+            started_at=finished - timedelta(seconds=20),
+            finished_at=finished,
+            # It even reports rows written. Nothing here looks wrong.
+            rows_written=0,
+        )
+
+    # And the data behind it is four days old.
+    _seed_reading(database_url, now - timedelta(days=4))
+
+    monkeypatch.setattr(
+        cadence_module,
+        "CADENCES",
+        (Cadence("usgs_ingest", timedelta(seconds=3600), timedelta(hours=3)),),
+    )
+    monkeypatch.setattr(
+        heartbeat,
+        "FRESHNESS",
+        (Freshness("usgs_ingest", "gauge_readings", "ts", timedelta(hours=6)),),
+    )
+
+    # The job-status check alone sees nothing wrong. This assertion is the control: without it,
+    # the test below could pass because the job looked overdue, not because the data was stale.
+    with db.connection(database_url) as conn:
+        verdicts = heartbeat.check(conn, now=now)
+    assert [v.overdue for v in verdicts] == [False], (
+        "the job was already overdue, so this test would pass without the freshness check ever "
+        "running - it proves nothing in that state"
+    )
+
+    alerts = []
+    heartbeat.heartbeat_job(sink=alerts.append, url=database_url, now=now)
+
+    assert len(alerts) == 1, (
+        f"expected exactly one alert about stale data, got {len(alerts)}: {alerts}. A job "
+        f"succeeding on schedule over a source that has sent nothing for four days was reported "
+        f"as healthy."
+    )
+    assert "gauge_readings" in alerts[0], f"the alert does not name the stale table: {alerts[0]}"
+    assert "STALE" in alerts[0]
+    # And it says so as a DATA problem, not by pretending the job failed.
+    assert "overdue" not in alerts[0].lower(), (
+        f"the stale table was reported as an overdue job: {alerts[0]}"
+    )
+
+
+def test_an_unqueryable_registered_table_alerts_rather_than_skipping(
+    migrated_db, database_url, monkeypatch
+):
+    """A registered table that cannot be read is a failed check, never a skipped one.
+
+    CLAUDE.md § 13: a skipped check exits non-zero and a SKIP never reads as green. The tempting
+    version catches the exception, logs it, and moves on - which turns a missing table into a
+    silent no-op and leaves the heartbeat reporting healthy while checking nothing.
+
+    It also must not take the whole heartbeat down: the remaining entries still need checking,
+    which is why the connection is rolled back and the loop continues.
+    """
+    now = datetime.now(timezone.utc)
+    registry = (
+        Freshness("usgs_ingest", "table_that_does_not_exist", "ts", timedelta(hours=6)),
+        Freshness("usgs_ingest", "gauge_readings", "ts", timedelta(hours=6)),
+    )
+
+    with db.connection(database_url) as conn:
+        verdicts = heartbeat.check_freshness(conn, now=now, registry=registry)
+
+    assert len(verdicts) == 2, (
+        "the unqueryable entry aborted the whole freshness check; the remaining tables were "
+        "never looked at"
+    )
+
+    missing = verdicts[0]
+    assert missing.stale is True, "an unqueryable registered table was reported healthy"
+    assert missing.error is not None
+    assert "CANNOT BE CHECKED" in missing.describe()
+
+    # The second entry was still checked, on the same connection, after the first one errored.
+    assert verdicts[1].table == "gauge_readings"
+    assert verdicts[1].error is None

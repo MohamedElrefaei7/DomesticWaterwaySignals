@@ -226,19 +226,38 @@ def test_second_run_applies_nothing(clean_db, database_url):
 
     Running the actual migrations/ directory rather than a fixture, so decision 4's marker is
     exercised by 0003_job_runs_success_index.sql - a real migration - and not only by a test.
+
+    The counts come from the directory rather than from a literal. A hardcoded number here goes
+    red on every commit that adds a migration, which trains whoever is adding one to update it
+    without reading it - and the assertions that matter (contiguous versions from 1, the marker
+    honoured on exactly the files that carry it, nothing pending afterwards) are the ones that
+    would then get updated carelessly too.
     """
+    on_disk = migrate.discover(migrate.MIGRATIONS_DIR)
+    assert on_disk, "no migrations found on disk; every assertion below would be vacuous"
+
     first = migrate.run(migrate.MIGRATIONS_DIR, url=database_url)
-    assert len(first) == 3
-    assert [m.version for m in first] == [1, 2, 3]
-    assert [m.no_transaction for m in first] == [False, False, True]
+    assert len(first) == len(on_disk)
+    assert [m.version for m in first] == list(range(1, len(on_disk) + 1)), (
+        "the applied versions are not a contiguous run from 1 - a migration is missing or "
+        "misnumbered"
+    )
+    # The marker is honoured on exactly the files that carry it on line 1, and on no others.
+    assert [m.no_transaction for m in first] == [m.no_transaction for m in on_disk]
+    assert any(m.no_transaction for m in first), (
+        "no migration in the repo uses -- migrate:no-transaction any more, so this test no "
+        "longer exercises that path against a real database"
+    )
 
     second = migrate.run(migrate.MIGRATIONS_DIR, url=database_url)
     assert second == []
 
     recorded = _recorded(database_url)
-    assert len(recorded) == 3
+    assert len(recorded) == len(on_disk)
     assert _table_exists(database_url, "job_runs")
+    assert _table_exists(database_url, "gauges")
+    assert _table_exists(database_url, "gauge_readings")
 
     statuses = migrate.status(migrate.MIGRATIONS_DIR, url=database_url)
-    assert len(statuses) == 3
+    assert len(statuses) == len(on_disk)
     assert all(is_applied for _, _, is_applied in statuses)

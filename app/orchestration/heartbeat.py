@@ -1,23 +1,31 @@
-"""The heartbeat: the job that reports on the other jobs.
+"""The heartbeat: the job that reports on the other jobs, and on the data they produce.
 
 CLAUDE.md § 12 decisions 13, 16, 17, and 18.
 
-WHAT THIS CHECKS, AND WHAT IT DELIBERATELY DOES NOT
----------------------------------------------------
-It checks job overdue-ness: for each entry in the cadence table, how long since that job's most
-recent SUCCESSFUL run, measured against that entry's own overdue_after.
+TWO CHECKS, AND THE SECOND IS THE ONE THAT CATCHES THE HARD FAILURE
+-------------------------------------------------------------------
+JOB OVERDUE-NESS. For each entry in the cadence table, how long since that job's most recent
+SUCCESSFUL run, measured against that entry's own overdue_after.
 
-It does NOT check data liveness, and the omission is deliberate rather than pending. CLAUDE.md § 4
-requires liveness measured from the data — MAX(ts) on the ingested table — never from the process,
-because a source that accepts your connection and delivers nothing is indistinguishable from a
-healthy one at every layer except the data. No ingested table exists yet. Building an empty
-freshness registry now would produce a check that iterates over nothing, finds nothing wrong, and
-reports healthy — a monitor whose green light means "I looked at zero things." That is the exact
-failure this project is trying not to repeat.
+DATA FRESHNESS. For each entry in the freshness registry below, how long since the newest row in
+the ingested table, measured against that entry's own max_staleness.
 
-So the requirement is written into the contract instead of into empty code: CLAUDE.md § 12 says no
-ingest client is complete until it registers its table in the heartbeat's freshness registry. The
-registry gets built in Phase 3, by the commit that has something to put in it.
+The second exists because the first cannot see the failure that matters most. CLAUDE.md § 4:
+liveness is measured from the data, never from the process — a source that accepts your
+connection and delivers nothing is indistinguishable from a healthy one at every layer except
+the data. That is not hypothetical for this ingest: MEASURED ON 2026-08-13, a USGS request for a
+series a site does not serve returns HTTP 200 WITH AN EMPTY ARRAY. The client hard-fails on that
+(app/ingest/usgs_client.py), but the general shape — a source that answers cheerfully and sends
+nothing — is exactly what a job-status check reports as healthy. Successful job_runs rows, recent
+activity, no errors, and a table whose newest row is four days old.
+
+tests/orchestration/test_heartbeat.py::test_a_job_with_recent_runs_but_stale_data_is_still_flagged
+is that scenario written down.
+
+Phase 2 deliberately shipped NO registry rather than an empty one: a check that iterates over
+nothing, finds nothing wrong, and reports healthy is a monitor whose green light means "I looked
+at zero things." The registry is built here, in the commit that has something to put in it, which
+is what CLAUDE.md § 12 requires of every ingest client.
 """
 
 from __future__ import annotations
@@ -31,6 +39,68 @@ from app.orchestration import cadence as cadence_module
 from app.orchestration.job import job
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------------------------
+# The freshness registry.
+# ---------------------------------------------------------------------------------------------
+#
+# WHY THIS IS NOT IN cadence.py, given how firmly § 12 says the cadence table is the single
+# source of truth: it is a different fact about a different thing. The cadence table answers "how
+# often should this job fire, and how long may it go without succeeding" — a statement about a
+# PROCESS. This answers "how old may this table's newest row be" — a statement about DATA. They
+# are related but not derivable from one another: a job can succeed on schedule while its source
+# sends nothing, which is the entire reason this registry exists.
+#
+# What IS enforced is that the two cannot drift apart in the way that matters: every entry here
+# must name a job that the cadence table schedules, checked at import below. A freshness entry
+# for a job nothing runs would report a stale table forever with no way to fix it.
+
+
+@dataclass(frozen=True)
+class Freshness:
+    """One ingested table's liveness contract.
+
+    job_name       The job that writes this table. Must exist in the cadence table.
+    table          The ingested table.
+    timestamp_column  The column carrying the SOURCE's timestamp — not an inserted_at. An
+                   inserted_at column measures that we wrote something, which is the process
+                   measurement this check exists to replace.
+    max_staleness  How old the newest row may be before this is stale.
+    """
+
+    job_name: str
+    table: str
+    timestamp_column: str
+    max_staleness: timedelta
+
+
+FRESHNESS: tuple[Freshness, ...] = (
+    Freshness(
+        job_name="usgs_ingest",
+        table="gauge_readings",
+        timestamp_column="ts",
+        # SIX HOURS, AND GENEROUS RELATIVE TO THE HOURLY POLL ON PURPOSE.
+        #
+        # The arithmetic behind the number: two of the four seeded sites record hourly, and USGS
+        # transmits hourly rather than continuously, so a MAX(ts) that is already one to two
+        # hours behind wall clock is the NORMAL steady state, not a symptom. Add the poll's own
+        # hourly interval and a late transmission, and three to four hours old is still healthy.
+        #
+        # Six hours means roughly four consecutive failed polls, or a genuine upstream outage,
+        # before this speaks. Tighter and it would fire on ordinary USGS lateness — and an alert
+        # that fires routinely is an alert everyone mutes, which costs more than the delay.
+        max_staleness=timedelta(hours=6),
+    ),
+)
+
+
+_unscheduled = [f.job_name for f in FRESHNESS if f.job_name not in cadence_module.BY_NAME]
+if _unscheduled:  # pragma: no cover - a drift would be caught at import
+    raise ValueError(
+        f"freshness registry names job(s) with no cadence entry: {_unscheduled}. Nothing would "
+        f"ever write those tables, so they would be reported stale forever with no way to fix it."
+    )
 
 
 @dataclass(frozen=True)
@@ -142,6 +212,103 @@ def check(conn, now: datetime | None = None, cadences=None) -> list[Verdict]:
     return verdicts
 
 
+@dataclass(frozen=True)
+class FreshnessVerdict:
+    """One ingested table's state, as of one heartbeat run."""
+
+    job_name: str
+    table: str
+    newest: datetime | None
+    age: timedelta | None
+    max_staleness: timedelta
+    stale: bool
+    error: str | None = None
+
+    def describe(self) -> str:
+        if self.error is not None:
+            return f"{self.table}: CANNOT BE CHECKED - {self.error}"
+        if self.newest is None:
+            return (
+                f"{self.table}: EMPTY - no rows at all "
+                f"(threshold {self.max_staleness}, written by {self.job_name})"
+            )
+        state = "STALE" if self.stale else "fresh"
+        return (
+            f"{self.table}: {state} - newest row {self.newest.isoformat()} "
+            f"({self.age} old, threshold {self.max_staleness})"
+        )
+
+
+def newest_row(conn, entry: Freshness) -> datetime | None:
+    """MAX(ts) on the ingested table. The measurement this whole check is about.
+
+    The table and column are interpolated rather than parameterized because they are identifiers,
+    which SQL parameters cannot carry. They come from the frozen registry above — module
+    constants, never user input — and the identifier check below is a belt-and-braces guard so
+    that a future registry built from configuration cannot turn this into an injection point.
+    """
+    if not entry.table.isidentifier() or not entry.timestamp_column.isidentifier():
+        raise ValueError(
+            f"freshness entry {entry.job_name!r} has a non-identifier table/column "
+            f"({entry.table!r}, {entry.timestamp_column!r})"
+        )
+    row = conn.execute(
+        f"SELECT max({entry.timestamp_column}) FROM {entry.table}"
+    ).fetchone()
+    return row[0] if row else None
+
+
+def check_freshness(conn, now: datetime | None = None, registry=None) -> list[FreshnessVerdict]:
+    """One verdict per freshness entry. Liveness measured from the DATA.
+
+    `registry` defaults to the live one READ AT CALL TIME, for the same reason check() reads the
+    cadence table at call time: it is what lets a test mutate an entry and observe the verdict
+    follow it. A module-level binding would freeze the value at import and the guard would be
+    untestable, which in practice means unguarded.
+
+    A TABLE WITH NO ROWS AT ALL IS STALE, NOT QUIET. Same reasoning as a job with no successful
+    run being overdue rather than silent: an ingest table that has never received a row is the
+    most alarming state it can be in, and treating a NULL MAX(ts) as "nothing to report" is how a
+    source that never once delivered stays quiet forever. This DOES mean the heartbeat alerts
+    about gauge_readings from the moment 0005 is applied until the backfill puts rows in it —
+    expected, once, exactly like the heartbeat's own first run alerting about itself.
+    """
+    now = now or datetime.now(timezone.utc)
+    registry = FRESHNESS if registry is None else registry
+
+    verdicts = []
+    for entry in registry:
+        error = None
+        newest = None
+        try:
+            newest = newest_row(conn, entry)
+        except Exception as exc:
+            # A registered table that cannot be queried — it does not exist, the migration was
+            # never applied, a permission changed — is reported as a FAILED CHECK and alerts. It
+            # is not skipped: CLAUDE.md § 13, a skipped check must never read as green. Rolled
+            # back first because psycopg leaves the transaction unusable after an error, and the
+            # remaining entries still need to be checked.
+            conn.rollback()
+            error = f"{type(exc).__name__}: {exc}"
+            logger.exception("freshness check failed for table %s", entry.table)
+
+        age = None if newest is None else now - newest
+        verdicts.append(
+            FreshnessVerdict(
+                job_name=entry.job_name,
+                table=entry.table,
+                newest=newest,
+                age=age,
+                max_staleness=entry.max_staleness,
+                # Unqueryable or empty both count as stale. Neither is a healthy table, and
+                # neither should need a second kind of alert to be noticed.
+                stale=(error is not None or age is None or age > entry.max_staleness),
+                error=error,
+            )
+        )
+    return verdicts
+
+
 @job("heartbeat")
 def heartbeat_job(sink=None, url: str | None = None, now: datetime | None = None):
     """The scheduled unit. Returns None: it writes no rows, so it reports no row count.
@@ -154,17 +321,32 @@ def heartbeat_job(sink=None, url: str | None = None, now: datetime | None = None
 
     with db.connection(url) as conn:
         verdicts = check(conn, now=now)
+        freshness = check_freshness(conn, now=now)
 
     overdue = [v for v in verdicts if v.overdue]
+    stale = [v for v in freshness if v.stale]
 
     for verdict in verdicts:
         logger.info("%s", verdict.describe())
+    for verdict in freshness:
+        logger.info("%s", verdict.describe())
 
+    # ONE ALERT, not one per category. Two sinks' worth of messages for one heartbeat run is two
+    # notifications for one event, and a broad outage — which trips both checks at once — would
+    # produce exactly that, at the moment the reader can least afford noise.
+    problems = []
     if overdue:
-        _emit(
-            sink,
+        problems.append(
             f"{len(overdue)} of {len(verdicts)} job(s) overdue:\n"
-            + "\n".join(f"  {v.describe()}" for v in overdue),
+            + "\n".join(f"  {v.describe()}" for v in overdue)
         )
+    if stale:
+        problems.append(
+            f"{len(stale)} of {len(freshness)} ingested table(s) stale:\n"
+            + "\n".join(f"  {v.describe()}" for v in stale)
+        )
+
+    if problems:
+        _emit(sink, "\n".join(problems))
 
     return None

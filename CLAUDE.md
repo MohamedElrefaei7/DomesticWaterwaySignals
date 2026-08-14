@@ -437,3 +437,61 @@ These bind every check under `verify/`, and any check written anywhere else.
 - **Verification apparatus lives in `verify/`, never in `app/`.** A probe job in `app/` means
   production code shipping a job that exists only to be watched. Anything a harness registers in
   the persistent job store it removes again on every exit path, or it keeps firing in production.
+---
+
+## 14. Ingest conventions
+
+Learned from the first ingest client (USGS instantaneous values, Phase 3). The first bullet is the
+one the rest exist to protect.
+
+- **Every ingest client asserts that the returned `(entity, parameter)` set equals the requested
+  set, and hard-fails on any missing pair. A 200 with an empty payload is a failure, not zero
+  rows.** Measured against USGS on 2026-08-13: a request for a series a site does not serve
+  returns HTTP 200 with `"timeSeries": []` — no error, no flag, and when several entities are
+  requested together the missing ones are simply absent while the others return normally. The
+  obvious loop — iterate what arrived, write it — is shorter, never raises, and is
+  indistinguishable from correct on every run; an entity that drops out of the feed permanently
+  produces a job that reports success forever with a row count nobody notices shrinking.
+- **An empty result for an available series is not an error; a missing series is. These are never
+  collapsed.** Gaps are ordinary — sensor outages, windows before a record began. Treating an
+  empty window as fatal makes a backfill unrunnable; treating a missing series as an empty window
+  restores exactly the blindness the assertion removes. The test that guards this holds both
+  behaviours at once, because two separate tests can each be satisfied by one wrong
+  implementation.
+- **Source data is upserted on its natural key. Never `DO NOTHING` on a source that publishes
+  revisions.** `DO NOTHING` makes reruns safe, passes every duplicate test, and freezes the
+  provisional value over the corrected one permanently and silently.
+- **`rows_written` counts rows that actually changed the database** — inserts plus genuine
+  revisions, measured from `RETURNING` under a `DO UPDATE ... WHERE ... IS DISTINCT FROM`. A plain
+  `DO UPDATE` reports its whole input on every rerun, which is § 4's definition violated by a
+  number large enough to look reassuring.
+- **Backfills chunk by window and resume from `MAX(ts)` in the data, never from a checkpoint file
+  or a progress table.** A checkpoint is a second record of the same fact, and when the two
+  disagree the checkpoint is what gets believed. A crash after writing rows but before the
+  checkpoint re-fetches — harmless. A crash after the checkpoint but before the rows skips work
+  that was never done — silent, permanent, indistinguishable from a complete backfill.
+- **A backfill is a CLI a human runs, never a scheduled job.** It runs for hours; `coalesce` and
+  `max_instances=1` would leave a scheduled copy permanently `running`, which the heartbeat cannot
+  distinguish from healthy.
+- **Per-source availability, cadence, and period of record are recorded per entity, never assumed
+  uniform.** All three vary per site across the four seeded gauges. A uniform assumption is what
+  makes a missing series invisible: you cannot assert you received what you asked for if you do
+  not know, per entity, what there was to ask for. Cadence is recorded as *documentation of what
+  was observed* and is never used to filter — the client stores whatever timestamps arrive.
+- **Timestamps are stored `timestamptz` in UTC, converted from the source's own offset.** Never
+  stripped, never assumed fixed. Sources spanning observance boundaries shift an hour twice a year
+  in a way that looks like the measured thing moved.
+- **A source's declared no-data sentinel is dropped, never stored.** USGS publishes `-999999` as
+  `noDataValue` and then emits it as an ordinary value; stored as-is it is a number that breaks
+  every aggregate it touches while looking like data. Read the sentinel from the payload — the
+  series declares it — rather than hardcoding it.
+- **Derived values that a source does not publish are not synthesized to fill a gap.** Stage is
+  absent at two of the four gauges, and deriving it from discharge through a USGS rating curve is
+  rejected rather than deferred: ratings are published as provisional and shift with channel
+  features, so applying a current rating to 2008 discharge yields a stage that gauge never read. A
+  fabricated number that looks plausible, in a layer that has no confidence gate to catch it.
+- **Every ingest table is registered in the heartbeat freshness registry in the commit that
+  creates it** (§ 12). Liveness is measured from the data — `MAX(ts)` on the ingested table —
+  never from the process. A registered table with no rows at all is **stale, not quiet**, for the
+  same reason a job with no successful run is overdue rather than silent. A registered table that
+  cannot be queried is a **failed** check, never a skipped one (§ 13).

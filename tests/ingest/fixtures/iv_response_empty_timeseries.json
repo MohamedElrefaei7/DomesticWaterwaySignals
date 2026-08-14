@@ -1,0 +1,24 @@
+{
+  "name": "ns1:timeSeriesResponseType",
+  "declaredType": "org.cuahsi.waterml.TimeSeriesResponseType",
+  "scope": "javax.xml.bind.JAXBElement$GlobalScope",
+  "value": {
+    "queryInfo": {
+      "queryURL": "http://waterservices.usgs.gov/nwis/iv/format=json,1.1&sites=07032000&parameterCd=00065&startDT=2026-08-01T00:00:00Z&endDT=2026-08-01T01:59:59Z",
+      "criteria": {
+        "locationParam": "[ALL:07032000]",
+        "variableParam": "[00065]",
+        "parameter": []
+      },
+      "note": [
+        {"value": "[ALL:07032000]", "title": "filter:sites"},
+        {"value": "methodIds=[ALL]", "title": "filter:methodId"},
+        {"value": "sqlserver", "title": "server"}
+      ]
+    },
+    "timeSeries": []
+  },
+  "nil": false,
+  "globalScope": true,
+  "typeSubstituted": false
+}

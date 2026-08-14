@@ -3,11 +3,91 @@
 This is the **log**: current state, decisions as they are made, and `§ Up Next`. Stable contracts
 live in `CLAUDE.md`. If something here hardens into an invariant, move it there and note the move.
 
-**Last updated:** 2026-08-11 (Phase 2 verified on the instance)
+**Last updated:** 2026-08-13 (Phase 3 ingest written; live steps outstanding)
 
 ---
 
 ## Current state
+
+**PHASE 3 (USGS INGEST AND BACKFILL) IS WRITTEN AND VERIFIED OFFLINE, as of 2026-08-13. It has
+not run against the instance, and the compression ratio has therefore NOT been measured.**
+
+- **156 tests green with ZERO SKIPS**, including the whole integration tier. Offline (no
+  `DATABASE_URL`) the same suite is `116 passed, 40 skipped`. The integration tier ran against a
+  **throwaway local TimescaleDB container on the pinned image** (`timescale/timescaledb:2.26.2-pg16`,
+  same digest as `docker-compose.yml`), not against the instance — so the schema, the hypertable,
+  the compression settings, and the upsert semantics are verified against the real engine, while
+  everything requiring real USGS data or the real deployment is not.
+- **All 15 mutation-table rows confirmed**: each performed, observed to turn its named test red
+  *on that test's own assertion*, then restored, with the suite re-verified green afterwards. One
+  needed redoing — the first attempt at "resume from a checkpoint instead of `MAX(ts)`" failed
+  with a `NameError`, which proves only that the test runs; it was rewritten as a functional
+  checkpoint store that merely disagrees with the data, and then failed on the real assertion.
+- **The pinned image's catalog API was read back rather than assumed**, since several TimescaleDB
+  objects were renamed across 2.x. Observed on 2.26.2: `create_hypertable(..., by_range(...))`
+  applies; the settings view is `timescaledb_information.compression_settings`; the stats function
+  is `hypertable_compression_stats`; `segmentby` reads back as `['usgs_site_id', 'param_code']`,
+  `orderby` as `[('ts','DESC')]`, the chunk interval as 7 days, and the policy registers as
+  `policy_compression` with `compress_after = 30 days`. Both the stats function and the settings
+  view are discovered from the server's own catalog at call time, so an image bump that completes
+  the rename fails loudly rather than silently.
+
+**What is NOT done, and is the human's:** every step of the live procedure at the end of
+`§ Up Next` — the migrations on the instance, the one-site rehearsal, the full backfill, the
+per-site `min(ts)` comparison against the seeded `record_start`, **the compression measurement**,
+and the scheduler/freshness checks. No agent has connected to the server (`CLAUDE.md § 9`).
+
+**No USGS endpoint was called by this commit.** The three fixtures under `tests/ingest/fixtures/`
+are captured response shape; no test in the repo makes a live HTTP request. Two consequences worth
+knowing before step 3: the `startDT`/`endDT` explicit-UTC form (`2026-08-01T00:00:00Z`) and the
+pinned `format=json,1.1` have not been exercised against the live service. Both fail loudly if
+wrong — a rejected request, not a quiet one.
+
+### What Phase 3 built
+
+- `migrations/0004_gauges.sql` — the site registry, seeded with **exactly four human-approved
+  sites** and carrying `available_params`, `native_cadence_minutes`, and `record_start` **per
+  site**. `0005` creates `gauge_readings` and converts it to a hypertable **while empty**, 7-day
+  chunks. `0006` enables compression (segment by `usgs_site_id, param_code`, order by `ts DESC`,
+  policy at 30 days) and deliberately **records no ratio**.
+- `app/ingest/usgs_client.py` — parses, and **asserts the returned `(site, parameter)` set equals
+  the requested set**. Verification runs when the function is *called*, before a single reading is
+  yielded, so a caller writing as it iterates cannot commit half a batch.
+- `app/ingest/gauges.py` — the runtime loader reads the deployed table; a parser reads the seed
+  out of `0004` directly so the **unit tier can guard the site list with no database**. One copy
+  of the seed, two readers — rather than a Python mirror of the four rows, which would be two
+  tables of the same fact.
+- `app/ingest/usgs_ingest.py` — the upsert, the hourly poll, and the compression-measurement
+  query. `app/ingest/backfill.py` — windowed, resumable, a CLI.
+- `app/orchestration/heartbeat.py` — **the freshness registry**, which `CLAUDE.md § 12` has
+  required since Phase 2 and which Phase 2 deliberately did not ship empty.
+
+### Decisions worth reading before changing anything here
+
+- **Discharge (`00060`) only. The absence of stage is recorded, not worked around.** Stage is
+  unavailable at Memphis and Vicksburg (USGS states their gage height comes from the USACE Memphis
+  District). **Deriving stage from discharge via a rating curve is REJECTED, not deferred**: USGS
+  publishes ratings as provisional and shifting with channel features, so applying a current
+  rating to 2008 discharge yields a stage that gauge never read — a fabricated number that looks
+  plausible, in a layer with no confidence gate to catch it. **The thesis is therefore now stated
+  in discharge**, which is the physical quantity the draft constraint actually runs on. Stage from
+  USACE Rivergages is a possible later addition **whose absence degrades nothing**.
+- **The "raw 15-minute readings vs. hourly aggregates" open question is answered more precisely
+  than it was asked: it is native cadence PER SITE — 15, 30, and 60 minutes.** Nothing aggregates
+  and nothing resamples; the client stores whatever timestamps arrive. `native_cadence_minutes` is
+  documentation of what was observed and is never used to filter, which is commented in the
+  migration because someone will otherwise reach for it.
+- **This revises the volume estimate sharply downward.** The earlier figure was ~20M rows, built
+  on ~15 sites × 2 params × 96 readings/day. The real shape is **4 sites × 1 param** at 96/48/24/24
+  readings per day — roughly **1.3M rows** for the full backfill, about 6% of the earlier estimate.
+  Volume is now decisively not a factor in any storage decision, and the compression ratio is
+  worth measuring for the engineering claim rather than for the disk.
+- **`rows_written` counts rows that actually changed the database**, not rows parsed. The upsert
+  carries `WHERE (value, qualifiers) IS DISTINCT FROM (EXCLUDED...)` and counts `RETURNING`, so a
+  rerun over unchanged data reports 0 — truthfully — instead of reporting its whole input.
+- **A registered ingest table with no rows is STALE, not quiet.** So the heartbeat alerts about
+  `gauge_readings` from the moment `0005` applies until the backfill puts rows in it. Expected,
+  once, exactly like the heartbeat's own first run alerting about itself.
 
 **PHASE 2 IS VERIFIED ON THE INSTANCE, as of 2026-08-11.** Recorded the same day, per the process
 note at the end of `§ Up Next`. Reported back from the machine:
@@ -295,15 +375,57 @@ confidence gating that says "insufficient history" rather than manufacturing con
 
 ---
 
+## Measured against the live USGS API, 2026-08-13
+
+Taken by the human against the real service. **These contradicted the original handoff**, and
+several Phase 3 decisions are what they are because of them.
+
+| Site | Name | `00060` discharge | `00065` stage | Native cadence | Seeded `record_start` |
+|---|---|---|---|---|---|
+| 07010000 | Mississippi River at St. Louis, MO | yes | yes | 30 min | 2007-10-01 |
+| 07032000 | Mississippi River at Memphis, TN | yes | **no** | 60 min | 2007-10-01 |
+| 07289000 | Mississippi River at Vicksburg, MS | yes | **no** | 60 min | **2008-01-01** |
+| 07374000 | Mississippi River at Baton Rouge, LA | yes | yes | 15 min | 2007-10-01 |
+
+1. **A request for an unavailable series returns HTTP 200 with `"timeSeries":[]`.** No error, no
+   flag. When several sites are requested together the missing ones are simply absent from the
+   array while the others return normally. This is the single fact Phase 3's client is built
+   around, and it is now `CLAUDE.md § 14`'s first bullet.
+2. **Parameter availability is per site.** Stage is absent at Memphis and Vicksburg; USGS states
+   their gage height is furnished by the USACE Memphis District.
+3. **Cadence is per site**, and none of these is uniformly 15-minute. Gaps are ordinary — the
+   first eight St. Louis readings on 2026-08-01 skip 02:30.
+4. **Period of record is per site.** Vicksburg's IV record appears to begin 2008-01-01, not the
+   2007-10-01 the handoff assumed for everything.
+
+---
+
 ## Open questions
 
-- **Raw 15-minute gauge readings vs. hourly aggregates on ingest.** Must be decided before Phase 3.
-  Size estimate: ~96 readings/day × ~6,880 days × ~15 sites × 2 params ≈ **20M rows** for the full
-  raw backfill — roughly half the prior project's 38.5M, and this row is narrower. Hourly would be
-  ~5M. Volume is not the deciding factor at this scale.
-- **Whether USGS instantaneous-values requests can span the full period of record in one call.**
-  Verify empirically in Phase 3 and chunk the backfill by date window if not. The plan currently
-  assumes a single request; that assumption has not been tested.
+- ~~**Raw 15-minute gauge readings vs. hourly aggregates on ingest.**~~ **Closed, and the question
+  was slightly wrong.** It is **native cadence per site** — 15, 30, and 60 minutes across the four
+  seeded gauges (finding 3). Raw readings are stored as published; nothing aggregates or resamples.
+  **The volume estimate that framed this question was also wrong by an order of magnitude**: it
+  assumed ~15 sites × 2 params ≈ 20M rows, and the real shape is 4 sites × 1 param ≈ **1.3M rows**.
+  Volume is not a factor in any decision here.
+- ~~**Whether USGS instantaneous-values requests can span the full period of record in one call.**~~
+  **Closed by decision rather than by measurement, which is the safer direction.** The backfill
+  chunks by 90-day window regardless (`CLAUDE.md § 14`), so the answer no longer gates anything.
+  The reason not to test-and-then-trust it: the failure mode when the service declines a huge span
+  is not a clean error but a truncated or timed-out response, which looks like a short record.
+- **Are the seeded `record_start` values right for the three sites that were not measured?** Only
+  Vicksburg's was checked. Live verification step 5 compares each site's `min(ts)` against its
+  seed; a large discrepancy means **the seed is what to fix**, in a new numbered migration. The
+  backfill logs the first window that actually returned data specifically to make this visible.
+- **What is the Cairo, IL site number?** Investigated for Phase 3 and **not confirmed**, so it is
+  absent from the seed rather than guessed. Cairo sits at the Ohio confluence and is the most
+  obvious gap in the corridor; adding it is a human decision (`CLAUDE.md § 1`).
+- **`gauges.lat`/`lon` are seeded NULL and must be filled by a human** before anything draws a
+  map. This commit's agent had no way to verify coordinates and did not type them from
+  recollection. Obtain them from the USGS site service and apply as a **new** migration:
+  `curl 'https://waterservices.usgs.gov/nwis/site/?format=rdb&sites=07010000,07032000,07289000,07374000'`.
+  `tests/ingest/test_gauge_seed.py::test_river_mile_and_coordinates_are_null_rather_than_estimated`
+  goes red when they land and is **meant to be deleted in that commit**, not weakened.
 
 ---
 
@@ -360,18 +482,92 @@ Bring the stack up with `docker compose -f docker-compose.yml -f /root/dws-local
 Delete it once the `worker` service is containerized; at that point `DATABASE_URL` becomes
 `timescaledb:5432` and nothing needs a published port.
 
-**Next is Phase 3**, and with Phase 2 verified there is nothing in front of it. Phase 3 USGS
-ingest and backfill — the USGS client, the gauge seed list (**the
-human's, per `CLAUDE.md § 1`**), the backfill, and enabling TimescaleDB compression with the ratio
-**measured, not quoted**; that measurement is what justifies TimescaleDB over a managed database
-and it must be a number taken here. Phase 3 is also where the still-open **raw 15-minute readings
-vs. hourly aggregates** decision has to be made (see `§ Open questions`), and where the
-freshness-registry requirement in `CLAUDE.md § 12` first binds: no ingest client is complete until
-it registers its table.
+**Phase 3 is written; its live verification is outstanding and is the next thing to do.** Run it
+in order — step 3 is a deliberate rehearsal and exists so that a bad assumption is discovered
+after twenty minutes rather than after six hours.
+
+1. `python3 -m app.orchestration.migrate` — expect **0004, 0005, 0006** applied, **six total**.
+2. Confirm the seed: `select usgs_site_id, available_params, native_cadence_minutes, record_start
+   from gauges order by 1;` — **four rows, none containing `00065`**.
+3. **Backfill one site, one year first.**
+   `python3 -m app.ingest.backfill --site 07374000 --start 2025-01-01 --end 2026-01-01`
+   Inspect row count and elapsed time before committing to eighteen years. **Report both.** This
+   is also the first time the pinned `format=json,1.1` and the explicit-UTC `startDT`/`endDT` form
+   meet the live service; both fail loudly if wrong.
+4. Full backfill, all four sites: `python3 -m app.ingest.backfill`. Long-running — use `tmux` or
+   `nohup` so an SSM disconnect does not kill it. **Report total rows and wall time.** Expect on
+   the order of 1.3M rows (see `§ Current state`); an answer far from that is worth understanding
+   before moving on.
+5. Per-site sanity:
+   `select usgs_site_id, count(*), min(ts), max(ts) from gauge_readings group by 1 order by 1;`
+   **Compare each `min(ts)` to that site's seeded `record_start`.** A large discrepancy means the
+   **seed** is wrong, and the seed is what to fix — in a new numbered migration, never by editing
+   0004. The backfill also logs each site's first window that returned data.
+6. **THE COMPRESSION MEASUREMENT — the deliverable of this phase.**
+   Record the uncompressed size, then compress the eligible chunks and record it again:
+   ```
+   python3 -m app.ingest.usgs_ingest --compression-stats     # before
+   psql -c "SELECT compress_chunk(c) FROM show_chunks('gauge_readings',
+            older_than => INTERVAL '30 days') c;"
+   python3 -m app.ingest.usgs_ingest --compression-stats     # after
+   ```
+   **Put the real ratio in `CONTEXT.md` and the README.** No placeholder is written anywhere in
+   this repo and no vendor figure is cited, so there is nothing to overwrite — only something to
+   fill in. **If it disappoints, report it: the measurement wins (`CLAUDE.md § 0`).**
+7. `python3 -m verify.preflight` — still green, and now expecting **six** migrations rather than
+   three. Its migration-count gate reads the directory, so it needs no change.
+8. Start the scheduler and confirm `usgs_ingest` fires: a `job_runs` row with `status='success'`
+   and a **plausible** `rows_written`. Note that a steady-state poll writing **0** is correct and
+   truthful — it means nothing new arrived and nothing was revised — so 0 is not the failure
+   signal here. Step 9 is.
+9. **Freshness check.** Confirm the heartbeat reports `gauge_readings` fresh, then confirm it
+   *would* report stale. The cheapest honest way is a **temporary registry threshold**, not
+   deleting data — `job_runs` and `gauge_readings` are not to be pruned by hand. A guard that has
+   never been seen refusing is not a guard.
+
+**Then Phase 4.** The freshness-registry requirement in `CLAUDE.md § 12` now binds for every
+subsequent ingest client, and `CLAUDE.md § 14` is the contract each one is written against.
 
 ---
 
 ## Housekeeping — open, non-blocking
+
+- **`docker-compose.yml`'s image digest is NOT the all-zero placeholder any more**, contrary to
+  what the Phase 2 notes further down still say. It reads
+  `timescale/timescaledb:2.26.2-pg16@sha256:332b99…bfd`. So `§ Up Next`'s "steps 1–2 outstanding"
+  is stale as written — the digest was resolved and written at some point without being recorded
+  here, which is the exact process failure the note at the top of `§ Up Next` exists about. **Not
+  corrected further because it was not this commit's to verify**: whether that digest is the one
+  the *instance* resolved is still unconfirmed, and `verify/preflight.py` gate 1 is what confirms
+  it. Phase 3's local test container ran on that digest successfully, which says the digest is
+  real and pullable — not that it was resolved on the right machine.
+- **`rows_written = 0` from `usgs_ingest` is the normal steady state, not a symptom.** The upsert
+  counts only rows that actually changed, so an hourly poll that finds nothing new and nothing
+  revised truthfully reports 0. **Do not add an alert on `rows_written = 0`** — the freshness
+  registry is what detects a source that has gone quiet, and it does so from `MAX(ts)` rather than
+  from the job's own report about itself.
+- **The heartbeat will alert about `gauge_readings` being EMPTY from the moment 0005 applies until
+  the backfill runs.** Deliberate: a registered table with no rows is stale, not quiet, for the
+  same reason a job that has never succeeded is overdue. Expected once, and it goes quiet after
+  the first backfill window lands.
+- **The compression ratio is unmeasured and no number is written anywhere.** Live verification
+  step 6. Nothing in the repo, the README, or the résumé may quote a ratio until it is taken here.
+- **A revision to a reading older than 30 days lands in a compressed chunk** and is markedly
+  slower than the same write against a recent one. It works on the pinned version and it is a rare
+  path (USGS approving old data), not the ingest's normal one. If it ever becomes routine, widen
+  0006's interval — do not stop upserting.
+- **`app/orchestration/scheduler.py` was modified outside this commit's stated file list**, and
+  had to be: `build_scheduler()` refuses to start when the cadence table and `JOB_FUNCTIONS`
+  disagree, so adding the `usgs_ingest` cadence entry without registering its function would have
+  broken every existing scheduler test. `tests/orchestration/test_migration_runner.py` was also
+  modified — it hardcoded "3 migrations" and now derives the count from the directory, so it stops
+  going red on every commit that adds one.
+- **`tests/ingest/conftest.py` duplicates the schema-reset SQL from
+  `tests/orchestration/conftest.py`** rather than importing it. Deliberate: the two `conftest`
+  modules already collided once when both suites ran in one `pytest` invocation (see the
+  provisioning-1 notes below), and a shared helper would be a third import path into the same
+  collision. If a third suite needs it, promote it to a real module under `tests/` with a
+  non-colliding name rather than importing across suites.
 
 - ~~`CLAUDE.md § 12` forbids a cadence entry whose `misfire_grace_time` >= its `interval`, and
   `cadence.py` does not enforce it.~~ **Closed:** enforced in `Cadence.__post_init__`.
