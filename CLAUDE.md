@@ -495,3 +495,57 @@ one the rest exist to protect.
   never from the process. A registered table with no rows at all is **stale, not quiet**, for the
   same reason a job with no successful run is overdue rather than silent. A registered table that
   cannot be queried is a **failed** check, never a skipped one (§ 13).
+
+---
+
+## 15. Multi-endpoint source conventions
+
+Learned when the USGS daily-values endpoint was added beside the instantaneous one (Phase 3.5) and
+the assumption underneath Phase 3 turned out to be false. § 14 governs any one ingest client; this
+governs a source that speaks through more than one endpoint.
+
+- **A source's period of record is per entity AND per endpoint. Never infer one endpoint's depth
+  from another's.** Phase 3 assumed the instantaneous service carried the full record because one
+  site does. Measured: **instantaneous retention is a rolling window of recent weeks at three of
+  the four gauges**, while the daily endpoint carries 35 years at two of them. The Phase 3
+  backfill aborting at Memphis's first window was § 14's guard working exactly as designed — it
+  refused a 200 with the series absent rather than writing it as zero rows — and it is what
+  surfaced this. Record a start per entity per endpoint, and give the columns names that say which
+  endpoint they mean.
+- **Three response outcomes are always distinguished and never collapsed:** a body that does not
+  parse, a 200 with the requested series absent, and a present series with no values. They arrive
+  looking similar and mean different things, and each points at a different fix — the seed's
+  record-start floor, the entity's declared availability, and nothing at all respectively. A
+  distinct exception type per outcome, not a flag on one.
+- **Timestamps without an offset are stored as the calendar date the source stated, with no
+  timezone arithmetic. Offset-bearing and offset-free timestamps never share a parsing path.**
+  Applying `.astimezone()` to a naive timestamp makes the local machine's zone decide what it
+  meant: the same daily value becomes a different **day** in Tokyo than in Denver, plausibly and
+  undetectably. Keep the two parsers separate and guard the separation with a test that breaks one
+  and asserts the other still works — a comment saying "do not reuse this" is not a guard.
+- **Statistic codes are parsed from the response and asserted against the request, never
+  hardcoded, and form part of the key of any table storing aggregated values.** Requesting the
+  mean and receiving the minimum is a satisfied request to any check that compares only entity and
+  parameter, and a minimum stored under the mean's key is systematically wrong in a direction
+  nothing downstream can see. Adding the code to a primary key later means rebuilding the table.
+- **Measurements of different kinds live in different tables. A discriminator column on a shared
+  table is not sufficient when the rows mean different things.** With a `source` column, the
+  obvious query returns a silent mixture and every aggregate over it double-counts the overlap;
+  the filter that would prevent it is one every caller must remember forever. Separate tables make
+  the mistake impossible rather than discouraged.
+- **Where two sources cover the same fact, precedence is encoded ONCE as a database view exposing
+  which source each row came from. Consumers never re-derive it.** Three copies of a precedence
+  rule diverge silently, because each returns a plausible series and nothing compares them. The
+  `source` column is not decoration: sources that cover the same fact rarely measure it
+  identically, so a series that switches source mid-history has a **seam**, and the column is what
+  keeps that seam visible instead of hidden. State the known differences in the view's own
+  definition.
+- **A backfill never writes to the seed table it reads from.** Discovered boundaries are reported
+  for a human to reconcile, in a new numbered migration. A backfill that corrects its own starting
+  assumption destroys the only evidence it ever started from the wrong place — the run that would
+  have shown the discrepancy is the run that overwrites it. Seeds are human-owned (§ 1).
+- **Renaming a table to say what it holds is worth its own migration.** A name that lets a reader
+  avoid deciding which measurement they meant will be read as "the complete one" forever. Renames
+  are non-destructive and so do not need § 3's archive treatment, but they carry catalog state
+  (hypertable registration, compression settings, policies) that must be **read back from the
+  catalog afterwards**, never assumed to have survived.

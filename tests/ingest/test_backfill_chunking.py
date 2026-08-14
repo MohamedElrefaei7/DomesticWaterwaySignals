@@ -19,7 +19,7 @@ from app.ingest.usgs_client import PARAM_DISCHARGE, MissingSeriesError, Reading
 UTC = timezone.utc
 
 
-def gauge(site_id="07010000", record_start=None, params=(PARAM_DISCHARGE,)) -> Gauge:
+def gauge(site_id="07010000", iv_record_start=None, params=(PARAM_DISCHARGE,)) -> Gauge:
     return Gauge(
         usgs_site_id=site_id,
         name="test site",
@@ -30,7 +30,8 @@ def gauge(site_id="07010000", record_start=None, params=(PARAM_DISCHARGE,)) -> G
         tier=1,
         available_params=tuple(params),
         native_cadence_minutes=30,
-        record_start=record_start or datetime(2008, 1, 1, tzinfo=UTC).date(),
+        iv_record_start=iv_record_start or datetime(2008, 1, 1, tzinfo=UTC).date(),
+        dv_record_start=datetime(2008, 1, 1, tzinfo=UTC).date(),
     )
 
 
@@ -159,7 +160,7 @@ def test_an_empty_window_advances_and_a_missing_pair_aborts(monkeypatch):
     assert len(written) == 1
 
     # The first window that actually returned data is recorded, which is how a wrong seeded
-    # record_start becomes visible instead of becoming a silent sweep of empty windows.
+    # iv_record_start becomes visible instead of becoming a silent sweep of empty windows.
     assert result.first_window_with_data is not None
     assert result.first_window_with_data.start == start + timedelta(days=180)
 
@@ -187,7 +188,7 @@ def test_an_empty_window_advances_and_a_missing_pair_aborts(monkeypatch):
 
 @pytest.mark.integration
 def test_resume_point_comes_from_max_ts_in_the_database(migrated_db):
-    """Seed rows, and the first requested window starts from THEM, not from record_start.
+    """Seed rows, and the first requested window starts from THEM, not from iv_record_start.
 
     A checkpoint file or a progress table is a second record of the same fact, and when the two
     disagree it is the checkpoint that gets believed. The failure that matters is silent: a run
@@ -220,7 +221,7 @@ def test_resume_point_comes_from_max_ts_in_the_database(migrated_db):
 
 
 @pytest.mark.integration
-def test_a_site_with_no_rows_starts_at_its_own_record_start(migrated_db):
+def test_a_site_with_no_rows_starts_at_its_own_iv_record_start(migrated_db):
     """Per site, not global. Vicksburg's record begins later than the other three.
 
     The plan assumed 2007-10-01 for everything; measurement says Vicksburg's IV record appears to
@@ -233,8 +234,8 @@ def test_a_site_with_no_rows_starts_at_its_own_record_start(migrated_db):
     vicksburg = seeded["07289000"]
     st_louis = seeded["07010000"]
 
-    assert vicksburg.record_start != st_louis.record_start, (
-        "the seeded record_start values are now identical across sites, so this test can no "
+    assert vicksburg.iv_record_start != st_louis.iv_record_start, (
+        "the seeded iv_record_start values are now identical across sites, so this test can no "
         "longer tell a per-site start from a global one"
     )
 
@@ -252,18 +253,18 @@ def test_a_site_with_no_rows_starts_at_its_own_record_start(migrated_db):
         first_by_site.setdefault(sites[0], start)
 
     assert first_by_site[vicksburg.usgs_site_id] == datetime(
-        vicksburg.record_start.year,
-        vicksburg.record_start.month,
-        vicksburg.record_start.day,
+        vicksburg.iv_record_start.year,
+        vicksburg.iv_record_start.month,
+        vicksburg.iv_record_start.day,
         tzinfo=UTC,
     ), (
         f"Vicksburg started at {first_by_site[vicksburg.usgs_site_id]} rather than its own "
-        f"record_start of {vicksburg.record_start}"
+        f"iv_record_start of {vicksburg.iv_record_start}"
     )
     assert first_by_site[st_louis.usgs_site_id] == datetime(
-        st_louis.record_start.year,
-        st_louis.record_start.month,
-        st_louis.record_start.day,
+        st_louis.iv_record_start.year,
+        st_louis.iv_record_start.month,
+        st_louis.iv_record_start.day,
         tzinfo=UTC,
     )
     assert first_by_site[vicksburg.usgs_site_id] != first_by_site[st_louis.usgs_site_id], (

@@ -68,9 +68,12 @@ def test_every_seeded_site_declares_available_params_and_cadence():
             f"{gauge.usgs_site_id} declares no native cadence"
         )
         assert gauge.native_cadence_minutes > 0
-        assert gauge.record_start is not None, (
-            f"{gauge.usgs_site_id} declares no record_start; the backfill would have no floor "
-            f"to walk from"
+        assert gauge.iv_record_start is not None, (
+            f"{gauge.usgs_site_id} declares no iv_record_start"
+        )
+        assert gauge.dv_record_start is not None, (
+            f"{gauge.usgs_site_id} declares no dv_record_start; the daily backfill would have no "
+            f"floor to walk from"
         )
         assert gauge.tier == 1, f"{gauge.usgs_site_id} is not tier 1"
 

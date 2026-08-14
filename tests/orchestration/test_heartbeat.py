@@ -6,7 +6,7 @@ table is the only source of overdue thresholds), 16 ("last success" means the la
 failures never fail the monitoring job).
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 
 import pytest
 from apscheduler.events import EVENT_JOB_MISSED, JobExecutionEvent
@@ -14,8 +14,9 @@ from apscheduler.job import Job
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 
 from app import db
-from app.ingest import usgs_ingest
+from app.ingest import usgs_daily_ingest, usgs_ingest
 from app.ingest.usgs_client import PARAM_DISCHARGE, Reading
+from app.ingest.usgs_daily_client import STAT_MEAN, DailyReading
 from app.orchestration import cadence as cadence_module
 from app.orchestration import heartbeat, scheduler as scheduler_module
 from app.orchestration.cadence import Cadence
@@ -32,7 +33,7 @@ def no_freshness_registry(monkeypatch):
 
     Needed because an ingest table with no rows is deliberately STALE, not quiet (see
     heartbeat.check_freshness), so a freshly migrated database has a legitimately alerting
-    gauge_readings in it. The tests below that count alerts are about the cadence table; leaving
+    gauge_readings_iv in it. The tests below that count alerts are about the cadence table; leaving
     the real registry in place would have them passing or failing for a reason they are not
     testing.
 
@@ -348,7 +349,7 @@ def test_freshness_registry_flags_a_stale_table(migrated_db, database_url, monke
     """
     now = datetime.now(timezone.utc)
     registry = (
-        Freshness("usgs_ingest", "gauge_readings", "ts", timedelta(hours=6)),
+        Freshness("usgs_ingest", "gauge_readings_iv", "ts", timedelta(hours=6)),
     )
 
     # No rows at all -> stale, not quiet.
@@ -371,7 +372,7 @@ def test_freshness_registry_flags_a_stale_table(migrated_db, database_url, monke
 
     # Same data, same code, one threshold tightened in the registry -> the verdict flips.
     tightened = (
-        Freshness("usgs_ingest", "gauge_readings", "ts", timedelta(hours=1)),
+        Freshness("usgs_ingest", "gauge_readings_iv", "ts", timedelta(hours=1)),
     )
     with db.connection(database_url) as conn:
         stale = heartbeat.check_freshness(conn, now=now, registry=tightened)
@@ -422,7 +423,7 @@ def test_a_job_with_recent_runs_but_stale_data_is_still_flagged(
     monkeypatch.setattr(
         heartbeat,
         "FRESHNESS",
-        (Freshness("usgs_ingest", "gauge_readings", "ts", timedelta(hours=6)),),
+        (Freshness("usgs_ingest", "gauge_readings_iv", "ts", timedelta(hours=6)),),
     )
 
     # The job-status check alone sees nothing wrong. This assertion is the control: without it,
@@ -442,7 +443,7 @@ def test_a_job_with_recent_runs_but_stale_data_is_still_flagged(
         f"succeeding on schedule over a source that has sent nothing for four days was reported "
         f"as healthy."
     )
-    assert "gauge_readings" in alerts[0], f"the alert does not name the stale table: {alerts[0]}"
+    assert "gauge_readings_iv" in alerts[0], f"the alert does not name the stale table: {alerts[0]}"
     assert "STALE" in alerts[0]
     # And it says so as a DATA problem, not by pretending the job failed.
     assert "overdue" not in alerts[0].lower(), (
@@ -465,7 +466,7 @@ def test_an_unqueryable_registered_table_alerts_rather_than_skipping(
     now = datetime.now(timezone.utc)
     registry = (
         Freshness("usgs_ingest", "table_that_does_not_exist", "ts", timedelta(hours=6)),
-        Freshness("usgs_ingest", "gauge_readings", "ts", timedelta(hours=6)),
+        Freshness("usgs_ingest", "gauge_readings_iv", "ts", timedelta(hours=6)),
     )
 
     with db.connection(database_url) as conn:
@@ -482,5 +483,92 @@ def test_an_unqueryable_registered_table_alerts_rather_than_skipping(
     assert "CANNOT BE CHECKED" in missing.describe()
 
     # The second entry was still checked, on the same connection, after the first one errored.
-    assert verdicts[1].table == "gauge_readings"
+    assert verdicts[1].table == "gauge_readings_iv"
     assert verdicts[1].error is None
+
+
+def test_freshness_registry_covers_both_reading_tables(migrated_db, database_url):
+    """Every ingest table is registered, and each names a job the cadence table schedules.
+
+    CLAUDE.md § 12: no ingest client is complete until it registers its table. Phase 3.5 adds a
+    second ingest table, and the failure it guards against is the cheap one - adding the daily
+    backbone, wiring its job, and never registering it, so the table that carries 35 years of
+    history is the one nothing watches. That table would then be reported healthy by omission:
+    the heartbeat's green light would mean "the one table I know about is fine."
+
+    Asserted as exact set equality over the registered tables, not `>= 1`. A subset assertion
+    passes with the daily table missing, which is precisely the change this catches.
+    """
+    registered = {f.table for f in heartbeat.FRESHNESS}
+    assert registered == {"gauge_readings_iv", "gauge_readings_daily"}, (
+        f"the freshness registry covers {sorted(registered)}. Both reading tables must be "
+        f"registered in the commit that creates them (CLAUDE.md § 12)."
+    )
+
+    # Every entry names a job that is actually scheduled - a freshness entry for a job nothing
+    # runs reports a stale table forever with no way to fix it.
+    for entry in heartbeat.FRESHNESS:
+        assert entry.job_name in cadence_module.BY_NAME, (
+            f"freshness entry for {entry.table} names job {entry.job_name!r}, which has no "
+            f"cadence entry"
+        )
+
+    # And each registered table is genuinely queryable through the real check, on a database
+    # carrying the real migrations. A registry entry naming a table that does not exist would be
+    # reported as a failed check rather than a passing one, but it would still be a defect.
+    with db.connection(database_url) as conn:
+        verdicts = heartbeat.check_freshness(conn, now=datetime.now(timezone.utc))
+
+    assert len(verdicts) == len(heartbeat.FRESHNESS)
+    assert all(v.error is None for v in verdicts), (
+        f"a registered table could not be queried: {[v.describe() for v in verdicts if v.error]}"
+    )
+    # Both are empty on a fresh database, and an empty ingest table is STALE, not quiet.
+    assert all(v.stale for v in verdicts)
+    assert all(v.newest is None for v in verdicts)
+
+
+def test_daily_freshness_measures_age_from_a_date_column(migrated_db, database_url, monkeypatch):
+    """A `date` column produces an age, anchored at midnight UTC rather than cast in SQL.
+
+    Not in the brief's numbered list, and here because the daily table's timestamp column is a
+    calendar DATE while every other registered column is a timestamptz. `now - date` is not a
+    subtraction Python will perform, so without normalization the freshness check for the
+    backbone table would raise on every heartbeat run - reported as a failed check, loudly, but
+    still broken.
+
+    Midnight UTC is the conservative anchor: it makes a daily value look up to 24 hours OLDER,
+    so the check errs towards reporting stale. The 48-hour threshold is set with that priced in.
+    """
+    today = date.today()
+    with db.connection(database_url) as conn:
+        usgs_daily_ingest.upsert_daily_readings(
+            conn,
+            [
+                DailyReading(
+                    usgs_site_id="07032000",
+                    date=today,
+                    param_code=PARAM_DISCHARGE,
+                    stat_cd=STAT_MEAN,
+                    value=121000.0,
+                    qualifiers=("A",),
+                )
+            ],
+        )
+        conn.commit()
+
+    now = datetime.combine(today, dt_time(12, 0), tzinfo=timezone.utc)
+    registry = (
+        Freshness("usgs_daily_ingest", "gauge_readings_daily", "date", timedelta(hours=48)),
+    )
+
+    with db.connection(database_url) as conn:
+        verdict = heartbeat.check_freshness(conn, now=now, registry=registry)[0]
+
+    assert verdict.error is None, f"the date column could not be aged: {verdict.describe()}"
+    assert verdict.newest == datetime.combine(today, dt_time(0, 0), tzinfo=timezone.utc), (
+        f"newest is {verdict.newest}; a date must anchor at midnight UTC, not be cast in SQL "
+        f"where the session's TimeZone would decide"
+    )
+    assert verdict.age == timedelta(hours=12)
+    assert verdict.stale is False, "today's daily value was reported stale against a 48h threshold"

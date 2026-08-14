@@ -23,7 +23,7 @@ THREE DECISIONS, EACH WITH A SHORTER WRONG VERSION
    missing series means the site has stopped serving that parameter, and continuing would walk
    the entire remaining record collecting nothing while reporting progress.
 
-`record_start` IS PER SITE AND IS A FLOOR
+`iv_record_start` IS PER SITE AND IS A FLOOR
 -----------------------------------------
 Vicksburg's record appears to begin 2008-01-01 while the others start 2007-10-01, so a single
 global start is wrong for at least one site. This walks from each site's own seeded value and
@@ -99,15 +99,15 @@ def resume_point(conn, gauge) -> tuple[datetime, str]:
     """Where this site's backfill starts, and why. Per site, from the data.
 
     Returns the newest stored reading's timestamp when the site has rows, and its own
-    `record_start` when it does not. NOT a global start, and NOT a checkpoint.
+    `iv_record_start` when it does not. NOT a global start, and NOT a checkpoint.
     """
     newest = usgs_ingest.latest_ts(conn, gauge.usgs_site_id)
     if newest is not None:
-        return newest, f"resuming from MAX(ts) in gauge_readings ({newest.isoformat()})"
+        return newest, f"resuming from MAX(ts) in gauge_readings_iv ({newest.isoformat()})"
     return (
-        _midnight_utc(gauge.record_start),
-        f"no rows stored; starting from this site's own record_start "
-        f"({gauge.record_start.isoformat()})",
+        _midnight_utc(gauge.iv_record_start),
+        f"no rows stored; starting from this site's own iv_record_start "
+        f"({gauge.iv_record_start.isoformat()})",
     )
 
 
@@ -219,15 +219,15 @@ def backfill_site(
 
         if result.first_window_with_data is None:
             result.first_window_with_data = window
-            # Decision 8: the seed's record_start is unconfirmed for three of four sites, and
+            # Decision 8: the seed's iv_record_start is unconfirmed for three of four sites, and
             # this line is how a wrong one becomes visible instead of becoming a slow sweep of
             # empty windows.
             logger.info(
-                "%s: FIRST DATA in window starting %s (seeded record_start is %s). A large gap "
+                "%s: FIRST DATA in window starting %s (seeded iv_record_start is %s). A large gap "
                 "between these two means the SEED is what to correct.",
                 gauge.usgs_site_id,
                 window.start.date().isoformat(),
-                gauge.record_start.isoformat(),
+                gauge.iv_record_start.isoformat(),
             )
 
         written = usgs_ingest.upsert_readings(conn, readings)
@@ -292,7 +292,7 @@ def _parse_day(text: str) -> datetime:
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - the live-verification path
     parser = argparse.ArgumentParser(
         description=(
-            "Backfill USGS discharge into gauge_readings. Long-running - run it under tmux or "
+            "Backfill USGS discharge into gauge_readings_iv. Long-running - run it under tmux or "
             "nohup so an SSM disconnect does not kill it. This is a CLI a human invokes; it is "
             "deliberately not a scheduled job."
         )
@@ -308,7 +308,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - the live-v
         type=_parse_day,
         help=(
             "override the resume point (ISO date). Without this the backfill resumes from "
-            "MAX(ts) per site, or that site's own record_start if it has no rows."
+            "MAX(ts) per site, or that site's own iv_record_start if it has no rows."
         ),
     )
     parser.add_argument(
@@ -363,7 +363,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - the live-v
         f"{len(results)} site(s) in {elapsed}"
     )
     print(
-        "\nCompare each site's first-data date against its seeded record_start above. A large "
+        "\nCompare each site's first-data date against its seeded iv_record_start above. A large "
         "discrepancy means the SEED is what to fix, in a new numbered migration."
     )
     return 0

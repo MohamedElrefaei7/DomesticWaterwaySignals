@@ -1,0 +1,175 @@
+{
+  "name": "ns1:timeSeriesResponseType",
+  "declaredType": "org.cuahsi.waterml.TimeSeriesResponseType",
+  "scope": "javax.xml.bind.JAXBElement$GlobalScope",
+  "value": {
+    "queryInfo": {
+      "queryURL": "http://waterservices.usgs.gov/nwis/dv/format=json,1.1&sites=07032000,07289000&parameterCd=00060&statCd=00003&startDT=2022-10-01&endDT=2022-10-03",
+      "criteria": {
+        "locationParam": "[ALL:07032000, ALL:07289000]",
+        "variableParam": "[00060]",
+        "parameter": []
+      },
+      "note": [
+        {"value": "[ALL:07032000, ALL:07289000]", "title": "filter:sites"},
+        {"value": "[mode=RANGE, modifiedSince=null] interval={INTERVAL[2022-10-01T00:00:00.000-05:00/2022-10-03T00:00:00.000-05:00]}", "title": "filter:timeRange"},
+        {"value": "methodIds=[ALL]", "title": "filter:methodId"},
+        {"value": "sqlserver", "title": "server"}
+      ]
+    },
+    "timeSeries": [
+      {
+        "sourceInfo": {
+          "siteName": "Mississippi River at Memphis, TN",
+          "siteCode": [
+            {"value": "07032000", "network": "NWIS", "agencyCode": "USGS"}
+          ],
+          "timeZoneInfo": {
+            "defaultTimeZone": {"zoneOffset": "-06:00", "zoneAbbreviation": "CST"},
+            "daylightSavingsTimeZone": {"zoneOffset": "-05:00", "zoneAbbreviation": "CDT"},
+            "siteUsesDaylightSavingsTime": true
+          },
+          "geoLocation": {
+            "geogLocation": {"srs": "EPSG:4326", "latitude": 0.0, "longitude": 0.0},
+            "localSiteXY": []
+          },
+          "note": [],
+          "siteType": [],
+          "siteProperty": [{"value": "ST", "name": "siteTypeCd"}]
+        },
+        "variable": {
+          "variableCode": [
+            {
+              "value": "00060",
+              "network": "NWIS",
+              "vocabulary": "NWIS:UnitValues",
+              "variableID": 45807197,
+              "default": true
+            }
+          ],
+          "variableName": "Streamflow, ft&#179;/s",
+          "variableDescription": "Discharge, cubic feet per second",
+          "valueType": "Derived Value",
+          "unit": {"unitCode": "ft3/s"},
+          "options": {
+            "option": [
+              {"value": "Mean", "name": "Statistic", "optionCode": "00003"}
+            ]
+          },
+          "note": [],
+          "noDataValue": -999999.0,
+          "variableProperty": [],
+          "oid": "45807197"
+        },
+        "values": [
+          {
+            "value": [
+              {
+                "value": "121000",
+                "qualifiers": ["A"],
+                "dateTime": "2022-10-01T00:00:00.000"
+              },
+              {
+                "value": "119000",
+                "qualifiers": ["A"],
+                "dateTime": "2022-10-02T00:00:00.000"
+              },
+              {
+                "value": "-999999",
+                "qualifiers": ["A", "e"],
+                "dateTime": "2022-10-03T00:00:00.000"
+              }
+            ],
+            "qualifier": [
+              {
+                "qualifierCode": "A",
+                "qualifierDescription": "Approved for publication -- Processing and review completed.",
+                "qualifierID": 0,
+                "network": "NWIS",
+                "vocabulary": "uv_rmk_cd"
+              }
+            ],
+            "qualityControlLevel": [],
+            "method": [{"methodDescription": "", "methodID": 149655}],
+            "source": [],
+            "offset": [],
+            "sample": [],
+            "censorCode": []
+          }
+        ],
+        "name": "USGS:07032000:00060:00003"
+      },
+      {
+        "sourceInfo": {
+          "siteName": "Mississippi River at Vicksburg, MS",
+          "siteCode": [
+            {"value": "07289000", "network": "NWIS", "agencyCode": "USGS"}
+          ],
+          "timeZoneInfo": {
+            "defaultTimeZone": {"zoneOffset": "-06:00", "zoneAbbreviation": "CST"},
+            "daylightSavingsTimeZone": {"zoneOffset": "-05:00", "zoneAbbreviation": "CDT"},
+            "siteUsesDaylightSavingsTime": true
+          },
+          "geoLocation": {
+            "geogLocation": {"srs": "EPSG:4326", "latitude": 0.0, "longitude": 0.0},
+            "localSiteXY": []
+          },
+          "note": [],
+          "siteType": [],
+          "siteProperty": [{"value": "ST", "name": "siteTypeCd"}]
+        },
+        "variable": {
+          "variableCode": [
+            {
+              "value": "00060",
+              "network": "NWIS",
+              "vocabulary": "NWIS:UnitValues",
+              "variableID": 45807197,
+              "default": true
+            }
+          ],
+          "variableName": "Streamflow, ft&#179;/s",
+          "variableDescription": "Discharge, cubic feet per second",
+          "valueType": "Derived Value",
+          "unit": {"unitCode": "ft3/s"},
+          "options": {
+            "option": [
+              {"value": "Mean", "name": "Statistic", "optionCode": "00003"}
+            ]
+          },
+          "note": [],
+          "noDataValue": -999999.0,
+          "variableProperty": [],
+          "oid": "45807197"
+        },
+        "values": [
+          {
+            "value": [
+              {
+                "value": "163000",
+                "qualifiers": ["A"],
+                "dateTime": "2022-10-01T00:00:00.000"
+              },
+              {
+                "value": "161000",
+                "qualifiers": ["P"],
+                "dateTime": "2022-10-02T00:00:00.000"
+              }
+            ],
+            "qualifier": [],
+            "qualityControlLevel": [],
+            "method": [{"methodDescription": "", "methodID": 149702}],
+            "source": [],
+            "offset": [],
+            "sample": [],
+            "censorCode": []
+          }
+        ],
+        "name": "USGS:07289000:00060:00003"
+      }
+    ]
+  },
+  "nil": false,
+  "globalScope": true,
+  "typeSubstituted": false
+}

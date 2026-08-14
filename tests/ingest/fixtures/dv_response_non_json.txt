@@ -1,0 +1,7 @@
+Error 400: Bad Request
+
+No sites/data found using the selection criteria specified
+
+Please refer to the following documentation for more information on the parameters:
+
+    https://waterservices.usgs.gov/docs/dv-service/daily-values-service-details/

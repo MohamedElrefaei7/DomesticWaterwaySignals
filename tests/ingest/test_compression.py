@@ -17,11 +17,11 @@ from app.ingest import usgs_ingest
 
 pytestmark = pytest.mark.integration
 
-TABLE = "gauge_readings"
+TABLE = "gauge_readings_iv"
 
 
 def test_hypertable_exists_with_the_expected_chunk_interval(migrated_db):
-    """gauge_readings is a hypertable partitioned on ts, in 7-day chunks.
+    """gauge_readings_iv is a hypertable partitioned on ts, in 7-day chunks.
 
     If create_hypertable never ran, this is an ordinary Postgres table: every query still works,
     every insert still succeeds, and nothing anywhere reports a problem - it is simply not
@@ -132,4 +132,164 @@ def test_compression_stats_query_returns_both_sizes(migrated_db):
     assert stats["ratio"] is None, (
         f"a ratio of {stats['ratio']} was reported for a table with no compressed chunks. The "
         f"only ratio this project publishes is one measured on real data (CLAUDE.md § 7)."
+    )
+
+
+# ---------------------------------------------------------------------------------------------
+# Phase 3.5 — the rename, and the daily table's own schema.
+# ---------------------------------------------------------------------------------------------
+#
+# Placement note: these live here rather than in a new file because this module is already "the
+# schema read back from the catalog" suite, and the rename's whole risk is a catalog fact.
+
+DAILY_TABLE = "gauge_readings_daily"
+
+
+def test_iv_table_retains_its_hypertable_and_compression_settings_after_rename(migrated_db):
+    """0007's ALTER TABLE ... RENAME carried the TimescaleDB state with it.
+
+    TimescaleDB tracks hypertables, compression settings and policies by relation OID rather than
+    by name, so a rename is EXPECTED to be transparent. EXPECTED IS NOT VERIFIED, and the failure
+    mode is the worst kind: a silently dropped compression policy changes nothing observable
+    until the storage bill, and a hypertable registration lost in a rename turns the table back
+    into ordinary Postgres where every query still works and nothing is partitioned or prunable.
+
+    Read from the catalog, not from the migration text.
+    """
+    from datetime import timedelta
+
+    dimensions = migrated_db.execute(
+        "SELECT column_name, time_interval FROM timescaledb_information.dimensions"
+        " WHERE hypertable_name = %s",
+        (TABLE,),
+    ).fetchall()
+    assert dimensions == [("ts", timedelta(days=7))], (
+        f"{TABLE} is not a 7-day hypertable on ts after the rename: {dimensions}. The rename "
+        f"lost the hypertable registration."
+    )
+
+    settings = usgs_ingest.compression_settings(migrated_db, TABLE)
+    assert set(settings["segmentby"]) == {"usgs_site_id", "param_code"}, (
+        f"compression settings did not survive the rename: {settings}"
+    )
+    assert settings["orderby"] == [("ts", "DESC")]
+
+    policies = migrated_db.execute(
+        "SELECT proc_name, config FROM timescaledb_information.jobs"
+        " WHERE hypertable_name = %s",
+        (TABLE,),
+    ).fetchall()
+    assert any("compress" in (p[0] or "") for p in policies), (
+        f"no compression policy on {TABLE} after the rename. Jobs: {policies}. The table is "
+        f"compressible and nothing will ever compress it - invisible until the storage bill."
+    )
+
+    # And the OLD name is gone, so nothing can still be querying "the main one" by accident.
+    assert (
+        migrated_db.execute("SELECT to_regclass('public.gauge_readings')").fetchone()[0] is None
+    ), "gauge_readings still exists; the rename left a table that reads as the complete record"
+
+
+def test_daily_table_is_a_hypertable_with_the_expected_compression_settings(migrated_db):
+    """gauge_readings_daily: 365-day chunks, segmented by site/param/stat, ordered date DESC.
+
+    The chunk interval is written as `365 days` in 0008 rather than `1 year` because TimescaleDB
+    stores a Postgres interval year as 360 days - so a file saying "1 year" and a test asserting
+    365 would disagree, and the natural fix would be to weaken the test rather than notice the
+    file said something it did not mean.
+    """
+    from datetime import timedelta
+
+    dimensions = migrated_db.execute(
+        "SELECT column_name, time_interval FROM timescaledb_information.dimensions"
+        " WHERE hypertable_name = %s",
+        (DAILY_TABLE,),
+    ).fetchall()
+    assert dimensions == [("date", timedelta(days=365))], (
+        f"{DAILY_TABLE} is not a 365-day hypertable on `date`: {dimensions}"
+    )
+
+    settings = usgs_ingest.compression_settings(migrated_db, DAILY_TABLE)
+    assert set(settings["segmentby"]) == {"usgs_site_id", "param_code", "stat_cd"}, (
+        f"segmentby is {settings['segmentby']}; expected site, param AND stat. stat_cd segments a "
+        f"single value today and is correct the day the daily minimum lands - changing segmentby "
+        f"later requires decompressing every chunk."
+    )
+    assert settings["orderby"] == [("date", "DESC")]
+
+    policies = migrated_db.execute(
+        "SELECT config FROM timescaledb_information.jobs"
+        " WHERE hypertable_name = %s AND proc_name LIKE '%%compress%%'",
+        (DAILY_TABLE,),
+    ).fetchall()
+    assert policies, f"no compression policy on {DAILY_TABLE}"
+    assert "1 year" in str(policies[0][0]), (
+        f"the daily compression policy is {policies[0][0]}, not the 1 year 0009 specifies. The "
+        f"daily table's revision window is the same as the instantaneous one but its volume is "
+        f"~25x smaller, which is why it compresses later rather than sooner."
+    )
+
+
+def test_daily_primary_key_includes_stat_cd(migrated_db):
+    """(usgs_site_id, date, param_code, stat_cd). All four.
+
+    Without stat_cd the table cannot hold the daily mean and the daily minimum for the same site
+    and date - the second would silently overwrite the first through the upsert, which resolves
+    on the primary key. This project has a specific future interest in the minimum: the
+    constraint that binds a barge tow is the low point of the day, not the average of it.
+
+    Adding a column to a primary key after the fact means rebuilding the table and its compressed
+    chunks, so it costs nothing now and a great deal later.
+    """
+    key_columns = [
+        row[0]
+        for row in migrated_db.execute(
+            "SELECT a.attname"
+            "  FROM pg_index i"
+            "  JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)"
+            " WHERE i.indrelid = %s::regclass AND i.indisprimary"
+            " ORDER BY a.attname",
+            (DAILY_TABLE,),
+        ).fetchall()
+    ]
+
+    assert key_columns == ["date", "param_code", "stat_cd", "usgs_site_id"], (
+        f"the daily primary key is {key_columns}. Without stat_cd, a daily minimum upserted for a "
+        f"date that already has a mean overwrites it, and nothing reports the loss."
+    )
+
+
+def test_gauges_carries_separate_dv_and_iv_record_starts(migrated_db):
+    """Two columns, both NOT NULL, and the daily floors are not all the same value.
+
+    One `record_start` cannot describe two endpoints whose depth differs per site: Vicksburg
+    publishes daily values from 2008-2010 while its instantaneous record is a rolling window of
+    recent weeks. A single column silently means whichever endpoint the reader assumed.
+    """
+    columns = {
+        row[0]: row[1]
+        for row in migrated_db.execute(
+            "SELECT column_name, is_nullable FROM information_schema.columns"
+            " WHERE table_name = 'gauges' AND column_name LIKE '%%record_start%%'"
+        ).fetchall()
+    }
+
+    assert set(columns) == {"iv_record_start", "dv_record_start"}, (
+        f"gauges carries {sorted(columns)}. A single record_start column cannot describe two "
+        f"endpoints with different depth per site (CLAUDE.md § 15)."
+    )
+    assert columns["dv_record_start"] == "NO", (
+        "dv_record_start is nullable; a site with no daily floor would have the backfill either "
+        "skip it silently or walk from an arbitrary default"
+    )
+
+    floors = dict(
+        migrated_db.execute(
+            "SELECT usgs_site_id, dv_record_start FROM gauges ORDER BY usgs_site_id"
+        ).fetchall()
+    )
+    assert len(floors) == 4
+    assert len(set(floors.values())) > 1, (
+        f"every site has the same dv_record_start ({set(floors.values())}). The measured record "
+        f"boundaries differ per site; a uniform set means they were filled in from an assumption."
     )

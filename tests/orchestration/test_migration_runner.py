@@ -256,7 +256,7 @@ def test_second_run_applies_nothing(clean_db, database_url):
     assert len(recorded) == len(on_disk)
     assert _table_exists(database_url, "job_runs")
     assert _table_exists(database_url, "gauges")
-    assert _table_exists(database_url, "gauge_readings")
+    assert _table_exists(database_url, "gauge_readings_iv")
 
     statuses = migrate.status(migrate.MIGRATIONS_DIR, url=database_url)
     assert len(statuses) == len(on_disk)

@@ -78,7 +78,7 @@ class Freshness:
 FRESHNESS: tuple[Freshness, ...] = (
     Freshness(
         job_name="usgs_ingest",
-        table="gauge_readings",
+        table="gauge_readings_iv",
         timestamp_column="ts",
         # SIX HOURS, AND GENEROUS RELATIVE TO THE HOURLY POLL ON PURPOSE.
         #
@@ -91,6 +91,20 @@ FRESHNESS: tuple[Freshness, ...] = (
         # before this speaks. Tighter and it would fire on ordinary USGS lateness — and an alert
         # that fires routinely is an alert everyone mutes, which costs more than the delay.
         max_staleness=timedelta(hours=6),
+    ),
+    Freshness(
+        job_name="usgs_daily_ingest",
+        table="gauge_readings_daily",
+        # `date`, not a timestamp. A daily mean is a calendar date and is stored as one; see
+        # newest_row() for how an age is computed from it without inventing a time of day.
+        timestamp_column="date",
+        # FORTY-EIGHT HOURS, and the arithmetic is different from the instantaneous table's.
+        #
+        # A daily value is published AFTER its day closes, so the newest date in this table is
+        # normally yesterday - already ~24 hours old by this check's reckoning before anything
+        # has gone wrong. 48 hours allows one late publication without crying wolf, and still
+        # speaks after two consecutive daily polls have produced nothing.
+        max_staleness=timedelta(hours=48),
     ),
 )
 
@@ -255,7 +269,34 @@ def newest_row(conn, entry: Freshness) -> datetime | None:
     row = conn.execute(
         f"SELECT max({entry.timestamp_column}) FROM {entry.table}"
     ).fetchone()
-    return row[0] if row else None
+    newest = row[0] if row else None
+    return _as_utc_datetime(newest)
+
+
+def _as_utc_datetime(value):
+    """Normalize a MAX() result to an aware UTC datetime so an age can be computed.
+
+    A DATE COLUMN NEEDS THIS AND A timestamptz COLUMN DOES NOT, and the difference is the whole
+    reason it exists: `gauge_readings_daily.date` is a calendar date with no time of day, and
+    `now - date` is not a thing Python will do.
+
+    A date is anchored at MIDNIGHT UTC, which is the conservative direction. It makes a daily
+    value look up to 24 hours OLDER than an alternative anchoring would - so the check errs
+    towards reporting stale rather than towards reporting healthy, and the freshness threshold
+    for that table is set with this already priced in (48 hours, see the registry above).
+
+    Anchoring is done here, at the boundary, rather than by casting in SQL: `date::timestamptz`
+    resolves in the SESSION's TimeZone setting, so the same table would produce a different age
+    depending on who connected.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        # A naive timestamp from a `timestamp` (no tz) column would otherwise blow up on
+        # subtraction against an aware `now`. There is no such column today; this makes adding
+        # one a non-event rather than a 3am traceback inside the monitor.
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    return datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
 
 
 def check_freshness(conn, now: datetime | None = None, registry=None) -> list[FreshnessVerdict]:
@@ -270,7 +311,7 @@ def check_freshness(conn, now: datetime | None = None, registry=None) -> list[Fr
     run being overdue rather than silent: an ingest table that has never received a row is the
     most alarming state it can be in, and treating a NULL MAX(ts) as "nothing to report" is how a
     source that never once delivered stays quiet forever. This DOES mean the heartbeat alerts
-    about gauge_readings from the moment 0005 is applied until the backfill puts rows in it —
+    about gauge_readings_iv from the moment 0005 is applied until the backfill puts rows in it —
     expected, once, exactly like the heartbeat's own first run alerting about itself.
     """
     now = now or datetime.now(timezone.utc)

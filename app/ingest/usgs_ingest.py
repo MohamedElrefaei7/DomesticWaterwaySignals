@@ -71,12 +71,12 @@ BATCH_SIZE = 1000
 
 
 UPSERT_SQL = """
-INSERT INTO gauge_readings (usgs_site_id, ts, param_code, value, qualifiers)
+INSERT INTO gauge_readings_iv (usgs_site_id, ts, param_code, value, qualifiers)
 VALUES {placeholders}
 ON CONFLICT (usgs_site_id, ts, param_code) DO UPDATE
     SET value = EXCLUDED.value,
         qualifiers = EXCLUDED.qualifiers
-    WHERE (gauge_readings.value, gauge_readings.qualifiers)
+    WHERE (gauge_readings_iv.value, gauge_readings_iv.qualifiers)
        IS DISTINCT FROM (EXCLUDED.value, EXCLUDED.qualifiers)
 RETURNING 1
 """
@@ -143,7 +143,7 @@ def latest_ts(conn, site_id: str) -> datetime | None:
     its checkpoint first skips work it never did. The second failure is silent.
     """
     row = conn.execute(
-        "SELECT max(ts) FROM gauge_readings WHERE usgs_site_id = %s", (site_id,)
+        "SELECT max(ts) FROM gauge_readings_iv WHERE usgs_site_id = %s", (site_id,)
     ).fetchone()
     return row[0] if row else None
 
@@ -268,7 +268,7 @@ def _settings_view(conn) -> str:
     )
 
 
-def compression_settings(conn, table: str = "gauge_readings") -> dict:
+def compression_settings(conn, table: str = "gauge_readings_iv") -> dict:
     """The segmentby and orderby columns actually in effect, read back from the server.
 
     Read back rather than trusted from the migration text. `ALTER TABLE ... SET
@@ -291,7 +291,7 @@ def compression_settings(conn, table: str = "gauge_readings") -> dict:
     return {"view": view, "segmentby": segmentby, "orderby": orderby}
 
 
-def compression_stats(conn, table: str = "gauge_readings") -> dict:
+def compression_stats(conn, table: str = "gauge_readings_iv") -> dict:
     """Uncompressed and compressed total bytes for a hypertable, plus the ratio.
 
     Returns None for the sizes when nothing has been compressed yet, rather than 0 - a table
@@ -329,7 +329,7 @@ def _print_compression_stats(url: str | None = None) -> int:  # pragma: no cover
         print(
             "\nNo chunks are compressed yet, so there is no ratio to report.\n"
             "Compress the eligible chunks first:\n"
-            "    SELECT compress_chunk(c) FROM show_chunks('gauge_readings',\n"
+            "    SELECT compress_chunk(c) FROM show_chunks('gauge_readings_iv',\n"
             "        older_than => INTERVAL '30 days') c;\n"
             "Do NOT quote a ratio from any other source (CLAUDE.md § 7)."
         )
@@ -356,7 +356,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - the live-v
     parser.add_argument(
         "--compression-stats",
         action="store_true",
-        help="report gauge_readings' before/after compression sizes and change nothing",
+        help="report gauge_readings_iv' before/after compression sizes and change nothing",
     )
     args = parser.parse_args(argv)
 

@@ -3,11 +3,119 @@
 This is the **log**: current state, decisions as they are made, and `§ Up Next`. Stable contracts
 live in `CLAUDE.md`. If something here hardens into an invariant, move it there and note the move.
 
-**Last updated:** 2026-08-13 (Phase 3 ingest written; live steps outstanding)
+**Last updated:** 2026-08-14 (Phase 3.5 daily backbone written; live steps outstanding)
 
 ---
 
 ## Current state
+
+**PHASE 3.5 (DAILY VALUES AS THE HISTORICAL BACKBONE) IS WRITTEN AND VERIFIED OFFLINE, as of
+2026-08-14. It has not run against the instance, and the compression ratios are STILL UNMEASURED.**
+
+- **183 tests green with ZERO SKIPS** against a throwaway local TimescaleDB container on the
+  pinned image (`timescale/timescaledb:2.26.2-pg16`, same digest as `docker-compose.yml`).
+  Offline the same suite is `130 passed, 53 skipped`. Phase 3's baseline was 156/zero-skip.
+- **All 13 mutation-table rows confirmed**: each performed, observed to turn its named test red
+  *on that test's own assertion*, then restored, with the suite re-verified afterwards. Three
+  needed a second pass and the reasons are recorded below under "mutation notes" — a mutation
+  that goes red for the wrong reason is not a confirmed guard.
+- **The rename was verified against the catalog, not assumed.** `ALTER TABLE gauge_readings
+  RENAME TO gauge_readings_iv` carried the hypertable registration (7-day chunks on `ts`), the
+  compression settings (`segmentby usgs_site_id, param_code`; `orderby ts DESC`) and the 30-day
+  compression policy through intact. This was the single largest silent-failure risk in the
+  commit: a dropped compression policy is invisible until the storage bill.
+
+### Why this commit exists — measured against the live API, 2026-08-14
+
+Phase 3 assumed the instantaneous-values service carried the full period of record. **It does
+not.** Every line below was measured, not inferred.
+
+| Site | DV 1990 | DV 2000 | DV 2007 | DV 2010+ | IV depth |
+|---|---|---|---|---|---|
+| 07010000 St. Louis | yes | yes | yes | yes | deep — 223,706 rows loaded from 2007-10-01 |
+| 07032000 Memphis | yes | yes | yes | yes | **rolling ~2 months** |
+| 07289000 Vicksburg | no | no | no | yes (≤2010) | rolling |
+| 07374000 Baton Rouge | no | no | yes | yes | rolling (depth untested) |
+
+1. **Instantaneous retention is a rolling window at three of four sites.** Memphis returned
+   nothing at 2025-01, 2025-06 or 2026-01 and data at 2026-06, with the current date 2026-08-14.
+2. **The daily endpoint carries the depth.** Memphis and Vicksburg both return a complete
+   122-value series for 2022-09-01 to 2022-12-31 — the low-water event, fully covered.
+3. **A request entirely outside a site's period of record returns a NON-JSON body**, not an empty
+   JSON envelope. That is a third response outcome, distinct from both of Phase 3's two.
+4. **Daily timestamps carry no UTC offset** (`2022-10-01T00:00:00.000`) where instantaneous ones
+   do (`2026-08-01T00:00:00.000-05:00`).
+5. **Daily discharge is `00060` with `stat_cd` `00003` ("Mean")**, delivered under
+   `variable.options.option`.
+6. **Record starts are per site AND per endpoint**, and the boundaries above are one-month January
+   probes — **brackets, not exact dates**. Vicksburg's daily record begins somewhere in 2008–2010;
+   Baton Rouge's somewhere in 2005–2006.
+
+### THE CONSEQUENCE FOR THE PROJECT, stated plainly
+
+**Every site covers 2010 onward at daily resolution, so the 2022 and 2023 labelled low-water
+events are covered at all four gauges** — the natural experiments this project validates against
+are intact.
+
+**But the corridor has UNEVEN HISTORICAL DEPTH.** Two sites carry 35+ years; two do not. **Any
+baseline needing pre-2010 history effectively runs on St. Louis and Memphis alone.** That is a
+real constraint on the ten-year seasonal medians and on the analog search, and it is a fact about
+the data rather than a defect to fix — no amount of engineering creates a Vicksburg reading for
+1995. It must be stated wherever a "10-year seasonal median" is claimed.
+
+**The Phase 3 backfill aborting at Memphis was NOT a defect.** It was `CLAUDE.md § 14`'s decision-1
+guard working exactly as designed: a 200 carrying `"timeSeries": []` was refused rather than
+written as zero rows. That refusal is what surfaced the rolling-retention finding at all. Had the
+client iterated whatever arrived, Memphis would have silently ingested nothing and reported
+success.
+
+### What Phase 3.5 built
+
+- `0007` renames `gauge_readings` → `gauge_readings_iv` (plus its indexes, constraints, and
+  `gauges.record_start` → `iv_record_start`). Pure renames; no data moved.
+- `0008` creates `gauge_readings_daily` — hypertable on `date`, 365-day chunks, primary key
+  `(usgs_site_id, date, param_code, stat_cd)` — and adds `gauges.dv_record_start`.
+  `0009` compresses it (segment by site/param/stat, after **1 year**, against the instantaneous
+  table's 30 days).
+- `0010` creates `gauge_series`, the one place the precedence rule lives.
+- `app/ingest/usgs_daily_client.py`, `usgs_daily_ingest.py`, `daily_backfill.py`.
+
+### Decisions worth reading before changing anything here
+
+- **Daily lands in its OWN TABLE, not a `source` column on a shared one.** The shared-table version
+  was considered and turned down: a daily mean stamped at midnight and an instantaneous reading at
+  14:45 are different kinds of measurement, and with a discriminator column the obvious query
+  returns a silent mixture that double-counts every overlapping day. Separate tables make that
+  mistake impossible rather than merely discouraged. **"Consolidate these two tables" is the
+  tidying to expect, and the reasoning is written into `0008` where it will be met.**
+- **`stat_cd` is in the key even though only `00003` arrives today.** This project has a specific
+  future interest in the daily **minimum** — the constraint that binds a tow is the low point of
+  the day, not the average of it. Adding it to a primary key later means rebuilding the table.
+- **`gauge_series` prefers instantaneous where it exists, and exposes `source`.** The two are NOT
+  identical measurements: USGS computes its daily mean over a calendar day in the site's LOCAL
+  time while the view buckets instantaneous data by UTC date, and the sampling differs. **A series
+  that switches source mid-history has a seam**, and `source` is what keeps it visible rather than
+  hidden. The day-boundary discrepancy is a known, stated cost — not a rounding error.
+- **The backfill NEVER writes to `gauges`.** It reports the first date that actually returned data
+  per site and stops. Auto-correcting `dv_record_start` would destroy the only evidence the seed
+  was ever wrong.
+
+### Mutation notes — three rows needed a second pass
+
+Recorded because "it went red" is not the claim; "it went red for the reason the test exists" is.
+
+- **"Parse DV timestamps with the IV UTC converter"** first went red because the instantaneous
+  converter *refuses* naive input — a good property, but not the silent date shift the test is
+  for. Re-run with plain `datetime.fromisoformat(raw).astimezone(utc).date()`, which has no such
+  guard: under `TZ=Asia/Tokyo` the fixture's 2022-10-01 parsed as **2022-09-30**. That is the bug.
+- **"Make the view prefer DV over IV"** first went red for the wrong reason — a harness bug applied
+  two edits to one file against the pristine text, so the second silently discarded the first and
+  the mutation behaved like a different row. Fixed and re-run; it then failed on
+  `source is 'dv'`, which is the assertion that matters.
+- **"Collapse missing-triple into the empty-values path"** cannot turn both named tests red with a
+  single edit — the two directions of the collapse are different edits. Both were run: the lenient
+  direction (a missing triple silently returning empty) turns test 2 red, and the strict direction
+  (a present-but-empty series counted as absent) turns test 3 red.
 
 **PHASE 3 (USGS INGEST AND BACKFILL) IS WRITTEN AND VERIFIED OFFLINE, as of 2026-08-13. It has
 not run against the instance, and the compression ratio has therefore NOT been measured.**
@@ -417,9 +525,15 @@ several Phase 3 decisions are what they are because of them.
   Vicksburg's was checked. Live verification step 5 compares each site's `min(ts)` against its
   seed; a large discrepancy means **the seed is what to fix**, in a new numbered migration. The
   backfill logs the first window that actually returned data specifically to make this visible.
-- **What is the Cairo, IL site number?** Investigated for Phase 3 and **not confirmed**, so it is
-  absent from the seed rather than guessed. Cairo sits at the Ohio confluence and is the most
-  obvious gap in the corridor; adding it is a human decision (`CLAUDE.md § 1`).
+- **What is the Cairo, IL site number?** Investigated for Phase 3 and **still not confirmed** as of
+  Phase 3.5, so it remains absent from the seed rather than guessed. Cairo sits at the Ohio
+  confluence and is the most obvious gap in the corridor; adding it is a human decision
+  (`CLAUDE.md § 1`).
+- **Exact daily record starts are still bracketed**, pending Phase 3.5 live verification step 6.
+  Vicksburg begins somewhere in 2008–2010, Baton Rouge somewhere in 2005–2006, and the two
+  35-year sites are floored at 1990 by choice rather than by measurement.
+- **How should a rolling-retention endpoint be modelled?** `iv_record_start` is a date column and
+  three of four sites have no fixed instantaneous start at all. See the first housekeeping item.
 - **`gauges.lat`/`lon` are seeded NULL and must be filled by a human** before anything draws a
   map. This commit's agent had no way to verify coordinates and did not type them from
   recollection. Obtain them from the USGS site service and apply as a **new** migration:
@@ -482,9 +596,53 @@ Bring the stack up with `docker compose -f docker-compose.yml -f /root/dws-local
 Delete it once the `worker` service is containerized; at that point `DATABASE_URL` becomes
 `timescaledb:5432` and nothing needs a published port.
 
-**Phase 3 is written; its live verification is outstanding and is the next thing to do.** Run it
-in order — step 3 is a deliberate rehearsal and exists so that a bad assumption is discovered
-after twenty minutes rather than after six hours.
+**Phase 3.5's live verification is the next thing to do, and it SUPERSEDES most of Phase 3's.**
+Run it in order; steps 2 and 4 are deliberate rehearsals.
+
+1. `python3 -m app.orchestration.migrate` — expect **0007–0010** applied, **ten total**.
+2. **CONFIRM THE RENAME PRESERVED TIMESCALEDB STATE, BEFORE ANYTHING ELSE:**
+   ```
+   select * from timescaledb_information.compression_settings
+    where hypertable_name = 'gauge_readings_iv';
+   select count(*) from gauge_readings_iv where usgs_site_id = '07010000';
+   ```
+   Expect the settings intact and the **223,706 St. Louis rows** still present under the new name.
+   Verified locally against the pinned image, but the instance is where it counts — a dropped
+   compression policy is invisible until the storage bill.
+3. Confirm `gauges` carries `dv_record_start` and `iv_record_start`, four rows, floors differing
+   per site.
+4. **One site, one decade first:** `python3 -m app.ingest.daily_backfill --site 07032000
+   --start 2010-01-01 --end 2020-01-01`. Report row count and elapsed time before the full run.
+   This is also the first time the pinned `format=json,1.1` and the plain-date `startDT`/`endDT`
+   form meet the live daily service.
+5. Full daily backfill, all four sites. Report total rows, wall time, and **the per-site
+   first-data dates** — those are what the seeded floors get reconciled against.
+6. `select usgs_site_id, count(*), min(date), max(date) from gauge_readings_daily group by 1
+   order by 1;` Compare each `min(date)` to its seeded `dv_record_start`. **A discrepancy means
+   the SEED is wrong**; fix it in a new numbered migration, never by editing `0008`.
+7. **Spot-check the view at a seam.** Pick a St. Louis date where both records exist and confirm
+   `source` reads `iv`; pick a Memphis 2015 date and confirm it reads `dv`.
+8. **THE COMPRESSION MEASUREMENT — STILL OUTSTANDING, STILL THE DELIVERABLE.** Record uncompressed
+   size for **both** hypertables, compress the older chunks, record compressed size, and report
+   **both ratios** here and in the README:
+   ```
+   python3 -m app.ingest.usgs_ingest --compression-stats            # gauge_readings_iv
+   psql -c "SELECT compress_chunk(c) FROM show_chunks('gauge_readings_iv',
+            older_than => INTERVAL '30 days') c;"
+   psql -c "SELECT compress_chunk(c) FROM show_chunks('gauge_readings_daily',
+            older_than => INTERVAL '1 year') c;"
+   ```
+   `compression_stats()` takes a table name, so the daily figure comes from the same helper. Real
+   numbers taken here, never a vendor claim — **and if a ratio disappoints, report it.**
+9. `python3 -m verify.preflight` — six gates green. Its migration-count gate reads the directory,
+   so ten migrations need no change to it.
+10. Start the scheduler; confirm **both** `usgs_ingest` and `usgs_daily_ingest` fire and write
+    `job_runs` rows with plausible `rows_written`.
+
+**Phase 3's own live procedure, below, is superseded except for one step.** Its steps 1–2 and 7–9
+are covered above. **Its instantaneous backfill (steps 3–5) should now be run for St. Louis
+ONLY** — see the housekeeping note on rolling retention. The rest of that block is kept as the
+record of what Phase 3 asked for.
 
 1. `python3 -m app.orchestration.migrate` — expect **0004, 0005, 0006** applied, **six total**.
 2. Confirm the seed: `select usgs_site_id, available_params, native_cadence_minutes, record_start
@@ -531,6 +689,38 @@ subsequent ingest client, and `CLAUDE.md § 14` is the contract each one is writ
 ---
 
 ## Housekeeping — open, non-blocking
+
+- **THE INSTANTANEOUS BACKFILL SHOULD NOW BE RUN FOR ST. LOUIS ONLY, and `iv_record_start` is
+  known to be wrong for the other three sites.** Their instantaneous retention is a rolling window,
+  so there is no fixed start to seed and the values carried over from Phase 3 (2007-10-01,
+  2008-01-01) are the assumption the measurement contradicted. Running `app.ingest.backfill` for
+  Memphis, Vicksburg or Baton Rouge will abort at the first window — **correctly**, per
+  `CLAUDE.md § 14`. It was left as-is deliberately: "rolling window" is not a date, and modelling
+  it properly (nullable `iv_record_start` meaning "no fixed start", plus skip logic in the
+  backfill) is a design decision with a human's name on it, not a patch to slip into a commit
+  scoped to the daily backbone. **Deciding that is the first candidate for the next commit.**
+- **Both compression ratios are unmeasured and no number is written anywhere.** Live verification
+  step 8. Nothing in the repo, the README, or the résumé may quote a ratio until it is taken.
+- **`gauge_series` buckets instantaneous data by UTC date while USGS computes its daily mean over
+  the site's LOCAL calendar day.** On the lower Mississippi that is a 5–6 hour offset at both
+  edges of the window. Small for a river that moves in feet per day; not zero. Fixing it properly
+  means recording a timezone per gauge, which is a schema change and a human decision. The
+  `source` column is what keeps the seam visible in the meantime.
+- **`app/ingest/usgs_daily_ingest.py` was created outside the brief's file list**, and
+  `app/orchestration/scheduler.py` modified outside it. Both were forced: decision 9 requires a
+  `usgs_daily_ingest` cadence entry, a cadence entry with no registered function makes
+  `build_scheduler()` refuse to start, and putting a scheduled unit inside `daily_backfill.py`
+  would have hidden a job in a module whose name says CLI. Mirroring the Phase 3
+  `usgs_ingest.py` / `backfill.py` split was worth one extra file.
+- **`tests/ingest/test_compression.py` now also carries the Phase 3.5 schema tests** (rename
+  survival, daily hypertable, daily primary key, the `gauges` column split). The brief listed
+  those as "Schema/integration" with no file; this module was already the "read the schema back
+  from the catalog" suite, so they went here rather than into a fifth test file.
+- **The seeded `dv_record_start` floors are BRACKETS from one-month January probes, not measured
+  boundaries** — and St. Louis and Memphis very likely publish daily values well before the seeded
+  1990-01-01 (USGS daily records at these gauges run to the nineteenth century). **1990 is a
+  deliberate floor, not a discovered one**: 35 years exceeds what the ten-year seasonal medians
+  and the analog search need, and reaching further back is a human's decision to seed.
 
 - **`docker-compose.yml`'s image digest is NOT the all-zero placeholder any more**, contrary to
   what the Phase 2 notes further down still say. It reads

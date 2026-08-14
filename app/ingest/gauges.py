@@ -59,7 +59,20 @@ class Gauge:
     tier: int
     available_params: tuple[str, ...]
     native_cadence_minutes: int
-    record_start: date
+
+    # ONE RECORD START PER ENDPOINT, because measurement says they differ (CLAUDE.md § 15).
+    #
+    # iv_record_start was seeded in 0004 as `record_start`, when there was one endpoint and the
+    # name could only have meant one thing. 0007 renamed it. It is now KNOWN TO BE WRONG for
+    # three of the four sites: instantaneous retention is a rolling window at Memphis, Vicksburg
+    # and Baton Rouge, so those sites have no fixed instantaneous start at all and the seeded
+    # value is the Phase 3 assumption the measurement contradicted. Left in place rather than
+    # patched, because "rolling window" is not a date and modelling it properly is a human's
+    # decision - see CONTEXT.md.
+    #
+    # dv_record_start is a FLOOR the daily backfill walks forward from, not a measured boundary.
+    iv_record_start: date
+    dv_record_start: date
 
     def requested_pairs(self) -> set[tuple[str, str]]:
         """The (site, parameter) pairs an ingest of this site must ask for AND receive.
@@ -86,7 +99,8 @@ COLUMNS = (
     "tier",
     "available_params",
     "native_cadence_minutes",
-    "record_start",
+    "iv_record_start",
+    "dv_record_start",
 )
 
 
@@ -120,7 +134,8 @@ def load(conn, site_ids=None) -> list[Gauge]:
             tier=row[6],
             available_params=tuple(row[7]),
             native_cadence_minutes=row[8],
-            record_start=row[9],
+            iv_record_start=row[9],
+            dv_record_start=row[10],
         )
         for row in rows
     ]
@@ -151,6 +166,35 @@ def load(conn, site_ids=None) -> list[Gauge]:
 _INSERT_RE = re.compile(
     r"INSERT\s+INTO\s+gauges\s*\((?P<columns>[^)]*)\)\s*VALUES\s*(?P<values>.*?);",
     re.IGNORECASE | re.DOTALL,
+)
+
+# The daily floors are seeded by 0008, not by 0004 - the daily endpoint did not exist when the
+# registry was written. This parser reads them from there so the UNIT TIER can still guard them
+# offline, the same way it guards the site list. Human-owned values that only a database can
+# check are values that go unchecked in the session where they are changed.
+_DV_FLOOR_RE = re.compile(
+    r"UPDATE\s+gauges\s+SET\s+dv_record_start\s*=\s*DATE\s*'(?P<start>[\d-]+)'\s*"
+    r"WHERE\s+usgs_site_id\s*=\s*'(?P<site>\d{8})'\s*;",
+    re.IGNORECASE,
+)
+
+DAILY_FLOOR_MIGRATION = MIGRATIONS_DIR / "0008_gauge_readings_daily.sql"
+
+# What 0004's INSERT names. NOT the same as COLUMNS, which is what the DEPLOYED table carries:
+# 0007 renamed record_start -> iv_record_start and 0008 added dv_record_start, and an applied
+# migration is never edited to match (CLAUDE.md § 3). The mapping between the two lives here, in
+# one place, rather than as a silent positional assumption.
+SEED_INSERT_COLUMNS = (
+    "usgs_site_id",
+    "name",
+    "river",
+    "river_mile",
+    "lat",
+    "lon",
+    "tier",
+    "available_params",
+    "native_cadence_minutes",
+    "record_start",
 )
 
 
@@ -314,12 +358,14 @@ def parse_seed(sql_text: str | None = None) -> list[Gauge]:
         )
 
     columns = [c.strip() for c in match.group("columns").split(",")]
-    unexpected = set(columns) ^ set(COLUMNS)
+    unexpected = set(columns) ^ set(SEED_INSERT_COLUMNS)
     if unexpected:
         raise SeedParseError(
             f"the seed INSERT names columns {columns}, which does not match the expected set "
-            f"{list(COLUMNS)}. Difference: {sorted(unexpected)}"
+            f"{list(SEED_INSERT_COLUMNS)}. Difference: {sorted(unexpected)}"
         )
+
+    floors = parse_daily_floors()
 
     gauges: list[Gauge] = []
     for row in _split_top_level(match.group("values"), "(", ")"):
@@ -329,9 +375,19 @@ def parse_seed(sql_text: str | None = None) -> list[Gauge]:
                 f"seed row has {len(fields)} field(s) for {len(columns)} column(s): {row!r}"
             )
         values = {col: _parse_literal(raw) for col, raw in zip(columns, fields)}
+        site_id = values["usgs_site_id"]
+
+        if site_id not in floors:
+            raise SeedParseError(
+                f"site {site_id} is seeded in {SEED_MIGRATION.name} but has no dv_record_start "
+                f"in {DAILY_FLOOR_MIGRATION.name}. The daily backfill would have no floor to walk "
+                f"from for it. (The deployed table's NOT NULL catches this too - this catches it "
+                f"offline, in the session that introduced it.)"
+            )
+
         gauges.append(
             Gauge(
-                usgs_site_id=values["usgs_site_id"],
+                usgs_site_id=site_id,
                 name=values["name"],
                 river=values["river"],
                 river_mile=values["river_mile"],
@@ -340,7 +396,10 @@ def parse_seed(sql_text: str | None = None) -> list[Gauge]:
                 tier=values["tier"],
                 available_params=tuple(values["available_params"] or ()),
                 native_cadence_minutes=values["native_cadence_minutes"],
-                record_start=values["record_start"],
+                # 0004's `record_start` is what 0007 renamed to iv_record_start. Same value,
+                # same column, a name that now says which endpoint it is about.
+                iv_record_start=values["record_start"],
+                dv_record_start=floors[site_id],
             )
         )
 
@@ -352,6 +411,39 @@ def parse_seed(sql_text: str | None = None) -> list[Gauge]:
         )
 
     return gauges
+
+
+def parse_daily_floors(sql_text: str | None = None) -> dict[str, date]:
+    """site id -> dv_record_start, read out of migration 0008.
+
+    Separate from the INSERT parser because the values live in a different migration: the daily
+    endpoint did not exist when the registry was seeded, so its floors arrive as UPDATEs in the
+    migration that adds the column.
+    """
+    if sql_text is None:
+        if not DAILY_FLOOR_MIGRATION.is_file():
+            raise SeedParseError(
+                f"daily-floor migration not found at {DAILY_FLOOR_MIGRATION}."
+            )
+        sql_text = DAILY_FLOOR_MIGRATION.read_text(encoding="utf-8")
+
+    uncommented = "\n".join(
+        line.split("--", 1)[0] if not _inside_quotes(line) else line
+        for line in sql_text.splitlines()
+    )
+
+    floors = {
+        m.group("site"): date.fromisoformat(m.group("start"))
+        for m in _DV_FLOOR_RE.finditer(uncommented)
+    }
+    if not floors:
+        raise SeedParseError(
+            f"no `UPDATE gauges SET dv_record_start = DATE '...' WHERE usgs_site_id = '...';` "
+            f"statements found in {DAILY_FLOOR_MIGRATION.name}. If the floors moved, move this "
+            f"parser with them rather than letting the guard tests pass against a file that no "
+            f"longer sets anything."
+        )
+    return floors
 
 
 def _inside_quotes(line: str) -> bool:

@@ -57,6 +57,45 @@ def iv_payload():
 
 
 @pytest.fixture
+def dv_payload():
+    """Return a loader: dv_payload("ok") -> the parsed daily fixture, freshly copied each call.
+
+    Separate from `iv_payload` rather than parameterized by prefix, mirroring the split between
+    the two clients: the daily fixture's timestamps are naive and carry a statistic code, and a
+    single loader would be the first place the two shapes started sharing a path.
+    """
+
+    def _load(name: str) -> dict:
+        path = FIXTURES_DIR / f"dv_response_{name}.json"
+        if not path.is_file():
+            raise AssertionError(
+                f"no fixture {path.name} in {FIXTURES_DIR}. Fixtures are captured from the live "
+                f"service by a human; this suite never calls it."
+            )
+        return deepcopy(json.loads(path.read_text(encoding="utf-8")))
+
+    return _load
+
+
+@pytest.fixture
+def dv_raw_body():
+    """Return a loader for a NON-JSON captured body: dv_raw_body("non_json") -> str.
+
+    Deliberately returns text rather than a parsed object. The behaviour under test is what
+    happens when the body cannot be parsed at all, so a fixture that had already been parsed
+    would test nothing (CLAUDE.md § 15).
+    """
+
+    def _load(name: str) -> str:
+        path = FIXTURES_DIR / f"dv_response_{name}.txt"
+        if not path.is_file():
+            raise AssertionError(f"no fixture {path.name} in {FIXTURES_DIR}")
+        return path.read_text(encoding="utf-8")
+
+    return _load
+
+
+@pytest.fixture
 def recording_fetch():
     """Return a builder: recording_fetch(payload) -> (fetch_callable, calls list).
 
@@ -162,14 +201,14 @@ def migrated_db(database_url):
 
 @pytest.fixture
 def readings_table(migrated_db, database_url):
-    """Helpers for seeding and reading gauge_readings from an independent connection."""
+    """Helpers for seeding and reading gauge_readings_iv from an independent connection."""
 
     class ReadingsTable:
         url = database_url
 
         @staticmethod
         def rows(site_id=None):
-            sql = "SELECT usgs_site_id, ts, param_code, value, qualifiers FROM gauge_readings"
+            sql = "SELECT usgs_site_id, ts, param_code, value, qualifiers FROM gauge_readings_iv"
             params = ()
             if site_id is not None:
                 sql += " WHERE usgs_site_id = %s"
@@ -183,7 +222,7 @@ def readings_table(migrated_db, database_url):
         @staticmethod
         def count():
             with db.connection(database_url) as conn:
-                return conn.execute("SELECT count(*) FROM gauge_readings").fetchone()[0]
+                return conn.execute("SELECT count(*) FROM gauge_readings_iv").fetchone()[0]
 
     return ReadingsTable
 

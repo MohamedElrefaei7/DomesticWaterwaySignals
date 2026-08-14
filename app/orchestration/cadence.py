@@ -155,6 +155,22 @@ CADENCES: tuple[Cadence, ...] = (
         # a public service runs twenty minutes late is an alert everyone mutes.
         overdue_after=timedelta(hours=3),
     ),
+    Cadence(
+        job_name="usgs_daily_ingest",
+        # DAILY, and the cadence follows PUBLICATION rather than measurement. USGS finalizes a
+        # daily value after the day closes; there is no such thing as a fresher answer partway
+        # through. Polling hourly would re-fetch the same rows twenty-four times and write
+        # nothing on twenty-three of them.
+        #
+        # It does not race the instantaneous job: they write different tables, and the poll's own
+        # seven-day overlap (app/ingest/usgs_daily_ingest.py, OVERLAP_DAYS) is what catches
+        # revisions, not frequency. Daily values are revised after publication, so re-requesting
+        # the last week every run is the mechanism that keeps the backbone correct.
+        interval=timedelta(seconds=86400),
+        # Three intervals, matching every other entry. A daily job that missed one run is a blip;
+        # three days silent is a pattern worth an alert.
+        overdue_after=timedelta(days=3),
+    ),
 )
 
 BY_NAME: dict[str, Cadence] = {c.job_name: c for c in CADENCES}
