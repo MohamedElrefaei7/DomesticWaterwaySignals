@@ -222,28 +222,40 @@ def test_resume_point_comes_from_max_ts_in_the_database(migrated_db):
 
 @pytest.mark.integration
 def test_a_site_with_no_rows_starts_at_its_own_iv_record_start(migrated_db):
-    """Per site, not global. Vicksburg's record begins later than the other three.
+    """St. Louis walks from its own seeded start; a rolling-retention site is REFUSED by name.
 
-    The plan assumed 2007-10-01 for everything; measurement says Vicksburg's IV record appears to
-    begin 2008-01-01. A single global start is therefore wrong for at least one site, and the
-    wrongness is invisible - it just produces a quarter of empty windows that look like an outage.
+    This test used to contrast Vicksburg's 2008-01-01 against St. Louis's 2007-10-01 to show the
+    start was per site rather than global. IT CANNOT ANYMORE, and the reason is the finding rather
+    than a weakening: measured 2026-08-14, three of the four sites serve instantaneous values on a
+    rolling window of recent weeks, so migration 0011 replaced their seeded starts - the Phase 3
+    assumption - with NULL. There is exactly one site left with a fixed instantaneous start.
+
+    So the per-site claim is now asserted in the shape the data actually takes: one site has a
+    start and walks from it, and the other three have none and are refused with a message naming
+    why. Computing a start for them instead is the two-line "fix" that either narrows the backfill
+    to what the poll already collects or walks decades of windows the service does not serve.
     """
     from app.ingest import gauges as gauges_module
 
     seeded = {g.usgs_site_id: g for g in gauges_module.load(migrated_db)}
-    vicksburg = seeded["07289000"]
     st_louis = seeded["07010000"]
+    rolling = [g for g in seeded.values() if g.iv_record_start is None]
 
-    assert vicksburg.iv_record_start != st_louis.iv_record_start, (
-        "the seeded iv_record_start values are now identical across sites, so this test can no "
-        "longer tell a per-site start from a global one"
+    assert st_louis.iv_record_start is not None, (
+        "St. Louis has no iv_record_start either, so nothing here has a start to walk from and "
+        "this test would be vacuous"
+    )
+    assert {g.usgs_site_id for g in rolling} == {"07032000", "07289000", "07374000"}, (
+        f"the rolling-retention sites are now "
+        f"{sorted(g.usgs_site_id for g in rolling)}; measured 2026-08-14 they are Memphis, "
+        f"Vicksburg and Baton Rouge (migration 0011)"
     )
 
     client = ScriptedClient(default=[])
     backfill.backfill(
         migrated_db,
         client=client,
-        site_ids=[vicksburg.usgs_site_id, st_louis.usgs_site_id],
+        site_ids=[st_louis.usgs_site_id],
         end=datetime(2008, 6, 1, tzinfo=UTC),
         window_days=90,
     )
@@ -252,21 +264,32 @@ def test_a_site_with_no_rows_starts_at_its_own_iv_record_start(migrated_db):
     for sites, _params, start, _end in client.windows:
         first_by_site.setdefault(sites[0], start)
 
-    assert first_by_site[vicksburg.usgs_site_id] == datetime(
-        vicksburg.iv_record_start.year,
-        vicksburg.iv_record_start.month,
-        vicksburg.iv_record_start.day,
-        tzinfo=UTC,
-    ), (
-        f"Vicksburg started at {first_by_site[vicksburg.usgs_site_id]} rather than its own "
-        f"iv_record_start of {vicksburg.iv_record_start}"
-    )
     assert first_by_site[st_louis.usgs_site_id] == datetime(
         st_louis.iv_record_start.year,
         st_louis.iv_record_start.month,
         st_louis.iv_record_start.day,
         tzinfo=UTC,
+    ), (
+        f"St. Louis started at {first_by_site[st_louis.usgs_site_id]} rather than its own "
+        f"iv_record_start of {st_louis.iv_record_start}"
     )
-    assert first_by_site[vicksburg.usgs_site_id] != first_by_site[st_louis.usgs_site_id], (
-        "both sites started from the same instant - the backfill is using one global start"
-    )
+
+    # And each rolling-retention site is refused before a single request is made, rather than
+    # being handed a start from somewhere.
+    for gauge_row in rolling:
+        before = len(client.windows)
+        with pytest.raises(ValueError) as excinfo:
+            backfill.backfill(
+                migrated_db,
+                client=client,
+                site_ids=[gauge_row.usgs_site_id],
+                end=datetime(2008, 6, 1, tzinfo=UTC),
+                window_days=90,
+            )
+        assert "rolling" in str(excinfo.value).lower(), (
+            f"{gauge_row.usgs_site_id} was refused without saying why: {excinfo.value}"
+        )
+        assert len(client.windows) == before, (
+            f"{gauge_row.usgs_site_id} was requested anyway; the refusal must come before the "
+            f"first request, not after a start has been invented for it"
+        )

@@ -23,13 +23,18 @@ THREE DECISIONS, EACH WITH A SHORTER WRONG VERSION
    missing series means the site has stopped serving that parameter, and continuing would walk
    the entire remaining record collecting nothing while reporting progress.
 
-`iv_record_start` IS PER SITE AND IS A FLOOR
------------------------------------------
-Vicksburg's record appears to begin 2008-01-01 while the others start 2007-10-01, so a single
-global start is wrong for at least one site. This walks from each site's own seeded value and
-NEVER earlier: silently walking further back "looking for data" would turn a wrong seed into a
-slow sweep of empty windows that nobody notices. Instead the first window that actually returns
-data is logged, so a wrong seed is visible and correctable (live verification step 5).
+`iv_record_start` IS PER SITE, IS A FLOOR, AND IS NULL AT THREE OF THE FOUR SITES
+--------------------------------------------------------------------------------
+This walks from each site's own seeded value and NEVER earlier: silently walking further back
+"looking for data" would turn a wrong seed into a slow sweep of empty windows that nobody
+notices. Instead the first window that actually returns data is logged, so a wrong seed is
+visible and correctable.
+
+Since migration 0011 the column is NULL at Memphis, Vicksburg and Baton Rouge, because those
+sites serve instantaneous values on a rolling window of recent weeks and a rolling window is not
+a start date. THIS BACKFILL THEREFORE REFUSES THOSE SITES, in resume_point, naming the reason -
+it already aborted at their first window on a missing series, and the refusal only moves that
+abort earlier and points it at the right thing. Their historical record is the daily one.
 """
 
 from __future__ import annotations
@@ -104,6 +109,29 @@ def resume_point(conn, gauge) -> tuple[datetime, str]:
     newest = usgs_ingest.latest_ts(conn, gauge.usgs_site_id)
     if newest is not None:
         return newest, f"resuming from MAX(ts) in gauge_readings_iv ({newest.isoformat()})"
+
+    if gauge.iv_record_start is None:
+        # A ROLLING-RETENTION SITE, AND THERE IS NOTHING TO WALK FROM.
+        #
+        # NULL here is not a missing value: it says this site serves instantaneous data on a
+        # moving window of recent weeks and has no fixed start (migration 0011). Three of the four
+        # gauges are in that state.
+        #
+        # This backfill already could not run for them - it aborts at the first window on a
+        # missing series, which is § 14's guard working - and this refusal only moves the abort
+        # earlier and gives it the right subject. Computing a start instead (today minus sixty
+        # days, or the epoch) is the tempting two-line version and it is wrong in both
+        # directions: one silently narrows a backfill to a window the incremental poll already
+        # covers, the other walks decades of empty windows for data the service does not keep.
+        raise ValueError(
+            f"{gauge.usgs_site_id} has a NULL iv_record_start, which means ROLLING RETENTION: "
+            f"this site serves instantaneous values for a moving window of recent weeks and has "
+            f"no fixed start to backfill from. The historical record for this site is the DAILY "
+            f"one - use app.ingest.daily_backfill. Do not substitute a computed start; whether "
+            f"the instantaneous backfill applies to rolling-retention sites at all is an open "
+            f"question for a human (see CONTEXT.md)."
+        )
+
     return (
         _midnight_utc(gauge.iv_record_start),
         f"no rows stored; starting from this site's own iv_record_start "

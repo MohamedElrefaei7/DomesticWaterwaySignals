@@ -26,6 +26,16 @@ The parser is written against THIS PROJECT'S OWN FILE, whose layout is fixed and
 0004 itself. It is not a general SQL parser and does not try to be; it raises on anything it does
 not recognise rather than skipping it, because a seed row this cannot read is a seed row the
 guard tests would silently stop guarding.
+
+WHAT ELSE LIVES HERE, AND WHY IT IS NOT ITS OWN MODULE
+-----------------------------------------------------
+`gauge_known_gaps` (migration 0012) is read the same two ways: the ranges an endpoint is known
+not to serve are part of the record of what a site actually serves, and separating them would put
+half of that record behind a second import that the half needing it would have to remember.
+
+The gaps exist so an empty window can be reported as EXPECTED or UNEXPLAINED. Neither is fatal.
+They are never consulted to decide what to request - see 0012, and the test that asserts the
+backfill still walks every window inside a known gap.
 """
 
 from __future__ import annotations
@@ -62,16 +72,20 @@ class Gauge:
 
     # ONE RECORD START PER ENDPOINT, because measurement says they differ (CLAUDE.md § 15).
     #
-    # iv_record_start was seeded in 0004 as `record_start`, when there was one endpoint and the
-    # name could only have meant one thing. 0007 renamed it. It is now KNOWN TO BE WRONG for
-    # three of the four sites: instantaneous retention is a rolling window at Memphis, Vicksburg
-    # and Baton Rouge, so those sites have no fixed instantaneous start at all and the seeded
-    # value is the Phase 3 assumption the measurement contradicted. Left in place rather than
-    # patched, because "rolling window" is not a date and modelling it properly is a human's
-    # decision - see CONTEXT.md.
+    # iv_record_start is NULL AT THE THREE ROLLING-RETENTION SITES, and None here is that NULL
+    # rather than a missing value. Memphis, Vicksburg and Baton Rouge serve instantaneous values
+    # on a moving window of recent weeks; a rolling window is not a start date, and any date
+    # stored for them would be false within weeks. 0004 seeded one anyway (the Phase 3
+    # assumption), 0007 recorded that the measurement contradicted it, and 0011 replaced it with
+    # NULL. St. Louis keeps 2007-10-01, which is a real fixed start.
     #
-    # dv_record_start is a FLOOR the daily backfill walks forward from, not a measured boundary.
-    iv_record_start: date
+    # A None here means the instantaneous backfill has nothing to walk from and must say so
+    # rather than compute one - see backfill.resume_point.
+    #
+    # dv_record_start is the first date of the site's CONTINUOUS daily record, as measured
+    # 2026-08-14 by a full-range request counting values per year (0011). At St. Louis it is a
+    # bound rather than a discovered start: its record predates the 1990 request floor.
+    iv_record_start: date | None
     dv_record_start: date
 
     def requested_pairs(self) -> set[tuple[str, str]]:
@@ -163,22 +177,36 @@ def load(conn, site_ids=None) -> list[Gauge]:
 # Guard path: parse the seed out of the migration file.
 # ---------------------------------------------------------------------------------------------
 
+# The HEADER only - `INSERT INTO <table> (cols) VALUES` - and never the rows. Where the statement
+# ENDS is found by a quote-aware scan (_values_clause), because a regex terminating at the first
+# `;` truncates a row whose text contains one, and 0012's notes do: "endpoint serves nothing in
+# this range; segment before it deliberately not ingested". The truncation is not silent - the
+# bracket scanner raises on the unterminated string it is handed - but the error it raises names
+# the wrong thing entirely.
 _INSERT_RE = re.compile(
-    r"INSERT\s+INTO\s+gauges\s*\((?P<columns>[^)]*)\)\s*VALUES\s*(?P<values>.*?);",
+    r"INSERT\s+INTO\s+gauges\s*\((?P<columns>[^)]*)\)\s*VALUES\s*",
     re.IGNORECASE | re.DOTALL,
 )
 
-# The daily floors are seeded by 0008, not by 0004 - the daily endpoint did not exist when the
-# registry was written. This parser reads them from there so the UNIT TIER can still guard them
-# offline, the same way it guards the site list. Human-owned values that only a database can
-# check are values that go unchecked in the session where they are changed.
-_DV_FLOOR_RE = re.compile(
-    r"UPDATE\s+gauges\s+SET\s+dv_record_start\s*=\s*DATE\s*'(?P<start>[\d-]+)'\s*"
+# RECORD STARTS ARRIVE AS UPDATEs SPREAD ACROSS THE SEQUENCE, not in 0004's INSERT. The daily
+# endpoint did not exist when the registry was written, so 0008 added `dv_record_start` and seeded
+# it; 0011 then corrected three of those four values and NULLed `iv_record_start` at the three
+# rolling-retention sites. This parser reads EVERY numbered migration in order and applies each
+# UPDATE it finds, so the unit tier sees the same effective seed the deployed table holds.
+#
+# Reading only the migration that introduced a column is the version that goes stale silently: it
+# would still report Memphis's daily floor as 1990-01-01 - the exact value 0011 exists to correct -
+# and would report it with the same confidence as a right answer.
+_RECORD_START_UPDATE_RE = re.compile(
+    r"UPDATE\s+gauges\s+SET\s+(?P<column>iv_record_start|dv_record_start)\s*=\s*"
+    r"(?P<value>DATE\s*'[\d-]+'|NULL)\s*"
     r"WHERE\s+usgs_site_id\s*=\s*'(?P<site>\d{8})'\s*;",
     re.IGNORECASE,
 )
 
-DAILY_FLOOR_MIGRATION = MIGRATIONS_DIR / "0008_gauge_readings_daily.sql"
+# Zero-padded four-digit prefixes, so lexical order IS numeric order. The migration runner
+# enforces that shape (CLAUDE.md § 12); this glob relies on it rather than re-deriving it.
+MIGRATION_GLOB = "[0-9][0-9][0-9][0-9]_*.sql"
 
 # What 0004's INSERT names. NOT the same as COLUMNS, which is what the DEPLOYED table carries:
 # 0007 renamed record_start -> iv_record_start and 0008 added dv_record_start, and an applied
@@ -244,6 +272,36 @@ def _split_top_level(text: str, opener: str, closer: str) -> list[str]:
             f"unterminated {'string' if in_quote else opener!r} in the seed statement"
         )
     return groups
+
+
+def _values_clause(text: str, start: int) -> str:
+    """Everything from `start` up to the statement's terminating `;`, ignoring quoted ones.
+
+    SQL's statement terminator inside a string literal is just a character. Finding the end of a
+    VALUES clause with a regex means finding the first `;` in the file, which for 0012 is in the
+    middle of a note.
+    """
+    index = start
+    in_quote = False
+    while index < len(text):
+        char = text[index]
+        if in_quote:
+            if char == "'":
+                if index + 1 < len(text) and text[index + 1] == "'":
+                    index += 2
+                    continue
+                in_quote = False
+        elif char == "'":
+            in_quote = True
+        elif char == ";":
+            return text[start:index]
+        index += 1
+
+    raise SeedParseError(
+        "the INSERT statement is not terminated by a `;` outside a string literal. Either the "
+        "statement is unfinished or a quote in it is unbalanced; this parser will not guess where "
+        "it was meant to end."
+    )
 
 
 def _split_fields(row: str) -> list[str]:
@@ -344,10 +402,7 @@ def parse_seed(sql_text: str | None = None) -> list[Gauge]:
     # Comments first: 0004 explains at length why stage is absent and why lat/lon are NULL, and
     # that prose contains commas, quotes, and the word ARRAY. Stripping line comments before
     # matching is what keeps the file free to document itself.
-    uncommented = "\n".join(
-        line.split("--", 1)[0] if not _inside_quotes(line) else line
-        for line in sql_text.splitlines()
-    )
+    uncommented = _strip_line_comments(sql_text)
 
     match = _INSERT_RE.search(uncommented)
     if match is None:
@@ -365,10 +420,10 @@ def parse_seed(sql_text: str | None = None) -> list[Gauge]:
             f"{list(SEED_INSERT_COLUMNS)}. Difference: {sorted(unexpected)}"
         )
 
-    floors = parse_daily_floors()
+    starts = parse_record_starts()
 
     gauges: list[Gauge] = []
-    for row in _split_top_level(match.group("values"), "(", ")"):
+    for row in _split_top_level(_values_clause(uncommented, match.end()), "(", ")"):
         fields = _split_fields(row)
         if len(fields) != len(columns):
             raise SeedParseError(
@@ -376,13 +431,14 @@ def parse_seed(sql_text: str | None = None) -> list[Gauge]:
             )
         values = {col: _parse_literal(raw) for col, raw in zip(columns, fields)}
         site_id = values["usgs_site_id"]
+        site_starts = starts.get(site_id, {})
 
-        if site_id not in floors:
+        if "dv_record_start" not in site_starts:
             raise SeedParseError(
-                f"site {site_id} is seeded in {SEED_MIGRATION.name} but has no dv_record_start "
-                f"in {DAILY_FLOOR_MIGRATION.name}. The daily backfill would have no floor to walk "
-                f"from for it. (The deployed table's NOT NULL catches this too - this catches it "
-                f"offline, in the session that introduced it.)"
+                f"site {site_id} is seeded in {SEED_MIGRATION.name} but no migration sets a "
+                f"dv_record_start for it. The daily backfill would have no floor to walk from. "
+                f"(The deployed table's NOT NULL catches this too - this catches it offline, in "
+                f"the session that introduced it.)"
             )
 
         gauges.append(
@@ -396,11 +452,27 @@ def parse_seed(sql_text: str | None = None) -> list[Gauge]:
                 tier=values["tier"],
                 available_params=tuple(values["available_params"] or ()),
                 native_cadence_minutes=values["native_cadence_minutes"],
-                # 0004's `record_start` is what 0007 renamed to iv_record_start. Same value,
-                # same column, a name that now says which endpoint it is about.
-                iv_record_start=values["record_start"],
-                dv_record_start=floors[site_id],
+                # 0004's `record_start` is what 0007 renamed to iv_record_start - unless a later
+                # migration changed it, which 0011 does: NULL at the three rolling-retention
+                # sites. Membership rather than `.get(...)` with a default, because "set to NULL"
+                # and "never mentioned" are different facts and only one of them is a correction.
+                iv_record_start=(
+                    site_starts["iv_record_start"]
+                    if "iv_record_start" in site_starts
+                    else values["record_start"]
+                ),
+                dv_record_start=site_starts["dv_record_start"],
             )
+        )
+
+    seeded_ids = {g.usgs_site_id for g in gauges}
+    orphaned = sorted(set(starts) - seeded_ids)
+    if orphaned:
+        raise SeedParseError(
+            f"migrations set a record start for site(s) {orphaned}, which {SEED_MIGRATION.name} "
+            f"does not seed. Either the site belongs in the registry or the UPDATE is addressing "
+            f"a site number that does not exist - in the deployed database the latter updates "
+            f"zero rows and reports success."
         )
 
     if not gauges:
@@ -413,37 +485,265 @@ def parse_seed(sql_text: str | None = None) -> list[Gauge]:
     return gauges
 
 
-def parse_daily_floors(sql_text: str | None = None) -> dict[str, date]:
-    """site id -> dv_record_start, read out of migration 0008.
+def parse_record_starts() -> dict[str, dict[str, date | None]]:
+    """site id -> {column -> value}, from every record-start UPDATE in the migration sequence.
 
-    Separate from the INSERT parser because the values live in a different migration: the daily
-    endpoint did not exist when the registry was seeded, so its floors arrive as UPDATEs in the
-    migration that adds the column.
+    Applied IN MIGRATION ORDER, last write wins - the same order the database applies them in, so
+    a correction in a later file is what this reports. `None` in the returned mapping is a real
+    `= NULL` and is distinguishable from a column the sequence never mentions, which is simply
+    absent.
+    """
+    paths = sorted(MIGRATIONS_DIR.glob(MIGRATION_GLOB))
+    if not paths:
+        raise SeedParseError(
+            f"no numbered migrations found in {MIGRATIONS_DIR}. The gauge registry's single copy "
+            f"lives there; this parser has no fallback and deliberately does not carry one."
+        )
+
+    starts: dict[str, dict[str, date | None]] = {}
+    for path in paths:
+        text = _strip_line_comments(path.read_text(encoding="utf-8"))
+        for match in _RECORD_START_UPDATE_RE.finditer(text):
+            raw = match.group("value")
+            starts.setdefault(match.group("site"), {})[match.group("column").lower()] = (
+                None if raw.strip().upper() == "NULL" else _parse_literal(raw)
+            )
+
+    if not starts:
+        raise SeedParseError(
+            f"no `UPDATE gauges SET <iv|dv>_record_start = ... WHERE usgs_site_id = '...';` "
+            f"statements found anywhere in {MIGRATIONS_DIR}. If the record starts moved, move this "
+            f"parser with them rather than letting the guard tests pass against files that no "
+            f"longer set anything."
+        )
+    return starts
+
+
+def parse_daily_floors() -> dict[str, date]:
+    """site id -> dv_record_start, as the sequence leaves it. The daily backfill's floors."""
+    return {
+        site: columns["dv_record_start"]
+        for site, columns in parse_record_starts().items()
+        if columns.get("dv_record_start") is not None
+    }
+
+
+# ---------------------------------------------------------------------------------------------
+# Known gaps: the ranges a source will not serve.
+# ---------------------------------------------------------------------------------------------
+#
+# Seeded by migration 0012 from the full-range measurement of 2026-08-14, and read the same two
+# ways the registry is: `load_known_gaps` for the runtime, `parse_known_gaps` for the unit tier.
+#
+# What they are FOR is deciding whether a window that came back empty is expected or is a
+# surprise. What they are NOT for is deciding what to request: see 0012, and the test that
+# asserts the backfill still walks every window inside a gap.
+
+KNOWN_GAP_COLUMNS = ("usgs_site_id", "source", "gap_start", "gap_end", "note")
+KNOWN_GAPS_MIGRATION = MIGRATIONS_DIR / "0012_gauge_known_gaps.sql"
+
+SOURCE_DAILY = "dv"
+SOURCE_INSTANTANEOUS = "iv"
+
+# The two verdicts an empty window gets. Named constants rather than bare strings because both
+# callers and both tests compare against them, and a typo in one of four string literals is a
+# comparison that is simply always false.
+EXPECTED = "expected"
+UNEXPLAINED = "unexplained"
+
+_KNOWN_GAP_INSERT_RE = re.compile(
+    r"INSERT\s+INTO\s+gauge_known_gaps\s*\((?P<columns>[^)]*)\)\s*VALUES\s*",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+@dataclass(frozen=True)
+class KnownGap:
+    """A range one endpoint is known not to serve at one site.
+
+    INCLUSIVE ON BOTH ENDS: `gap_start` is the first missing day and `gap_end` is the last, so the
+    record resumes on `gap_end + 1 day`. Read as exclusive instead, the boundary days - the last
+    day that has data and the first day that has it again - would be treated as missing, which is
+    how a genuine one-day edge of a gap disappears into the gap.
+    """
+
+    usgs_site_id: str
+    source: str
+    gap_start: date
+    gap_end: date
+    note: str
+
+    def contains_window(self, start: date, end: date) -> bool:
+        """True only when [start, end] falls ENTIRELY inside this gap.
+
+        Entirely, not partially. A window that straddles a boundary covers days this gap does not
+        explain, and calling it expected is what hides a real gap edge: the days outside the row
+        returned nothing, nobody was told, and the row gets read afterwards as though it had
+        accounted for them.
+        """
+        return self.gap_start <= start and end <= self.gap_end
+
+
+def load_known_gaps(conn, source: str | None = None, site_ids=None) -> list[KnownGap]:
+    """Every known gap, or just one endpoint's / one site's, ordered by site and start date."""
+    sql = f"SELECT {', '.join(KNOWN_GAP_COLUMNS)} FROM gauge_known_gaps"
+    clauses: list[str] = []
+    params: list = []
+    if source is not None:
+        clauses.append("source = %s")
+        params.append(source)
+    if site_ids is not None:
+        site_ids = list(site_ids)
+        if not site_ids:
+            raise ValueError("load_known_gaps() called with an empty site_ids list")
+        clauses.append("usgs_site_id = ANY(%s)")
+        params.append(site_ids)
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY usgs_site_id, source, gap_start"
+
+    # NO EMPTINESS CHECK HERE, unlike load(). An empty gauges table means the ingest requests
+    # nothing and reports success; an empty gap table means every empty window is unexplained,
+    # which is loud rather than silent and is the correct reading of a source with no known gaps.
+    return [
+        KnownGap(
+            usgs_site_id=row[0],
+            source=row[1],
+            gap_start=row[2],
+            gap_end=row[3],
+            note=row[4],
+        )
+        for row in conn.execute(sql, tuple(params)).fetchall()
+    ]
+
+
+def parse_known_gaps(sql_text: str | None = None) -> list[KnownGap]:
+    """The gaps seeded by migration 0012, read from the migration file itself.
+
+    The unit tier's window into the seeded boundaries, for the same reason `parse_seed` exists: a
+    boundary that only a database can check is a boundary that goes unchecked in the session where
+    someone adjusts it.
     """
     if sql_text is None:
-        if not DAILY_FLOOR_MIGRATION.is_file():
+        if not KNOWN_GAPS_MIGRATION.is_file():
             raise SeedParseError(
-                f"daily-floor migration not found at {DAILY_FLOOR_MIGRATION}."
+                f"known-gaps migration not found at {KNOWN_GAPS_MIGRATION}. If the seed moved, "
+                f"move this parser with it - do not let the guard tests pass against a file that "
+                f"no longer seeds anything."
             )
-        sql_text = DAILY_FLOOR_MIGRATION.read_text(encoding="utf-8")
+        sql_text = KNOWN_GAPS_MIGRATION.read_text(encoding="utf-8")
 
-    uncommented = "\n".join(
+    uncommented = _strip_line_comments(sql_text)
+    match = _KNOWN_GAP_INSERT_RE.search(uncommented)
+    if match is None:
+        raise SeedParseError(
+            f"no `INSERT INTO gauge_known_gaps (...) VALUES ...;` statement found in "
+            f"{KNOWN_GAPS_MIGRATION.name}."
+        )
+
+    columns = [c.strip() for c in match.group("columns").split(",")]
+    unexpected = set(columns) ^ set(KNOWN_GAP_COLUMNS)
+    if unexpected:
+        raise SeedParseError(
+            f"the known-gaps INSERT names columns {columns}, which does not match the expected "
+            f"set {list(KNOWN_GAP_COLUMNS)}. Difference: {sorted(unexpected)}"
+        )
+
+    gaps: list[KnownGap] = []
+    for row in _split_top_level(_values_clause(uncommented, match.end()), "(", ")"):
+        fields = _split_fields(row)
+        if len(fields) != len(columns):
+            raise SeedParseError(
+                f"known-gap row has {len(fields)} field(s) for {len(columns)} column(s): {row!r}"
+            )
+        values = {col: _parse_literal(raw) for col, raw in zip(columns, fields)}
+        if values["gap_end"] < values["gap_start"]:
+            raise SeedParseError(
+                f"known-gap row for {values['usgs_site_id']} ends ({values['gap_end']}) before it "
+                f"starts ({values['gap_start']}). Such a row matches no window and would sit in "
+                f"the table doing nothing. (The database's CHECK catches this too; this catches "
+                f"it offline.)"
+            )
+        gaps.append(
+            KnownGap(
+                usgs_site_id=values["usgs_site_id"],
+                source=values["source"],
+                gap_start=values["gap_start"],
+                gap_end=values["gap_end"],
+                note=values["note"],
+            )
+        )
+
+    if not gaps:
+        raise SeedParseError(
+            "the known-gaps INSERT was found but produced no rows. Every empty window would then "
+            "be reported as unexplained - which is the safe direction to be wrong in, and still "
+            "not what this file says."
+        )
+    return gaps
+
+
+def classify_empty_window(
+    site_id: str,
+    start: date,
+    end: date,
+    known_gaps,
+    source: str = SOURCE_DAILY,
+) -> str:
+    """EXPECTED when [start, end] lies entirely inside one known gap for this site; else UNEXPLAINED.
+
+    THIS NEVER RAISES AND NEVER DECIDES ANYTHING IS FATAL. An empty window is ordinary either way
+    (CLAUDE.md § 14) - the difference between the two verdicts is what gets logged, and that is
+    the whole of it. A missing SERIES is the fatal case and it lives in the client, where it can
+    tell the difference.
+
+    Containment is against a SINGLE gap rather than the union of several. Two adjacent rows with
+    data between them do not jointly explain a window that spans both, and merging them here would
+    invent an explanation the measurement never supported.
+    """
+    return (
+        EXPECTED
+        if explain_empty_window(site_id, start, end, known_gaps, source) is not None
+        else UNEXPLAINED
+    )
+
+
+def explain_empty_window(
+    site_id: str,
+    start: date,
+    end: date,
+    known_gaps,
+    source: str = SOURCE_DAILY,
+) -> KnownGap | None:
+    """The gap that explains [start, end], or None when nothing does.
+
+    The verdict and the evidence come from ONE search rather than two. A caller that logs a
+    warning after separately deciding the window was expected, or names a gap that was not the one
+    the classification matched, is reporting something the code did not do.
+    """
+    for gap in known_gaps:
+        if (
+            gap.usgs_site_id == site_id
+            and gap.source == source
+            and gap.contains_window(start, end)
+        ):
+            return gap
+    return None
+
+
+def _strip_line_comments(sql_text: str) -> str:
+    """The statements, with `--` comments removed.
+
+    Every migration in this repository explains itself at length, and that prose contains commas,
+    quotes, the word ARRAY, and - in 0008 and 0011 - lines that look very much like the UPDATE
+    statements the record-start parser matches. 0008's comment block tabulates the floors it is
+    about to set, and 0011's explains the values it replaces. Stripping comments before matching
+    is what keeps a file free to document itself without the documentation being parsed as data.
+    """
+    return "\n".join(
         line.split("--", 1)[0] if not _inside_quotes(line) else line
         for line in sql_text.splitlines()
     )
-
-    floors = {
-        m.group("site"): date.fromisoformat(m.group("start"))
-        for m in _DV_FLOOR_RE.finditer(uncommented)
-    }
-    if not floors:
-        raise SeedParseError(
-            f"no `UPDATE gauges SET dv_record_start = DATE '...' WHERE usgs_site_id = '...';` "
-            f"statements found in {DAILY_FLOOR_MIGRATION.name}. If the floors moved, move this "
-            f"parser with them rather than letting the guard tests pass against a file that no "
-            f"longer sets anything."
-        )
-    return floors
 
 
 def _inside_quotes(line: str) -> bool:

@@ -11,12 +11,13 @@ that the seed was ever wrong - the run that would have shown the discrepancy is 
 overwrites it.
 """
 
+import logging
 from datetime import date, timedelta
 
 import pytest
 
 from app.ingest import daily_backfill, usgs_daily_ingest
-from app.ingest.gauges import Gauge
+from app.ingest.gauges import Gauge, KnownGap
 from app.ingest.usgs_client import PARAM_DISCHARGE, MissingSeriesError
 from app.ingest.usgs_daily_client import (
     STAT_MEAN,
@@ -264,6 +265,76 @@ def test_an_out_of_record_window_aborts_rather_than_advancing(monkeypatch):
         "an empty window stopped the run; empty windows are ordinary and must advance"
     )
     assert result.empty_windows == len(tiling) - 1
+
+
+def test_expected_and_unexplained_empty_windows_log_at_different_levels(caplog, monkeypatch):
+    """INFO for a window inside a known gap, WARNING for one nothing accounts for. Test 7.
+
+    THE POINT IS THAT THE TWO ARE DISTINGUISHABLE IN THE LOG. Memphis's twenty-year hole produces
+    dozens of empty windows on every full backfill, all of them expected. Logged identically to
+    everything else, they are forty lines an operator learns to scroll past - and the one empty
+    window that means a series has quietly stopped arriving scrolls past with them (CLAUDE.md § 2,
+    theme 1).
+
+    Asserted on the LEVEL, not on the wording, because the level is what a log filter and a human
+    scanning for warnings actually act on.
+    """
+    monkeypatch.setattr(
+        usgs_daily_ingest, "upsert_daily_readings", lambda conn, readings: len(readings)
+    )
+
+    site = gauge(site_id="07032000", dv_record_start=date(2000, 1, 1))
+    known = KnownGap(
+        usgs_site_id="07032000",
+        source="dv",
+        gap_start=date(2000, 1, 1),
+        gap_end=date(2000, 12, 31),
+        note="measured: endpoint serves nothing here",
+    )
+
+    # Two windows of one year each: the first falls entirely inside the gap, the second entirely
+    # outside it. Same site, same emptiness, same run - only the classification differs.
+    with caplog.at_level(logging.INFO, logger=daily_backfill.logger.name):
+        result = daily_backfill.backfill_site(
+            ConnStub(),
+            client=ScriptedDailyClient(default=[]),
+            gauge=site,
+            end=date(2001, 12, 31),
+            window_days=366,
+            known_gaps=[known],
+        )
+
+    assert result.empty_windows == 2, f"expected two empty windows, got {result.empty_windows}"
+    assert result.unexplained_empty_windows == 1, (
+        f"{result.unexplained_empty_windows} window(s) counted as unexplained; exactly one of the "
+        f"two falls outside the known gap"
+    )
+
+    empties = [
+        record
+        for record in caplog.records
+        if "returned no daily values" in record.getMessage()
+    ]
+    assert len(empties) == 2, f"expected one log line per empty window, got {len(empties)}"
+
+    levels = [record.levelno for record in empties]
+    assert levels == [logging.INFO, logging.WARNING], (
+        f"empty-window log levels were {[logging.getLevelName(lvl) for lvl in levels]}. The "
+        f"window inside the known gap must log at INFO and the one outside it at WARNING; logged "
+        f"at the same level, the expected ones bury the one that matters."
+    )
+
+    expected_line, unexplained_line = (record.getMessage() for record in empties)
+    assert "EXPECTED" in expected_line and known.note in expected_line, (
+        f"the expected line does not name the gap that explains it: {expected_line}"
+    )
+    assert "UNEXPLAINED" in unexplained_line, (
+        f"the unexplained line does not say so: {unexplained_line}"
+    )
+
+    # NEITHER IS FATAL, and the run walked both. Decision 4: an empty window has never been an
+    # error here and a classification is not a place to make one.
+    assert result.windows_requested == 2
 
 
 # ---------------------------------------------------------------------------------------------

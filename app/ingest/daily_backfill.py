@@ -23,6 +23,25 @@ it must be loud: a backfill that treated it as an empty window would walk the en
 range collecting nothing, logging steady progress, and finish reporting success over an empty
 table. That is CLAUDE.md § 2's theme 1 with a progress bar.
 
+EXPECTED EMPTY WINDOWS AND UNEXPLAINED ONES ARE REPORTED DIFFERENTLY, AND NEITHER IS FATAL
+------------------------------------------------------------------------------------------
+Two ranges in this corridor return nothing however they are requested: twenty years at Memphis
+and most of 2023 at Baton Rouge, both measured 2026-08-14 and seeded as rows in
+`gauge_known_gaps` (migration 0012). Walking them produces dozens of empty windows that are
+entirely expected, and a run in which every empty window looks the same is a run where the one
+empty window that means something is a line in the middle of forty identical ones.
+
+So an empty window inside a known gap logs at INFO, and one that is not logs at WARNING. THE
+CLASSIFICATION CHANGES NOTHING ELSE. Both advance, both are counted, neither raises - an empty
+window has never been fatal here and must not become fatal now (CLAUDE.md § 14). The fatal case
+is a missing SERIES, it is unchanged, and it lives in the client.
+
+The gaps are NOT used to decide what to request. Every window inside a known gap is still asked
+for, and tests/ingest/test_known_gaps.py asserts it: skipping ahead would let a human-maintained
+table decide what never to ask for, where a wrong end date silently skips real data and leaves no
+request, no empty response, and no evidence behind. Asking and receiving nothing is cheap and
+self-correcting.
+
 IT NEVER WRITES TO `gauges`
 ---------------------------
 The backfill reports the first date that actually returned data per site, and stops. It does not
@@ -119,6 +138,11 @@ class DailySiteResult:
     seeded_floor: date | None = None
     windows_requested: int = 0
     empty_windows: int = 0
+
+    # Of those, the ones NO known gap accounts for. Reported separately rather than as a
+    # proportion: "40 empty" reads as fine at a site with a twenty-year hole and as an outage at
+    # one without, and the summary should not need the reader to remember which is which.
+    unexplained_empty_windows: int = 0
     readings_received: int = 0
     rows_written: int = 0
     first_data_date: date | None = None
@@ -132,7 +156,9 @@ class DailySiteResult:
         floor = self.seeded_floor.isoformat() if self.seeded_floor else "(none)"
         return (
             f"{self.site_id}: {self.windows_requested} window(s), "
-            f"{self.empty_windows} empty, {self.readings_received} value(s) received, "
+            f"{self.empty_windows} empty "
+            f"({self.unexplained_empty_windows} UNEXPLAINED), "
+            f"{self.readings_received} value(s) received, "
             f"{self.rows_written} row(s) written. "
             f"FIRST DATA {first} (seeded dv_record_start floor {floor})"
         )
@@ -146,12 +172,17 @@ def backfill_site(
     window_days: int = DEFAULT_WINDOW_DAYS,
     dry_run: bool = False,
     start_override: date | None = None,
+    known_gaps=(),
 ) -> DailySiteResult:
     """Walk one site's daily record from its resume point to `end`, writing as it goes.
 
     Commits per window. A 35-year backfill held in one transaction loses everything to a
     disconnect near the end and holds one snapshot open throughout; per-window commits mean an
     interrupted run resumes from where it actually got to, which is what MAX(date) reports.
+
+    `known_gaps` only decides how an empty window is LOGGED. It defaults to none, so a caller that
+    forgets to pass them gets every empty window at WARNING - noisy, and the safe direction to be
+    wrong in. The opposite default would quietly reclassify a real outage as expected.
     """
     if start_override is not None:
         start = start_override
@@ -223,14 +254,42 @@ def backfill_site(
         result.readings_received += len(readings)
 
         if not readings:
-            # ORDINARY: a gap inside the period of record. Advance.
+            # ORDINARY: a gap inside the period of record. Advance - whichever way it classifies.
+            #
+            # The two branches below differ ONLY in log level and wording. Neither raises, neither
+            # stops the walk, and neither is reachable by a path the other is not: an empty window
+            # is not an error (CLAUDE.md § 14), and making the unexplained one fatal would make
+            # every sensor outage a backfill that cannot be run to completion.
             result.empty_windows += 1
-            logger.info(
-                "%s: %s to %s returned no daily values (ordinary gap - advancing)",
+            explanation = gauges_module.explain_empty_window(
                 gauge.usgs_site_id,
-                window.start.isoformat(),
-                window.end.isoformat(),
+                window.start,
+                window.end,
+                known_gaps,
             )
+
+            if explanation is not None:
+                logger.info(
+                    "%s: %s to %s returned no daily values - EXPECTED, inside the known gap "
+                    "%s to %s (%s). Advancing.",
+                    gauge.usgs_site_id,
+                    window.start.isoformat(),
+                    window.end.isoformat(),
+                    explanation.gap_start.isoformat(),
+                    explanation.gap_end.isoformat(),
+                    explanation.note,
+                )
+            else:
+                result.unexplained_empty_windows += 1
+                logger.warning(
+                    "%s: %s to %s returned no daily values - UNEXPLAINED. No row in "
+                    "gauge_known_gaps covers this window. Not an error and not fatal; advancing. "
+                    "If this range is genuinely not served, MEASURE it and seed the gap in a new "
+                    "numbered migration rather than widening an existing row to cover it.",
+                    gauge.usgs_site_id,
+                    window.start.isoformat(),
+                    window.end.isoformat(),
+                )
             continue
 
         earliest = min(r.date for r in readings)
@@ -273,6 +332,11 @@ def backfill(
     client = UsgsDailyClient() if client is None else client
     end = datetime.now(timezone.utc).date() if end is None else end
 
+    # Read ONCE for the whole run, not per window: a lookup that hits the database dozens of times
+    # per site to answer a logging question is a lookup someone removes later for the wrong reason.
+    # Only 'dv' gaps - a hole in the instantaneous service says nothing about the daily one.
+    known_gaps = gauges_module.load_known_gaps(conn, source=gauges_module.SOURCE_DAILY)
+
     return [
         backfill_site(
             conn,
@@ -282,6 +346,7 @@ def backfill(
             window_days,
             dry_run,
             start_override=start_override,
+            known_gaps=known_gaps,
         )
         for gauge in gauges_module.load(conn, site_ids)
     ]
@@ -366,6 +431,14 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - the live-v
         f"\ntotal: {sum(r.rows_written for r in results)} row(s) written across "
         f"{len(results)} site(s) in {elapsed}"
     )
+    unexplained = sum(r.unexplained_empty_windows for r in results)
+    if unexplained:
+        print(
+            f"\n{unexplained} empty window(s) were UNEXPLAINED - no gauge_known_gaps row covers\n"
+            f"them (grep the log for UNEXPLAINED). Not a failure: it is the list of ranges to\n"
+            f"MEASURE and seed as gaps before Phase 5's features interpolate across one."
+        )
+
     print(
         "\nEach site's FIRST DATA date above is what its seeded dv_record_start gets reconciled\n"
         "against. This backfill did NOT update the seed and must not: correct it deliberately,\n"

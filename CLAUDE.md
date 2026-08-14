@@ -549,3 +549,20 @@ governs a source that speaks through more than one endpoint.
   are non-destructive and so do not need § 3's archive treatment, but they carry catalog state
   (hypertable registration, compression settings, policies) that must be **read back from the
   catalog afterwards**, never assumed to have survived.
+- **A source's period of record is established by a full-range request counting values per
+  period, or by an authoritative catalog count — never by probing sample windows and
+  generalizing.** A probe measures presence in one window; a period of record is depth, and the
+  two are not the same measurement. Phase 3.5 seeded four daily record starts from one-month
+  January probes and was wrong at three of the four sites: Memphis answered January 1990 and
+  January 2010 and serves nothing at all between 1994 and 2014. **A catalog's date range reports
+  an envelope, not what an endpoint will serve** — the same Memphis series is catalogued as
+  1933–2026 with 26,886 values — **and where they disagree, what the endpoint serves is what is
+  true.**
+- **Known data gaps are recorded in a queryable table, not in prose.** The code that needs them
+  cannot read markdown, and two layers need them: the backfill, to report an empty window as
+  expected rather than as a surprise, and the feature layer, so nothing interpolates a baseline
+  across a hole. Gap boundaries are **inclusive of the first and last missing day**, stated in the
+  schema, because an off-by-one here silently reclassifies a real boundary day as missing.
+  **A gap table is never consulted to decide what not to request:** that lets a human-maintained
+  row skip real data with no request, no empty response, and no evidence it happened. Asking and
+  receiving nothing is cheap and self-correcting.

@@ -24,6 +24,12 @@ APPROVED_SITES = {
     "07374000",  # Mississippi River at Baton Rouge, LA
 }
 
+# The three sites whose INSTANTANEOUS service is a rolling window of recent weeks, measured
+# 2026-08-14. They have no fixed instantaneous start and 0011 sets iv_record_start to NULL for
+# them; St. Louis is the one site with a real one. The corrected DAILY starts and the known gaps
+# from the same measurement are asserted in tests/ingest/test_known_gaps.py.
+ROLLING_RETENTION_SITES = {"07032000", "07289000", "07374000"}
+
 
 def test_seed_contains_exactly_the_four_approved_sites():
     """Exact set equality. Not `>=`, not "contains", not a count.
@@ -68,9 +74,23 @@ def test_every_seeded_site_declares_available_params_and_cadence():
             f"{gauge.usgs_site_id} declares no native cadence"
         )
         assert gauge.native_cadence_minutes > 0
-        assert gauge.iv_record_start is not None, (
-            f"{gauge.usgs_site_id} declares no iv_record_start"
-        )
+        # NOT `is not None`. Since migration 0011, iv_record_start is NULL at the three
+        # rolling-retention sites and that NULL is the measurement, not a missing value: those
+        # sites serve instantaneous data on a moving window of recent weeks, and a rolling window
+        # is not a start date. Asserted precisely - by site - so that NULLing the fourth, or
+        # refilling one of the three with a date, is what turns this red.
+        if gauge.usgs_site_id in ROLLING_RETENTION_SITES:
+            assert gauge.iv_record_start is None, (
+                f"{gauge.usgs_site_id} declares iv_record_start = {gauge.iv_record_start}. It "
+                f"serves instantaneous values on a rolling window (measured 2026-08-14), so any "
+                f"date here is false within weeks. See migration 0011."
+            )
+        else:
+            assert gauge.iv_record_start is not None, (
+                f"{gauge.usgs_site_id} declares no iv_record_start, and its instantaneous record "
+                f"is a real fixed one - it is the site Phase 3's 223,706 rows came from"
+            )
+
         assert gauge.dv_record_start is not None, (
             f"{gauge.usgs_site_id} declares no dv_record_start; the daily backfill would have no "
             f"floor to walk from"
