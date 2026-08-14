@@ -4,7 +4,106 @@ This is the **log**: current state, decisions as they are made, and `§ Up Next`
 live in `CLAUDE.md`. If something here hardens into an invariant, move it there and note the move.
 
 **Last updated:** 2026-08-14 (Phase 3 VERIFIED ON THE INSTANCE and written back; Phase 4 USDA
-ingest written offline, then CORRECTED against the live USDA API — see the section directly below)
+ingest written offline, then corrected against the live USDA API TWICE — the second correction,
+from the first backfill attempt, is directly below)
+
+---
+
+## Phase 4 correction 2 — nullable rates and the corrected segment, measured 2026-08-14
+
+**THE FIRST BACKFILL ATTEMPT FAILED ON ITS OWN TRIPWIRE, AND THAT IS THE SYSTEM WORKING.** `0016`
+seeded seven `location` values, five of them from the handoff rather than from a measurement, and
+committed in writing that the API would win if they disagreed. It disagreed about one, the run
+stopped rather than opening a silent eighth series, and the attempt produced two findings.
+
+### Finding 1 — the segment is `Lower Illinois`, not `Illinois River`
+
+All seven measured, 1,180 rows each: `Cairo-Memphis`, `Cincinnati`, `Lower Illinois`, `Lower Ohio`,
+`Mid-Mississippi`, `St. Louis`, `Twin Cities`.
+
+The handoff document said "Illinois"; `0016` seeded `Illinois River`. **The API wins.** `0017`
+replaces the CHECK, and all seven values in it are now measured — none is from a document.
+
+### Finding 2 — 774 of 8,260 rate records have no `rate` field, and the cause is physical
+
+**Not null-valued: the key is absent from the record entirely.** Such a record carries exactly
+`['date', 'location', 'month', 'week', 'year']`.
+
+| Month | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Missing | 199 | 181 | 114 | 33 | 19 | 16 | 9 | 5 | 5 | 1 | 25 | 167 |
+
+By location: Twin Cities 426, Mid-Mississippi 303, Lower Illinois 25, St. Louis 7, Cincinnati 5,
+Lower Ohio 5, **Cairo-Memphis 3**.
+
+661 of 774 fall in December–March; 729 of 774 are on the two upper segments. **This is winter
+navigation closure on the Upper Mississippi.** There is no rate to publish when no barges move.
+
+**So a missing rate is a fact about the river, not a gap in ingest.** The row is written with a
+NULL rate. A skipped row would leave a series with no January at all — indistinguishable from an
+ingest that failed to fetch January — and Phase 5's seasonal baseline would fit a winter that never
+closes.
+
+### What this means for the thesis
+
+- **Cairo-Memphis — the segment `CLAUDE.md § 7`'s output contract names — has 1,177 of 1,180
+  weeks.** The target series is effectively complete.
+- **The 2022 window's 26 missing rates are an ordinary winter closure, not the autumn low-water
+  event.** The 2022 rate spike is intact in the data.
+
+### Decisions worth reading before changing anything here
+
+- **Absent, null-valued, and unparseable are THREE conditions** (`socrata_client.optional_field`).
+  An absent key and an explicit null both mean "no rate published" and become NULL; a value that
+  will not parse **raises, naming the value**. The tempting one-liner — `record.get("rate")` —
+  collapses the third into the first, so a corrupt value becomes a winter closure. That is a
+  completely ordinary thing for this column to say, 774 rows already say it, and the 775th would
+  hide in exactly that camouflage.
+- **`required_field` is NARROWED, not weakened.** `date` and `location` still go through it: they
+  key the row, and a record missing one is not a closure week, it is a record nothing can ever
+  correct or supersede. Its message used to advise against ever making a field optional — written
+  when the *field names* were wrong — and now says which case is which, because that advice would
+  have been wrong here.
+- **A NULL rate is never coalesced to 0.** Zero claims barge freight was free that week, in a
+  column every average, seasonal median, and analog comparison reads.
+- **Freshness counts rows, not rates.** `newest_row` takes `MAX(week_ending)` over all rows, and
+  the reason is now written into the registry entry: in January the upper segments are shut, so
+  "only count rows that have data" would report the table stale all winter while ingest was
+  perfectly correct — and an alarm that fires all winter gets muted before spring.
+- **The completeness report is visibility, NOT enforcement.** The backfill prints rows landed, rows
+  with no published rate, and the percentage, per location. No constraint and no alert: the rate is
+  legitimately absent 9% of the time overall and 36% at Twin Cities, so any threshold would fire
+  constantly or be loosened until it never fired.
+- **The table was still empty when altered.** `0016`'s backfill attempt aborted before writing a
+  row, so `0017`'s ALTERs move no data — and, as with `0016`, **there is no archive table to go
+  looking for.**
+- **`barge_rates_pct_positive` was restated as `pct_of_tariff IS NULL OR pct_of_tariff > 0`,
+  changing no behaviour.** A CHECK already passes when its expression is NULL; the old form merely
+  *read* as a rejection of NULL, and the next constraint written beside it would have copied
+  whichever form was there.
+
+### OPEN MEASUREMENT — does `lock_movements.tons` have the same structure?
+
+**Not touched by this commit, deliberately.** A lock with no reported movement in a closure week is
+the same shape of fact, and `tons` is already nullable — but **nothing has measured whether USDA
+actually omits it**, and making a change on an untested analogy is precisely what gets tidied in
+later as though it had been verified. It is step 5 of the live procedure, and **movements must not
+be backfilled until it returns zero**.
+
+### Status
+
+- **239 tests green with zero skips** against a throwaway local TimescaleDB container on the pinned
+  image; offline the same suite is `167 passed, 72 skipped`. The previous commit's baseline was 231.
+- **All 8 mutation-table rows confirmed**, each watched red on its own assertion, restored, with
+  `__pycache__` cleared between restore and re-run. No row needed a second pass.
+- **`0017` is new; nothing in `0001`–`0016` was edited.**
+
+### One file deviates from the brief's list
+
+`tests/ingest/fixtures/socrata_rates_ok.json` no longer exists — the previous commit split it into
+`socrata_rates_nearby.json`, `_1month`, and `_3month`. The rate-absent record was added to
+**`socrata_rates_nearby.json`**, and a test now asserts the fixture carries exactly one, so a
+fixture that drifted back to an all-rates page could not quietly pass the parser tests that read it.
 
 ---
 
@@ -959,53 +1058,58 @@ Bring the stack up with `docker compose -f docker-compose.yml -f /root/dws-local
 Delete it once the `worker` service is containerized; at that point `DATABASE_URL` becomes
 `timescaledb:5432` and nothing needs a published port.
 
-**PHASE 4'S LIVE VERIFICATION IS THE NEXT THING TO DO, against the corrected identifiers. The ids
-are resolved now, so the ingest can actually run — STEP 2 IS THE ONE THAT GATES EVERYTHING ELSE,
-because five of the seven seeded `location` strings are unmeasured.**
+**PHASE 4'S LIVE VERIFICATION, TAKE 2. The location tripwire and the absent-rate finding are both
+corrected in `0017`, so the rates backfill should now run to completion. STEP 5 GATES STEP 6 — do
+not backfill movements until `tons` has been measured.**
 
-1. `python3 -m app.orchestration.migrate` — expect **0016** applied, **sixteen total**.
-2. **CONFIRM THE SEVEN `location` STRINGS BEFORE TRUSTING THE `CHECK`:**
+1. `python3 -m app.orchestration.migrate` — expect **0017** applied, **seventeen total**.
+2. `python3 -m app.ingest.usda_backfill --dataset barge_rates_nearby` — expect **8,260 rows**, of
+   which **774 carry a NULL rate**. Both numbers are measured; a mismatch means something changed
+   at the source and is worth understanding before proceeding rather than after.
+3. Confirm the null distribution matches the measured shape:
+
+   ```sql
+   select location, count(*), count(*) filter (where pct_of_tariff is null) as nulls
+     from barge_rates where horizon = 'nearby' group by 1 order by 1;
+   ```
+
+   Expect **Twin Cities 426** and **Cairo-Memphis 3**. The backfill prints this table itself.
+4. Backfill the other two rate datasets. **Report rows and nulls for each — THEY HAVE NOT BEEN
+   MEASURED**, and the forward-rate datasets may distribute their absences differently.
+5. **MEASURE WHETHER `lock_movements` HAS THE SAME STRUCTURE** — the open question this commit
+   deliberately did not answer:
 
    ```
-   curl -sS "https://agtransport.usda.gov/resource/deqi-uken.json?\$select=location,count(*)&\$group=location&\$order=location"
+   curl -sS 'https://agtransport.usda.gov/resource/n4pw-9ygw.json?$select=count(*)&$where=tons%20IS%20NULL'
    ```
 
-   Only `Cairo-Memphis` and `Twin Cities` are measured; the other five come from the handoff. **If
-   any string differs from what `0016` seeds, THE API WINS** — correct it in `0017`, do not bend
-   the arriving value and do not drop the constraint. Getting this wrong makes the rates backfill
-   abort on its first unlisted location, which is the tripwire working, not a defect.
-3. **Backfill rates — all three datasets:** `python3 -m app.ingest.usda_backfill --dataset
-   barge_rates_nearby --dataset barge_rates_1month --dataset barge_rates_3month` (or no `--dataset`
-   for all four). **Report rows per horizon and wall time.** Expect ~8,260 per horizon, ~24,780
-   total.
-4. Backfill movements: expect ~26,144.
-5. **Compare landed rows against `source_row_count` per dataset.** The CLI does this itself and
-   exits non-zero if any dataset came up short — landing fewer than the seeded count means the
-   pager truncated, which is the whole reason that column exists.
-6. Per-segment sanity:
-   `select location, horizon, count(*), min(week_ending), max(week_ending) from barge_rates group
-   by 1,2 order by 1,2;`
-7. Per-lock sanity, compared against the seven measured counts: `AK Lock 1` 4,928,
-   `IL La Grange` 2,840, `MS Lock 15` 2,840, `MS Lock 25` 2,840, `MS Lock 26` 2,840,
-   `MS Locks 27` 4,928, `OH Olmsted` 4,928.
-8. **LOOK AT THE THESIS FOR THE FIRST TIME.** Pull Cairo-Memphis `nearby` for 2022-08-01 to
-   2022-12-31 alongside `gauge_series` discharge at Memphis for the same window. **Report what you
-   see, including if rates moved BEFORE discharge fell** — that would be the "operators price the
-   forecast" risk from the handoff arriving as a real finding, and **it is a result, not a
-   failure** (`CLAUDE.md § 0`: when a measurement contradicts the plan, the measurement wins).
+   Report the number. If it is non-zero, `tons` needs the same three-condition treatment in a
+   follow-up commit, measured rather than assumed.
+6. Backfill movements — expect ~26,144 — **but only if step 5 returns zero. If it does not, stop
+   and report.**
+7. Compare landed rows against `source_row_count` for every dataset. The CLI does this itself and
+   exits non-zero if any dataset came up short.
+8. **LOOK AT THE THESIS FOR THE FIRST TIME** — finally reachable. Pull Cairo-Memphis `nearby` for
+   2022-08-01 to 2022-12-31 alongside `gauge_series` discharge at Memphis for the same window.
+   **Report what you see, including if rates moved BEFORE discharge fell** — that would be the
+   "operators price the forecast" risk from the handoff arriving as a real finding, and **it is a
+   result, not a failure** (`CLAUDE.md § 0`: when a measurement contradicts the plan, the
+   measurement wins). The 26 NULL rates in that window are ordinary winter closure and are not
+   part of the event.
 9. `python3 -m verify.preflight` — six gates green. Its migration-count gate reads the directory,
-   so sixteen migrations need no change to it.
+   so seventeen migrations need no change to it.
 10. Start the scheduler; confirm **both** USDA jobs write `job_runs` rows. The rates job fetches
     all three datasets in one run, so it produces one row with one summed `rows_written`.
-11. **Write the outcome back in the same session.**
+11. **Write the outcome back in the same session, including the null-rate figures.**
 
-**Known risk worth watching at step 3:** `date` is a SoQL type name as well as the column name. If
-the service rejects it as a bare identifier, `parse_page` raises `SocrataResponseError` carrying
+**Known risks worth watching.** `date` is a SoQL type name as well as the column name; if the
+service rejects it as a bare identifier, `parse_page` raises `SocrataResponseError` carrying
 Socrata's own message — loudly, never as an empty page — and the fix is to quote it in
-`usda_rates.ORDER_COLUMN`/`since_clause` and the movements pair. **Also at step 3:** a forward-rate
-record missing `rate_month` aborts the run by design, because in that column a silent NULL is
-indistinguishable from a legitimate nearby one. If it fires, measure what those rows look like
-before changing anything.
+`usda_rates.ORDER_COLUMN`/`since_clause` and the movements pair. A forward-rate record missing
+`rate_month` aborts the run by design, because in that column a silent NULL is indistinguishable
+from a legitimate nearby one. And a `rate` present but **blank** raises rather than being stored as
+NULL: this source expresses "no rate" by omitting the key, so a blank is a different and unmeasured
+condition — if it fires, measure what those records look like before changing anything.
 
 **Phase 3's close-out verification — DONE on the instance 2026-08-14.** Its outcomes are recorded
 at the top of `§ Current state`; the step list is retained below for the record of what was asked.

@@ -639,3 +639,22 @@ pages. Every bullet describes a failure that reports success.
   direction — these sources only grow — so it is a floor, and comparing against a floor is the
   cheapest check that the pager did not stop early. Compare **records received**, not rows written:
   rows written counts only what changed, so a correct rerun writes nothing.
+- **An absent field, a null-valued field, and an unparseable value are three distinct conditions.**
+  Absence of a legitimately optional field is recorded as NULL; an unparseable value **always
+  raises**, naming the value. **A blanket `.get()` collapses the third into the first and is
+  forbidden** — it turns a corrupt value into whatever the legitimate NULL means, and where that
+  meaning is ordinary (a closed river, an unreported week) the corruption is invisible. Which
+  fields are optional is a **measurement**, not a judgement: USDA omits `rate` on 774 of 8,260
+  records because the river was closed, while a record with no `date` cannot be keyed at all.
+- **A row whose measure is legitimately absent is still written.** Skipping it makes the absence
+  invisible to everything downstream: the series simply has no January, which nothing can
+  distinguish from an ingest that failed to fetch January. A NULL row states the absence; a missing
+  row hides it.
+- **Freshness is measured over all rows of a table, never over rows whose measure is non-null.** A
+  legitimately empty period is not staleness. "Only count rows that have data" reads as a
+  refinement and makes the check fire for a whole season, which gets it muted — after which it is
+  not watching in the season that matters either.
+- **Structural nullability is established per column by measurement, never by analogy to a sibling
+  column that was measured.** A column made nullable on the strength of a neighbour's finding is a
+  guess that later reads as verified, because the commit that made it cites a measurement of
+  something else.

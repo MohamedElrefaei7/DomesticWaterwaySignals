@@ -19,6 +19,21 @@ because the failure mode of an incomplete one is a fourth rates dataset quietly 
 `nearby` and mixing two different facts under one key - a series that is wrong in a way no
 aggregate reveals.
 
+AN ABSENT RATE IS A FACT ABOUT THE RIVER
+----------------------------------------
+MEASURED: 774 of 8,260 nearby records carry NO `rate` FIELD AT ALL - not a null value, the key is
+simply not there. 661 of those fall in December-March and 729 are on the two upper segments. It is
+WINTER NAVIGATION CLOSURE: there is no rate to publish when no barges move.
+
+So the row is written with a NULL rate, always. Skipping it would make the closure invisible - the
+series would just have no January, which is indistinguishable from an ingest that missed it - and
+Phase 5's seasonal baseline would learn a January that never closes.
+
+The three conditions are kept apart (`socrata_client.optional_field`): an absent key and an
+explicit null both mean "no rate published"; a value that will not parse RAISES. Collapsing the
+third into the first with `record.get("rate")` would file a corrupt value as a winter closure,
+which is a completely ordinary thing for this column to say and therefore invisible.
+
 THREE THINGS THIS MODULE REFUSES TO DO
 --------------------------------------
 1. CONVERT THE UNIT. `pct_of_tariff` is stored exactly as published: `582.1428` stays 582.1428,
@@ -26,10 +41,8 @@ THREE THINGS THIS MODULE REFUSES TO DO
    in the wrong layer, and its symptom is a chart that looks fine and a threshold two orders of
    magnitude out.
 
-2. TREAT A MISSING FIELD AS AN ABSENT VALUE. A record without the rate field raises naming the
-   fields it does carry. That tripwire is what made this module's correction cheap: every one of
-   Phase 4's assumed field names was wrong, and `required_field` meant that arrived as a loud
-   failure on the first record rather than as a table of NULLs.
+2. COALESCE A MISSING RATE TO ZERO, OR DROP THE ROW. A zero would claim barge freight was free
+   that week, in a column every average reads. NULL says what is true: nothing was published.
 
 3. DERIVE `rate_month` INTO AN OFFSET. The forward datasets publish the calendar month the quoted
    rate applies to. It is stored as that month. Turning it into "months ahead" is a derivation,
@@ -46,9 +59,11 @@ from decimal import Decimal, InvalidOperation
 from app import db
 from app.ingest import socrata_client
 from app.ingest.socrata_client import (
+    ABSENT,
     MalformedResponseError,
     SocrataClient,
     SocrataError,
+    optional_field,
     parse_period_label,
     required_field,
 )
@@ -205,7 +220,10 @@ class BargeRate:
     location: str
     week_ending: date
     horizon: str
-    pct_of_tariff: Decimal
+    # NONE WHEN USDA PUBLISHED NO RATE - a winter closure week, 774 of 8,260 nearby records.
+    # The row still exists, and that is the point: a skipped row makes the closure invisible while
+    # a NULL one states it. Never 0, which would claim the freight was free.
+    pct_of_tariff: Decimal | None
     # NONE ON NEARBY ROWS, AND THAT NONE IS CORRECT RATHER THAN MISSING. The nearby dataset
     # publishes no such field; synthesizing one from the publication date would invent a quoted
     # month USDA never quoted (migration 0016's rate_month/horizon CHECK is the same guard at the
@@ -214,17 +232,25 @@ class BargeRate:
 
 
 def parse_rate(raw) -> Decimal:
-    """The published percent-of-tariff, EXACTLY as published.
+    """A PUBLISHED percent-of-tariff, EXACTLY as published. Never called for an absent one.
 
     Decimal via str, never float: `float('112.5')` is fine but `float('582.1428')` is not exactly
     582.1428, and a numeric column fed a float inherits the binary artefact. The published digits
     are the fact - and the measured data really does carry four decimal places, so this is not a
     theoretical precision argument.
+
+    EVERYTHING THIS FUNCTION SEES IS SUPPOSED TO BE A NUMBER. Absence is handled before the call,
+    by `optional_field`, so anything arriving here that will not parse is a DATA ERROR and raises.
+    That includes the empty string: USDA expresses "no rate" by omitting the key, measured, and
+    accepting a blank cell as a second spelling of absence would let a genuinely corrupt value
+    pass as a winter closure - the one failure this split exists to prevent.
     """
     if raw is None or (isinstance(raw, str) and not raw.strip()):
         raise MalformedResponseError(
-            "pct_of_tariff is empty. An unpublished rate is not a zero and is not a NULL in this "
-            "table - the row simply should not exist (migration 0014 makes the column NOT NULL)."
+            f"pct_of_tariff is {raw!r} - present but blank. NOT read as an unpublished rate: this "
+            f"source omits the `rate` key entirely when it publishes none (774 of 8,260 records, "
+            f"migration 0017), so a blank value is a different condition and a suspect one. "
+            f"Storing it as NULL would hide it among the legitimate closure weeks."
         )
     try:
         value = Decimal(str(raw).strip())
@@ -289,15 +315,20 @@ def rate_from(record: dict, *, dataset_key: str) -> BargeRate:
         # and correct answer.
         rate_month = None
 
+    published_rate = optional_field(record, FIELDS["pct_of_tariff"], context=context)
+
     return BargeRate(
+        # `location` and `week_ending` stay REQUIRED. They key the row, and a record carrying
+        # neither a rate nor a location is not a closure week - it is unkeyable.
         location=str(required_field(record, FIELDS["location"], context=context)).strip(),
         week_ending=parse_period_label(
             required_field(record, FIELDS["week_ending"], context=context), field="week_ending"
         ),
         horizon=horizon,
-        pct_of_tariff=parse_rate(
-            required_field(record, FIELDS["pct_of_tariff"], context=context)
-        ),
+        # `optional_field`, NOT `required_field`: this source legitimately omits the key.
+        # ABSENT (missing key or explicit null) becomes NULL; anything else goes to parse_rate,
+        # which raises on a value it cannot read rather than filing it as a closure week.
+        pct_of_tariff=(None if published_rate is ABSENT else parse_rate(published_rate)),
         rate_month=rate_month,
     )
 

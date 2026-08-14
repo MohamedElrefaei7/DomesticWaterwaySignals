@@ -124,6 +124,22 @@ FRESHNESS: tuple[Freshness, ...] = (
         #
         # Stated because a threshold with no reasoning behind it is the one that gets loosened the
         # first time it fires, and the loosening is never measured either.
+        #
+        # FRESHNESS COUNTS ROWS, NOT RATES, AND THAT IS LOAD-BEARING FOR THIS TABLE.
+        #
+        # `pct_of_tariff` IS NULLABLE and legitimately NULL for 774 of 8,260 nearby records:
+        # USDA publishes no rate when the river is closed, 661 of those weeks in December-March
+        # and 36% of Twin Cities' entire history (migration 0017). newest_row() takes
+        # MAX(week_ending) over ALL rows, which is what makes a closure week count as the fresh
+        # data it is.
+        #
+        # "Only count rows that have data" - MAX(week_ending) WHERE pct_of_tariff IS NOT NULL -
+        # is the natural-sounding change that breaks it. In January the upper segments are shut,
+        # so their newest rows carry NULL rates, and this check would report the table stale
+        # while ingest was perfectly correct. The damage is not the false alarm: it is that the
+        # alarm fires all winter, gets muted, and the check is then not watching in the spring
+        # either. Guarded by
+        # tests/ingest/test_usda_rates.py::test_freshness_uses_max_week_ending_over_all_rows.
         max_staleness=timedelta(days=10),
     ),
     Freshness(

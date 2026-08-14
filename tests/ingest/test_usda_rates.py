@@ -12,6 +12,7 @@ with what the parser produced.
     failure, never a silent new series.
 """
 
+import re
 from datetime import date
 from decimal import Decimal
 
@@ -42,8 +43,11 @@ def record(
         "month": "8",
         "year": "2026",
         usda_rates.FIELDS["location"]: location,
-        usda_rates.FIELDS["pct_of_tariff"]: rate,
     }
+    # `rate=...` omits the key entirely, which is how USDA publishes a closure week - 774 of
+    # 8,260 nearby records carry no `rate` field at all (migration 0017).
+    if rate is not ...:
+        built[usda_rates.FIELDS["pct_of_tariff"]] = rate
     if rate_month is not None:
         built[usda_rates.FIELDS["rate_month"]] = rate_month
     return built
@@ -84,26 +88,40 @@ def test_pct_of_tariff_is_stored_exactly_as_published():
             usda_rates.parse_rate(bad)
 
 
-def test_a_missing_field_raises_naming_what_the_record_carries():
-    """A record without the rate field is an error, not a NULL row.
+def test_required_field_still_raises_for_date_and_location():
+    """The tripwire is NARROWED to the key fields, not removed. 0017 test 5.
 
-    THIS IS THE TRIPWIRE THAT MADE THE 0016 CORRECTION CHEAP. Every field name Phase 4 assumed was
-    wrong, and because every read goes through `required_field`, that arrived as an exception
+    THE TRIPWIRE IS WHAT MADE THE 0016 CORRECTION CHEAP. Every field name Phase 4 assumed was
+    wrong, and because every read went through `required_field`, that arrived as an exception
     naming the fields a record actually carries rather than as a table of NULLs - CLAUDE.md § 2's
     theme 1, caught at the first record instead of after a backfill.
+
+    0017 moves `rate` off it, because absence there is measured and legitimate. THE RISK IS THAT
+    THE NARROWING KEEPS GOING: `date` and `location` KEY the row, so their absence can never be a
+    fact about the river - a record with no location is not a closure week, it is a record nothing
+    can ever correct or supersede.
     """
-    incomplete = record()
-    del incomplete[usda_rates.FIELDS["pct_of_tariff"]]
+    for field in ("week_ending", "location"):
+        incomplete = record()
+        del incomplete[usda_rates.FIELDS[field]]
 
-    with pytest.raises(MalformedResponseError) as excinfo:
-        usda_rates.rate_from(incomplete, dataset_key=NEARBY)
+        with pytest.raises(MalformedResponseError) as excinfo:
+            usda_rates.rate_from(incomplete, dataset_key=NEARBY)
 
-    message = str(excinfo.value)
-    assert usda_rates.FIELDS["pct_of_tariff"] in message
-    assert "Fields present" in message, (
-        f"the error does not say what the record does carry, which is what makes a wrong field "
-        f"mapping a two-minute fix: {message}"
-    )
+        message = str(excinfo.value)
+        assert usda_rates.FIELDS[field] in message
+        assert "Fields present" in message, (
+            f"the error does not say what the record does carry, which is what makes a wrong "
+            f"field mapping a two-minute fix: {message}"
+        )
+
+    # And the same for a forward dataset's rate_month, which is required on the datasets that
+    # publish it - a forward row silently losing it would write a NULL indistinguishable from
+    # nearby's legitimate one.
+    forward = record(rate_month="9")
+    del forward[usda_rates.FIELDS["rate_month"]]
+    with pytest.raises(MalformedResponseError):
+        usda_rates.rate_from(forward, dataset_key=ONE_MONTH)
 
 
 def test_the_resume_point_is_read_per_horizon():
@@ -139,6 +157,64 @@ def test_the_resume_point_is_read_per_horizon():
     conn = RecordingConn()
     usda_rates.latest_week(conn)
     assert "WHERE horizon" not in conn.statements[-1][0]
+
+
+def test_completeness_report_counts_null_rates_per_location():
+    """Rows landed, rows with no published rate, and the percentage, per location. 0017 test 10.
+
+    VISIBILITY, NOT ENFORCEMENT (migration 0017, decision 4). The rate is legitimately absent 9%
+    of the time overall and 36% of the time at Twin Cities, so a constraint or an alert on it would
+    either fire constantly or be loosened until it never fired. A printed number does what neither
+    can: if USDA's publication behaviour changes, the shape of this table changes with it and the
+    next person to run a backfill sees it.
+
+    The count is asserted in the RENDERED REPORT as well as in the structure, because a summary
+    that computes the figure and does not print it is the same as not computing it - nobody reads
+    a dict from a CLI run.
+    """
+    from app.ingest import usda_backfill
+
+    rows = usda_rates.parse_rates(
+        [
+            record(location="Twin Cities", published_date="2026-01-05T00:00:00.000", rate=...),
+            record(location="Twin Cities", published_date="2026-01-12T00:00:00.000", rate=...),
+            record(location="Twin Cities", published_date="2026-08-11T00:00:00.000", rate="925"),
+            record(location="Cairo-Memphis", published_date="2026-01-05T00:00:00.000", rate="600"),
+        ],
+        dataset_key=NEARBY,
+    )
+
+    summary = usda_backfill.completeness_by_location(rows)
+
+    assert summary == [
+        ("Cairo-Memphis", 1, 0, 0.0),
+        ("Twin Cities", 3, 2, pytest.approx(66.666, abs=0.01)),
+    ], f"the completeness summary is {summary}"
+
+    rendered = usda_backfill.describe(
+        {
+            "dataset_key": "barge_rates_nearby",
+            "horizon": "nearby",
+            "records_received": 4,
+            "rows_written": 4,
+            "first_period": date(2026, 1, 5),
+            "last_period": date(2026, 8, 11),
+            "seeded_first_period": None,
+            "seeded_last_period": None,
+            "seeded_row_count": None,
+            "completeness": summary,
+            "short_of_seeded_count": False,
+        }
+    )
+
+    assert "Twin Cities" in rendered and "Cairo-Memphis" in rendered
+    assert "2 with no rate" in rendered, (
+        f"the report does not print the per-location null count, so the one thing this table is "
+        f"for is invisible in a run:\n{rendered}"
+    )
+    assert "66.7" in rendered, f"the percentage is not rendered:\n{rendered}"
+    # And a movements backfill, whose rows have no rate concept, prints no table of zeros.
+    assert usda_backfill.completeness_by_location([]) == []
 
 
 # ---------------------------------------------------------------------------------------------
@@ -219,53 +295,196 @@ def test_a_nearby_rate_month_is_rejected_by_the_database(migrated_db):
     migrated_db.rollback()
 
 
+# THE SEVEN PUBLISHED LOCATIONS, MEASURED 2026-08-14 at 1,180 rows each.
+#
+# `Lower Illinois`, NOT `Illinois River`. The handoff document said "Illinois", migration 0016
+# seeded `Illinois River` on the strength of it and said in writing that five of its seven values
+# were unmeasured and that the API would win. It did. 0017 is that promise being kept.
+MEASURED_LOCATIONS = {
+    "Cairo-Memphis",
+    "Cincinnati",
+    "Lower Illinois",
+    "Lower Ohio",
+    "Mid-Mississippi",
+    "St. Louis",
+    "Twin Cities",
+}
+
+
 @pytest.mark.integration
-def test_an_unknown_location_is_rejected_by_the_check(migrated_db):
-    """An eighth location is a loud insert failure, not a silent new series. Test 13.
+def test_the_seven_locations_are_exactly_the_measured_set(migrated_db):
+    """The CHECK admits exactly the seven strings USDA publishes. 0017 test 8.
 
-    THE CONSTRAINT IS A TRIPWIRE, NOT A VOCABULARY. Without it, a location this project has never
-    seen - a renamed segment, a new reach - becomes a series nothing queries and nobody notices,
-    and the corridor-wide views silently omit it. With it, the ingest stops and names the value.
+    EXACT SET EQUALITY, READ OUT OF THE CONSTRAINT ITSELF rather than probed by inserting. A test
+    that only inserted the seven would pass just as happily against a constraint that also admits
+    `Illinois River` - and a stale value left in the list is not harmless: it is a spelling that
+    can never arrive, sitting in the one place a reader goes to learn what the vocabulary is.
 
-    The fix on failure is to measure the new string and add it in a NEW migration. Never to drop
-    the constraint, and never to bend the arriving value to fit the list.
+    The first backfill attempt died here, which is the tripwire working exactly as designed: it
+    refused to open an eighth series for a segment that already had one under another name.
     """
-    seven = [
-        "Twin Cities",
-        "Mid-Mississippi",
-        "Illinois River",
-        "St. Louis",
-        "Cincinnati",
-        "Lower Ohio",
-        "Cairo-Memphis",
-    ]
+    definition = migrated_db.execute(
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint"
+        " WHERE conname = 'barge_rates_location_known'"
+    ).fetchone()[0]
+
+    admitted = set(re.findall(r"'([^']*)'", definition))
+    assert admitted == MEASURED_LOCATIONS, (
+        f"the location CHECK admits {sorted(admitted)}.\n"
+        f"  Expected exactly the seven measured strings. `Illinois River` was the handoff's name "
+        f"and USDA publishes `Lower Illinois` (migration 0017); where the two disagree the API "
+        f"wins."
+    )
+
+    # And all seven really do insert - the constraint says what it means, and a list that was
+    # right on paper but rejected a published value would stop the backfill dead.
     written = usda_rates.upsert_rates(
         migrated_db,
         usda_rates.parse_rates(
-            [record(location=name, rate="500") for name in seven], dataset_key=NEARBY
+            [record(location=name, rate="500") for name in sorted(MEASURED_LOCATIONS)],
+            dataset_key=NEARBY,
         ),
     )
     migrated_db.commit()
     assert written == 7, (
         f"{written} of the seven published locations were accepted; the CHECK is rejecting a "
-        f"value USDA publishes, which would stop the backfill dead"
+        f"value USDA publishes"
     )
 
+
+@pytest.mark.integration
+def test_an_unmeasured_location_is_still_rejected(migrated_db):
+    """The tripwire survives the correction. 0017 test 9.
+
+    THE CONSTRAINT IS A TRIPWIRE, NOT A VOCABULARY. Correcting one of its values is exactly the
+    moment someone concludes the constraint is more trouble than it is worth - it has, after all,
+    just cost a backfill run. It bought that run: without it the rows would have landed under a
+    name nothing queries, and the corridor-wide views would have silently omitted a segment.
+
+    The fix on failure is to measure the new string and add it in a NEW migration - which is what
+    0017 is. Never to drop the constraint, and never to bend the arriving value to fit the list.
+    """
     with pytest.raises(Exception) as excinfo:
         usda_rates.upsert_rates(
             migrated_db,
-            usda_rates.parse_rates([record(location="Cairo–Memphis")], dataset_key=NEARBY),
+            usda_rates.parse_rates([record(location="Illinois River")], dataset_key=NEARBY),
         )
     migrated_db.rollback()
     assert "barge_rates_location_known" in str(excinfo.value), (
         f"the rejection did not come from the location tripwire: {excinfo.value}"
     )
 
-    # The rejected value above differs from a permitted one by ONE CHARACTER - an en dash where
-    # USDA publishes a hyphen. That is the realistic shape of this failure: not an obviously new
-    # location, but a plausible-looking near-miss that would otherwise open a second series for a
-    # segment that already has one.
+    # A ONE-CHARACTER near-miss is refused too: an en dash where USDA publishes a hyphen. That is
+    # the realistic shape of this failure - not an obviously new location, but a plausible-looking
+    # variant that would otherwise open a second series for a segment that already has one.
+    with pytest.raises(Exception):
+        usda_rates.upsert_rates(
+            migrated_db,
+            usda_rates.parse_rates([record(location="Cairo–Memphis")], dataset_key=NEARBY),
+        )
+    migrated_db.rollback()
     assert "Cairo–Memphis" != "Cairo-Memphis"
+
+
+@pytest.mark.integration
+def test_rows_with_null_rates_are_still_written(migrated_db):
+    """Three published records, one of them a closure week: THREE rows. 0017 test 6.
+
+    THE ROW IS THE OBSERVATION. USDA publishes a segment-week with no `rate` key when the river is
+    closed - 774 of 8,260 nearby records, 661 of them December to March. Skipping those rows would
+    leave a series with no January at all, which is indistinguishable from an ingest that failed
+    to fetch January, and Phase 5's seasonal baseline would fit a winter that never closes.
+
+    The NULL is also read back FROM THE DATABASE here, not from the dataclass: `IS NULL` and
+    `= 0` are what tell the two apart, and that is where Phase 5 will be reading from.
+    """
+    written = usda_rates.upsert_rates(
+        migrated_db,
+        usda_rates.parse_rates(
+            [
+                record(published_date="2026-01-06T00:00:00.000", rate=...),
+                record(published_date="2026-08-04T00:00:00.000", rate="601"),
+                record(published_date="2026-08-11T00:00:00.000", rate="582.1428"),
+            ],
+            dataset_key=NEARBY,
+        ),
+    )
+    migrated_db.commit()
+
+    assert written == 3, (
+        f"{written} of 3 rows written - the closure week was skipped. A week USDA published no "
+        f"rate for is an observation about the river, not an absence of one (migration 0017)."
+    )
+
+    nulls = migrated_db.execute(
+        "SELECT count(*) FROM barge_rates WHERE pct_of_tariff IS NULL"
+    ).fetchone()[0]
+    zeros = migrated_db.execute(
+        "SELECT count(*) FROM barge_rates WHERE pct_of_tariff = 0"
+    ).fetchone()[0]
+    assert nulls == 1, f"{nulls} row(s) hold a NULL rate; the closure week was stored as something"
+    assert zeros == 0, (
+        "a NULL rate was coalesced to 0 in the database. Zero claims the freight was free that "
+        "week, and every average over the series would be dragged toward it."
+    )
+
+    # A closure week that later gets a published rate is a genuine revision and must count as a
+    # write. `IS DISTINCT FROM` is what makes it count: `NULL <> 582` is NULL, so a plain
+    # comparison would treat this as no change and the rate would never land.
+    revised = usda_rates.upsert_rates(
+        migrated_db,
+        usda_rates.parse_rates(
+            [record(published_date="2026-01-06T00:00:00.000", rate="1200")], dataset_key=NEARBY
+        ),
+    )
+    migrated_db.commit()
+    assert revised == 1, (
+        "a week revised from NO PUBLISHED RATE to a published one was not counted as a write"
+    )
+
+
+@pytest.mark.integration
+def test_freshness_uses_max_week_ending_over_all_rows(migrated_db, database_url):
+    """The newest row counts even when its rate is NULL. 0017 test 7.
+
+    "ONLY COUNT ROWS THAT HAVE DATA" IS THE NATURAL-SOUNDING CHANGE THAT BREAKS THIS. In January
+    both upper segments are closed, so the newest rows for those weeks carry NULL rates - and a
+    freshness check reading `MAX(week_ending) WHERE rate IS NOT NULL` would report the table stale
+    while ingest was perfectly correct, every week, all winter.
+
+    That failure is worse than a false alarm: it fires for a whole season, gets muted, and the
+    check is then not watching in the spring either.
+    """
+    from datetime import datetime, timezone
+
+    from app import db
+    from app.orchestration import heartbeat
+
+    usda_rates.upsert_rates(
+        migrated_db,
+        usda_rates.parse_rates(
+            [
+                # The older week has a rate; the NEWER one is a closure week.
+                record(published_date="2025-12-29T00:00:00.000", rate="900"),
+                record(
+                    location="Twin Cities",
+                    published_date="2026-01-05T00:00:00.000",
+                    rate=...,
+                ),
+            ],
+            dataset_key=NEARBY,
+        ),
+    )
+    migrated_db.commit()
+
+    entry = next(f for f in heartbeat.FRESHNESS if f.table == "barge_rates")
+    with db.connection(database_url) as conn:
+        newest = heartbeat.newest_row(conn, entry)
+
+    assert newest == datetime(2026, 1, 5, tzinfo=timezone.utc), (
+        f"freshness read {newest}, not the 2026-01-05 closure week. The check is filtering on a "
+        f"non-null rate, so a legitimately closed river reads as staleness."
+    )
 
 
 @pytest.mark.integration

@@ -349,24 +349,81 @@ def parse_period_label(raw, *, field: str = "period") -> date:
         raise MalformedResponseError(f"could not parse {field} {raw!r}: {exc}") from exc
 
 
+class _Absent:
+    """The type of ABSENT. A class so the sentinel has a legible repr in a traceback."""
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging affordance
+        return "<no value published>"
+
+    def __bool__(self) -> bool:
+        return False
+
+
+# "THE SOURCE PUBLISHED NO VALUE HERE", distinct from None.
+#
+# Distinct because None is a value a parser can legitimately return, and `raw is ABSENT` is a
+# question with one answer where `raw is None` is a question about two different things. The
+# distinction costs one object and removes the branch where "absent" and "parsed to nothing" are
+# told apart by whoever is reading the code at the time.
+ABSENT = _Absent()
+
+
 def required_field(record: dict, key: str, *, context: str) -> object:
-    """One field, or raise naming what the record actually carries.
+    """One field that MUST be present, or raise naming what the record actually carries.
 
     NEVER `.get(key)`. A missing field returning None becomes a NULL column or a zero, and the
     first ingest client this project wrote had exactly that bug - a required field hardcoded to
-    None while the layer reported success (CLAUDE.md § 2, theme 1). The field names below are
-    provisional until the datasets are resolved, which makes a loud failure here the difference
-    between "the mapping is wrong" and "the data is empty".
+    None while the layer reported success (CLAUDE.md § 2, theme 1).
+
+    THIS IS FOR FIELDS WHOSE ABSENCE IS A MAPPING ERROR - the ones that key a row. A field the
+    source legitimately omits goes through `optional_field` instead, and the difference is a
+    measurement rather than a matter of taste: `rate` is absent from 774 of 8,260 published rate
+    records because the river was closed (migration 0017), while a record with no `date` or no
+    `location` cannot be keyed and is not a fact about anything.
     """
     if key not in record:
         raise MalformedResponseError(
             f"{context}: record has no field {key!r}. Fields present: {sorted(record)}.\n"
-            f"  The USDA field names in this project are PROVISIONAL until the datasets are "
-            f"resolved (migration 0013, live verification step 3). If the published name differs, "
-            f"correct the mapping in the module that raised this - do not make the field optional, "
-            f"which would write NULLs and report success."
+            f"  This field KEYS THE ROW, so its absence is a mapping error rather than an "
+            f"unpublished value: a record that cannot be keyed can never be corrected or "
+            f"superseded. If the published name has changed, correct the mapping in the module "
+            f"that raised this.\n"
+            f"  DO NOT reach for `optional_field` to make this go away. That is the right tool "
+            f"only where the source is KNOWN AND MEASURED to omit a value - it records the "
+            f"absence as NULL, and doing that to a key field would write unkeyable rows and "
+            f"report success."
         )
     return record[key]
+
+
+def optional_field(record: dict, key: str, *, context: str) -> object:
+    """One field the source may legitimately omit: its value, or ABSENT.
+
+    THREE CONDITIONS, AND THEY ARE NOT THE SAME (CLAUDE.md § 16):
+
+        key absent from the record      the source published no value. ABSENT.
+        key present, value null         the source published an explicit nothing. ABSENT.
+        key present, value anything else returned as-is, FOR THE CALLER'S PARSER TO ACCEPT OR
+                                        REJECT. An unparseable value raises there, naming itself.
+
+    The two ABSENT cases are deliberately collapsed because they mean the same thing about the
+    world - USDA expresses "no rate this week" by omitting the key, and an explicit null would be
+    the same statement spelled differently. The third case is never collapsed into them, and that
+    is the whole reason this function exists rather than a `record.get(key)`:
+
+        rate = record.get("rate")
+
+    reads identically, is one line shorter, and turns a CORRUPT value into a winter closure. The
+    row then says "the river was shut" about a week the river was open, in a column where that is
+    a completely ordinary thing to say - so nothing downstream can tell, and 774 legitimate NULLs
+    are exactly the camouflage a 775th would hide in.
+    """
+    if key not in record:
+        return ABSENT
+    value = record[key]
+    if value is None:
+        return ABSENT
+    return value
 
 
 # ---------------------------------------------------------------------------------------------

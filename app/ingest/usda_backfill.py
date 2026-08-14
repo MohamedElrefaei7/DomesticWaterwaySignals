@@ -63,6 +63,39 @@ INGESTORS = {
 }
 
 
+def completeness_by_location(rows) -> list[tuple[str, int, int, float]]:
+    """Per location: rows landed, rows with NO PUBLISHED RATE, and the percentage.
+
+    REPORTED, NEVER ENFORCED. USDA omits the `rate` field entirely when the river is closed - 774
+    of 8,260 nearby records, 36% of them at Twin Cities alone - so this is a legitimate 9% overall
+    and any constraint or alert on it would either fire constantly or be set so loose it never
+    fires. What a threshold cannot do, a printed number can: if USDA's publication behaviour
+    changes, the shape of this table changes with it and somebody reading a backfill log sees it.
+
+    Sorted by location so two runs are diffable. Returns an empty list for a dataset whose rows
+    carry no rate concept - the movements backfill prints nothing rather than a table of zeros.
+    """
+    if not rows or not hasattr(rows[0], "pct_of_tariff"):
+        return []
+
+    landed: dict[str, int] = {}
+    absent: dict[str, int] = {}
+    for row in rows:
+        landed[row.location] = landed.get(row.location, 0) + 1
+        if row.pct_of_tariff is None:
+            absent[row.location] = absent.get(row.location, 0) + 1
+
+    return [
+        (
+            location,
+            landed[location],
+            absent.get(location, 0),
+            100.0 * absent.get(location, 0) / landed[location],
+        )
+        for location in sorted(landed)
+    ]
+
+
 def seeded_row_count(conn, dataset_key: str) -> int | None:
     """`usda_datasets.source_row_count` for this key, or None if never measured.
 
@@ -118,6 +151,8 @@ def backfill(conn, dataset_key: str, client: SocrataClient | None = None) -> dic
         "seeded_first_period": dataset.first_period,
         "seeded_last_period": dataset.last_period,
         "seeded_row_count": seeded_count,
+        # Per-location completeness, for the log. Decision 4: visibility, not enforcement.
+        "completeness": completeness_by_location(rows),
         # Compared against RECORDS RECEIVED rather than rows written: `rows_written` counts only
         # rows that changed the database, so a second run legitimately writes 0 and would look
         # like total truncation. What the seed is a floor for is what the pager returned.
@@ -157,13 +192,30 @@ def describe(result: dict) -> str:
         )
 
     horizon = f" [{result['horizon']}]" if result["horizon"] else ""
-    return (
+
+    lines = [
         f"{result['dataset_key']}{horizon}: {result['records_received']} record(s) received, "
-        f"{result['rows_written']} row(s) written.\n"
+        f"{result['rows_written']} row(s) written.",
         f"      PERIODS RECEIVED {first} to {last} "
-        f"(seeded bounds {seeded_first} / {seeded_last})\n"
-        f"      {count_line}"
-    )
+        f"(seeded bounds {seeded_first} / {seeded_last})",
+        f"      {count_line}",
+    ]
+
+    completeness = result.get("completeness") or []
+    if completeness:
+        total_absent = sum(absent for _loc, _rows, absent, _pct in completeness)
+        lines.append(
+            f"      NO RATE PUBLISHED for {total_absent} of {result['records_received']} "
+            f"record(s) - a week USDA published no rate for is stored as a NULL row, usually a "
+            f"winter closure (migration 0017). NOT an ingest gap, and not alerted on:"
+        )
+        for location, landed, absent, pct in completeness:
+            lines.append(
+                f"        {location:<18} {landed:>6} row(s), {absent:>5} with no rate "
+                f"({pct:5.1f}%)"
+            )
+
+    return "\n".join(lines)
 
 
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - the live-verification path

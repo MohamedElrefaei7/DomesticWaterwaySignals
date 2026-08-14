@@ -28,7 +28,7 @@ from decimal import Decimal
 import pytest
 
 from app.ingest import usda_movements, usda_rates
-from app.ingest.socrata_client import MalformedResponseError
+from app.ingest.socrata_client import ABSENT, MalformedResponseError, optional_field
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -100,6 +100,116 @@ def test_rates_field_map_matches_the_measured_sample():
         assert published in NEARBY_SAMPLE, (
             f"FIELDS maps {column!r} to the published field {published!r}, which is not in a "
             f"measured record. Fields present: {sorted(NEARBY_SAMPLE)}"
+        )
+
+
+# A VERBATIM CLOSURE RECORD. Its fields are exactly the five that remain when USDA publishes no
+# rate: the `rate` key is not present with a null value, it is NOT THERE.
+CLOSURE_SAMPLE = {
+    "date": "2026-01-05T00:00:00.000",
+    "week": "1",
+    "month": "1",
+    "year": "2026",
+    "location": "Twin Cities",
+}
+
+
+def test_a_record_with_no_rate_key_yields_a_row_with_null_rate():
+    """The measured closure shape parses into a row whose rate is None. 0017 test 1.
+
+    774 OF 8,260 NEARBY RECORDS LOOK LIKE THIS - fields exactly
+    ['date', 'location', 'month', 'week', 'year']. 661 of them fall in December-March and 729 are
+    on the two upper segments: it is winter navigation closure, and there is no rate to publish
+    when no barges move.
+
+    So this is a ROW, with a NULL rate. Not an exception, and not a skipped record - see test 6
+    for the writing side. A parser that raised here would make the whole of January unfetchable;
+    one that dropped the record would leave a series with no January at all, which nothing
+    downstream could distinguish from an ingest that failed.
+    """
+    assert sorted(CLOSURE_SAMPLE) == ["date", "location", "month", "week", "year"], (
+        "the closure fixture has drifted from the measured field list"
+    )
+    assert "rate" not in CLOSURE_SAMPLE, "the key is ABSENT, not null-valued - that is the finding"
+
+    rate = usda_rates.rate_from(CLOSURE_SAMPLE, dataset_key="barge_rates_nearby")
+
+    assert rate.pct_of_tariff is None, (
+        f"a closure week parsed to {rate.pct_of_tariff!r}. USDA published no rate; None is what "
+        f"that is."
+    )
+    # The rest of the row is intact and keyable - which is why it is a row at all.
+    assert rate.location == "Twin Cities"
+    assert rate.week_ending == date(2026, 1, 5)
+    assert rate.horizon == "nearby"
+
+
+def test_a_record_with_an_explicit_null_rate_yields_null():
+    """`"rate": null` means the same thing as an absent key, and is treated the same. 0017 test 2.
+
+    UNMEASURED BUT CHEAP TO HANDLE: every record observed expresses "no rate" by omitting the key.
+    An explicit JSON null would be the same statement spelled differently, and the two are
+    deliberately collapsed - `optional_field` returns ABSENT for both.
+
+    What is NOT collapsed into them is an unparseable value. That distinction is test 3, and it is
+    the reason this function exists instead of a `.get()`.
+    """
+    rate = usda_rates.rate_from(
+        dict(NEARBY_SAMPLE, rate=None), dataset_key="barge_rates_nearby"
+    )
+    assert rate.pct_of_tariff is None
+
+    # And straight through the helper, both spellings, so the collapse is asserted where it is
+    # implemented rather than only through a caller.
+    assert optional_field({"rate": None}, "rate", context="t") is ABSENT
+    assert optional_field({}, "rate", context="t") is ABSENT
+    # A published value passes through untouched, for the caller's parser to judge.
+    assert optional_field({"rate": "582.1428"}, "rate", context="t") == "582.1428"
+
+
+def test_a_record_with_an_unparseable_rate_raises_naming_the_value():
+    """A value that will not parse is a DATA ERROR and raises. 0017 test 3.
+
+    THE ONE THAT MAKES `optional_field` WORTH HAVING. `record.get("rate")` is one line shorter,
+    reads identically, and collapses this case into test 1's: a corrupt value becomes None,
+    becomes a NULL row, becomes a winter closure. That is a completely ordinary thing for this
+    column to say - 774 rows already say it - so nothing downstream can tell, and the 775th hides
+    in exactly the camouflage the other 774 provide.
+
+    The offending value is in the message because the fix depends on what arrived: `n/a` is a
+    publication convention to decide about, where mojibake is a transport problem.
+    """
+    for bad in ("n/a", "  ", "", "not a number"):
+        with pytest.raises(MalformedResponseError) as excinfo:
+            usda_rates.rate_from(dict(NEARBY_SAMPLE, rate=bad), dataset_key="barge_rates_nearby")
+        assert repr(bad) in str(excinfo.value), (
+            f"the error does not name the offending value {bad!r}: {excinfo.value}"
+        )
+
+    # A zero is refused too, and for a different reason: it is a well-formed number that would
+    # satisfy the column and claim the freight was free that week.
+    with pytest.raises(MalformedResponseError):
+        usda_rates.rate_from(dict(NEARBY_SAMPLE, rate="0"), dataset_key="barge_rates_nearby")
+
+
+def test_a_null_rate_is_not_coalesced_to_zero():
+    """None, and not 0, 0.0, Decimal('0') or ''. 0017 test 4.
+
+    A NULL RATE AND A ZERO RATE ARE DIFFERENT CLAIMS. NULL says USDA published nothing; zero says
+    barge freight cost nothing that week, which is never true and poisons every average, every
+    seasonal median, and every analog comparison that touches it.
+
+    Asserted against each falsy spelling separately because `assert rate is None` alone would pass
+    for a parser that returned 0 in some paths and None in others - and `0 == False == 0.0` makes
+    a single equality check quietly weak.
+    """
+    parsed = usda_rates.rate_from(CLOSURE_SAMPLE, dataset_key="barge_rates_nearby")
+
+    assert parsed.pct_of_tariff is None
+    for wrong in (0, 0.0, Decimal("0"), ""):
+        assert parsed.pct_of_tariff != wrong, (
+            f"an unpublished rate was stored as {wrong!r}. NULL means 'not published'; {wrong!r} "
+            f"is a measurement, and a false one."
         )
 
 
@@ -255,6 +365,16 @@ def test_the_captured_rates_fixtures_parse_into_rates(socrata_body):
     assert all(r.rate_month is None for r in seen["barge_rates_nearby"])
     assert all(r.rate_month == 9 for r in seen["barge_rates_1month"])
     assert all(r.rate_month == 11 for r in seen["barge_rates_3month"])
+
+    # THE NEARBY FIXTURE CARRIES A CLOSURE RECORD, and it has to. A fixture with no rate-absent
+    # row would let a parser that raised on one - or dropped it - pass every test that reads the
+    # captured page, which is the majority of them.
+    closures = [r for r in seen["barge_rates_nearby"] if r.pct_of_tariff is None]
+    assert len(closures) == 1, (
+        f"{len(closures)} rate-absent record(s) in the nearby fixture; expected exactly the one "
+        f"January closure week captured from the source"
+    )
+    assert closures[0].week_ending == date(2026, 1, 6)
 
 
 # ---------------------------------------------------------------------------------------------
