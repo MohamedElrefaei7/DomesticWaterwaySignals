@@ -738,3 +738,88 @@ and wrong, with no source to check it against.
   stopped build is invisible from the data, because every table it reads stays perfectly fresh while
   it does nothing. One entry per job, not per table: three entries for three tables written in one
   transaction produce three alerts for one cause.
+
+---
+
+## 18. Statistical discipline
+
+Learned building the lead-lag sweep (Phase 6). §§ 14–16 govern data a source published; § 17 governs
+data this project computed; **this governs claims this project makes about relationships between
+them.** The difference is that a derived value has nothing upstream to contradict it, and a measured
+relationship has nothing *anywhere* to contradict it — it is a number about the world, produced by a
+procedure, and the procedure is the only thing that can be wrong.
+
+The arithmetic every bullet below answers to: **a grid of ~7,000 tests at α = 0.05 produces ~350
+significant results on pure noise.** Not through a bug. By construction, on random data, every time.
+That is why this phase is more dangerous than the ones before it — **previous phases could be wrong;
+this one can be convincingly wrong.** An ingest defect produces a count that does not match the
+source. A sweep with no multiple-comparisons accounting produces a table of significant-looking
+relationships, correctly computed, individually reproducible, and mostly noise.
+
+- **Every scanned combination is recorded, including the null results. The table of scanned pairs is
+  the multiple-comparisons record, and writing only the survivors destroys the denominator.** Twelve
+  surviving rows in a table of twelve read as twelve findings; the same twelve in a table of seven
+  thousand read as the top of a distribution, and the reader can see that chance alone would have
+  produced three hundred and fifty. **Nobody has to delete anything for this to go wrong** — the
+  filter happens at write time and leaves no trace of itself, which is what makes it the most
+  natural dishonesty available here rather than a deliberate one. A refusal is a row with a stated
+  status, never an omission: an omitted pair is indistinguishable from a pair nobody enumerated.
+- **No p-value is stored without a q-value adjusted across the grid it was scanned in, and the grid
+  size is stored on every row.** A raw p-value is the number a reader's eye goes to and it means
+  something entirely different as one of thousands. The grid size rides on the row because **a
+  q-value is meaningless without knowing how many tests it was adjusted against** — a later run over
+  a narrower grid produces smaller q-values in the same column, in the same units, from a different
+  experiment. Benjamini-Hochberg rather than Bonferroni, and the reason is stated rather than
+  assumed: adjacent lags of one feature are very nearly the same test, so Bonferroni's independence
+  assumption would leave nothing surviving on any grid, and **a procedure that can never report
+  anything is theatre rather than rigour.** BH controls the false discovery rate, which is the
+  question actually being asked: of the pairs being called signals, what fraction are noise?
+- **Overlapping forward windows require an effective sample size; the raw count is never used for a
+  p-value on overlapping targets.** Consecutive forward returns share most of their window and are
+  not independent draws. Using the raw count is one identifier, it produces a perfectly ordinary
+  p-value, and it roughly halves every one of them at a two-period horizon — uniformly, invisibly,
+  and in the direction that flatters the thesis. Where the correction is approximate, **it errs
+  toward fewer observations**, and a refinement pushing the other way needs a much better argument
+  than the one it replaces.
+- **A regime split is defined from the predictor, never from the target. Splitting on the outcome and
+  reporting within-split association is circular.** It is the single most seductive error available,
+  because every step is defensible in isolation and the circularity is invisible in the output: it
+  produces a strong result on any predictor whatsoever, **including a column of noise.** Enforce it
+  by signature — a classifier that cannot be handed the target cannot be given it in a hurry, and a
+  comment saying "do not pass the target" is advice rather than a guard.
+- **Walk-forward evaluation gaps the training window by the target horizon, and the gap is asserted
+  at the data level, not in configuration.** A forward-return target reaches `horizon` days past its
+  own date, so a training row whose reach crosses the test boundary is scored partly on data it was
+  fitted on. `assert gap == horizon` **passes while the splitter is off by one** (§ 2's theme 2, and
+  this project has already shipped ten green tests asserting configuration whose behaviour did not
+  hold). The real assertion takes the folds the splitter produced and looks for a training date whose
+  forward window contains a test date. Assert it against a **dense** date grid: on a sparse one the
+  boundary falls between observations and the guard is vacuous.
+- **Directional consistency is always reported with its fold count.** 4 of 5 and 40 of 50 are both
+  80% and are not equally informative. The two travel in one object with no constructor that
+  produces the fraction alone — the code path that separates a number from its evidence is the path
+  that reports the number alone.
+- **A sweep measures and records; it never selects.** Selection happens under a stated confidence
+  gate, in a separate step, and never inside the procedure that generated the candidates. The moment
+  a sweep can answer "which pair looked best?", it is a model-selection procedure with no held-out
+  data, and every later evaluation of the chosen pair is an evaluation of a pair chosen because it
+  evaluated well. A human-readable listing of the strongest rows is fine and is not that: it prints,
+  it returns nothing, and it is not importable. **Guard this by API surface**, because the failure is
+  somebody in a hurry adding an accessor, and no behavioural test can catch a function that does not
+  exist yet.
+- **Every research run records its parameters and the commit it ran against**, and refuses to run
+  rather than defaulting a commit it cannot read. A result measured under one set of feature
+  definitions is not comparable to one measured under another, and without the sha there is no way
+  to know two rows differ — they sit in the same table looking like two observations of one thing.
+  **This project has already done exactly that once:** Phase 5 contradicted Phase 4's headline on the
+  same data, by changing what a feature meant. A dirty working tree is recorded as its own fact,
+  because a dirty run's results are worth keeping *and* are not reproducible.
+- **A result at a negative lag is a finding about the world, not an artefact to filter.** A negative
+  lag means the target moved before the predictor. Restricting a scan to non-negative lags does not
+  remove a nuisance; it removes the ability to observe the competing explanation, and then reports
+  its absence as evidence for the preferred one.
+- **A threshold that decides which pairs are measurable is not a knob.** Minimum folds, minimum
+  training length, and the floor on effective sample size are stated once, with a reason, and changed
+  only in their own commit. Lowering one makes more pairs scannable and **the pairs it admits are
+  exactly the short, sparse ones most likely to produce a large correlation by chance**; raising one
+  after seeing the results is selecting a method that suited the answer.

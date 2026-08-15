@@ -3,11 +3,161 @@
 This is the **log**: current state, decisions as they are made, and `§ Up Next`. Stable contracts
 live in `CLAUDE.md`. If something here hardens into an invariant, move it there and note the move.
 
-**Last updated:** 2026-08-15 (**PHASES 4 AND 5 ARE BOTH COMPLETE AND VERIFIED ON THE INSTANCE.**
-Phase 5's verification **contradicted Phase 4's headline observation**: the deseasonalized *level*
-relationship is weak and the raw-discharge story was substantially calendar, while a *duration*
-relationship is strong on onset and reverses on recovery. Both write-ups are below, Phase 5's first.
-Phase 6 — the ±lag scan — is next.)
+**Last updated:** 2026-08-15 (**PHASE 6 IS WRITTEN AND GREEN OFFLINE; IT HAS NOT RUN ON THE
+INSTANCE.** Phases 1–5 are complete and verified there. Phase 6 builds the ±lag sweep, the
+walk-forward evaluation, and the `signals` table, and closes three of the four standing debts —
+the fourth, the four verbatim query outputs, needs the instance and is now a script away.
+**No sweep result exists yet. Nothing in this file claims one.**)
+
+---
+
+## PHASE 6 — THE ±LAG SWEEP. WRITTEN OFFLINE 2026-08-15. **NOT YET RUN ON THE INSTANCE.**
+
+Two migrations (`0022` `signal_runs`, `0023` `signals`), five modules under `app/signals/`, one
+script under `scripts/`, and six test files. **No cadence entry and no freshness registration** —
+see decision 10 below.
+
+**THE HEADLINE IS THAT THERE IS NO HEADLINE.** This commit builds the measuring apparatus; it has
+measured nothing about the river. The live procedure at the end of `§ Up Next` is what produces the
+first result, and **step 8 of it is the instruction that matters**: if the passing count comes out
+near 5% of the grid, the sweep is finding noise at exactly the rate chance predicts, and *that is
+the finding* — to be recorded as such rather than mined for its strongest row.
+
+### The arithmetic this whole phase is arranged around
+
+**5 features × 4 sites × 3 horizons × 43 lags × 3 regimes = 7,740 combinations.** At α = 0.05
+roughly **387 clear the threshold on pure noise** — not through a bug, but by construction, on
+random data, every time. Every decision below exists because of that number. This is the first phase
+that **can be convincingly wrong**: an ingest defect produces a count that does not match its
+source, and a sweep with no multiple-comparisons accounting produces a table of significant-looking
+relationships that are correctly computed, individually reproducible, and mostly noise.
+
+The contract is now `CLAUDE.md § 18`.
+
+### Decisions worth reading before changing anything here
+
+- **`signals` holds a row for every combination scanned, including the nulls and the refusals.** The
+  table *is* the multiple-comparisons record. `passes_gate` is computed and stored so consumers
+  filter; the writer never selects. A refusal is a row with a `status`, never an omission.
+- **No p-value without a q-value, enforced by a bidirectional CHECK**, and both `grid_size` and
+  `n_tests_adjusted` on every row. They are different numbers — combinations *enumerated* versus
+  p-values BH actually adjusted across — and a q-value is uninterpretable without the second.
+- **Benjamini-Hochberg, not Bonferroni.** Adjacent lags of one feature are nearly the same test;
+  Bonferroni on ~7,700 correlated tests leaves nothing surviving ever, which is theatre.
+- **`n_effective = n / (horizon_days / 7)`, and the p-value comes from it.** The raw count would
+  roughly halve every p-value at horizon 14. The correction is the crude non-overlapping-equivalent
+  one and it errs toward *fewer* observations, which is stated in the module rather than glossed.
+- **The regime split is computed from the feature series and `regimes.classify` takes exactly one
+  argument.** There is no parameter a target could arrive through, and a test asserts the signature.
+  Onset is the counter rising, recovery is falling-or-reset, **flat is neither** — the flat days are
+  the largest population in a run-length series and carrying the previous direction through them
+  would assign hundreds of days by an implementation detail.
+- **Walk-forward gap = `horizon_days`, asserted at the data level over a *daily* fixture.** The
+  splitter admits a training date `d` only where `d < test_start - gap`, so the last admitted row's
+  forward window ends before the test window opens. Asserted by reconstructing the folds and hunting
+  for a training date whose forward window contains a test date — on a weekly grid alone the
+  boundary falls between observations and the guard would be vacuous.
+- **Minimum 5 folds, else `insufficient_folds`.** Five because directional consistency is a fraction
+  of folds and the gate wants ≥70%: with four folds the only achievable values are 0/25/50/75/100%,
+  so the gate would be testing "3 of 4" while claiming to test 70%.
+- **`Consistency` carries `fraction` and `folds` and has no constructor producing one alone.**
+- **Lags −21…+21 in 1-day steps, and negative lags are first-class.** No CHECK restricts
+  `lag_days` to non-negative. If the strongest rows sit at negative lags the project's claim changes
+  from "the physical signal leads" to "the market prices the forecast", and the CLI says so in its
+  own output.
+- **The sweep exposes no best-pair accessor**, asserted by scanning the module's public surface.
+  `--top` prints for a human and returns `None`; `_print_top_rows` is private on purpose.
+- **`signal_runs` records parameters, `git_sha` and `git_dirty`, and refuses to run without a sha.**
+  Not defaulted to `'unknown'`, which would look sha-shaped in every listing afterwards.
+- **A CLI, not a scheduled job.** No cadence entry, no freshness entry. A scheduled sweep would
+  accumulate runs nobody reads and would eventually be the thing that "found" a signal at 3am that
+  nothing validated. `signals` going stale is not a system-health question.
+- **`scipy` was NOT added.** The only non-elementary function needed is the t distribution's tail, a
+  regularized incomplete beta — ~40 lines of continued fraction using `math.lgamma`, checked against
+  published critical values at df 1, 2, 10, 30, 100 and 10⁷ to within 5·10⁻⁴. `requirements.txt`
+  stays at three runtime packages.
+
+### The three debts closed here, and the one that needs the instance
+
+1. **`scripts/capture_thesis_queries.py` exists — debt 1a is one command from closed.** It runs the
+   four owed queries (2022/2023 raw discharge, 2022/2023 deseasonalized, all Cairo-Memphis nearby
+   against Memphis) and writes CSV to a stated `--out`. **It never writes to `CONTEXT.md`**, and
+   that is the design: a document that edits itself is a document nobody reviews, and the paste is
+   the step where somebody actually reads the numbers. **STILL OPEN until a human runs it and pastes
+   the four blocks in.**
+2. **Debt 1b is closed.** `discharge_min` is skipped where `bool_and(n_observations = 1)` holds for a
+   site, and the skip is reported with the measured reason. **Detected from the data, never from a
+   site list** — a hardcoded list would be wrong the day the instantaneous backfill fills Baton
+   Rouge in, and wrong silently. `app/signals/pairs.py` contains no site id literal and a test
+   asserts it.
+3. **Debt 1c is closed.** `tests/features/test_seasonal.py::test_a_five_year_climatology_yields_null_anomaly_end_to_end`
+   builds a deliberately shallow 5-year record at Memphis and asserts, against a real database, that
+   every anomaly is NULL, that `climatology_n_years` is present on the refused rows, and that it is
+   exactly 5. **The eight-year guard has now fired somewhere.** Finding 4 said it holds by luck of
+   coverage rather than by demonstration; it is still true that it has never fired on *real* data,
+   and that remains recorded rather than closed.
+4. **Debt 1d — `lock_movements` remains unused, deliberately.** No feature in the registry reads it
+   and **this commit does not add one.** The reason is the sparsity measured in Phase 4: **MS Lock 15
+   reports 1,434 explicit zeros of 2,840 rows**, and `lock_movements` is a sparse *per-commodity
+   weekly* series. Differencing a per-commodity series that is half zeros produces a sequence of
+   spikes and reversions that **looks like volatility and is mostly the reporting grain.** Using it
+   requires deciding whether to aggregate across commodities before differencing — **that is a
+   modelling decision, not an oversight**, and it belongs to a human under `CLAUDE.md § 1`. The
+   volume half of the target stays unused until it is made.
+
+### Deviations from the brief, and why
+
+- **Tests 17, 18 and 19 are INTEGRATION, not unit.** "Every scanned pair is written" is a claim about
+  what landed in the table, and the failure guarded against is a filter at *write* time — so the
+  assertion has to be on the far side of the write. An in-memory version asserts that the code
+  counted what the code counted and passes in both directions of the mutation. Recorded in the
+  suite's own docstring.
+- **`tests/signals/test_capture_queries.py` is a sixth test file the brief did not list.** Part 1's
+  done-condition is "the script runs against a fixture database", which is a test whether or not it
+  is written as one — and this project has had to come back and correct unasserted claims before.
+- **Test 7 was widened to run a real sweep and read the table back.** The mutation it guards ("drop
+  BH, store only raw p") leaves the CHECK constraint perfectly intact, so a test asserting only that
+  the constraint exists stays green while every row carries an unadjusted number. The `sweepable`
+  fixture moved to `conftest.py` so both suites can use it.
+- **Two columns beyond the brief's list.** `signals.n_tests_adjusted` (BH's *m*, which differs from
+  `grid_size` whenever a pair was unscannable — and a q-value is meaningless without it) and
+  `signals.series_column` (`anomaly` or `value` — decided per (feature, site) from the data, so the
+  seam stays visible rather than being inferred later). `signal_runs.git_dirty` is a separate column
+  rather than a suffix on `git_sha`, so the sha stays something you can hand to `git show`.
+- **`regime`, `status` and `series_column` carry CHECK constraints although `features.feature_name`
+  deliberately does not** (migration 0020). The difference is stated in `0023`: those sets are
+  *closed by definition* rather than open by design, and unlike feature names they have no registry
+  tripwire — so a misspelled `'onsett'` would open a silent fourth regime that every `group by`
+  would report as a category.
+
+### Status
+
+- **Offline: 316 passed, 0 failed** with a database; **224 passed, 92 skipped** without one.
+  Baseline before this commit was 283 with a database.
+- **All thirteen mutation rows confirmed** — each red on the guard's own assertion rather than on an
+  import error, `__pycache__` cleared between restore and re-run. Rows 2 and 5 were each run in two
+  forms; see "Mutation notes" below.
+- **A full-grid run against a fixture database** (4 sites, 3,200 days of features, 450 weeks of
+  targets) enumerated **6,966 pairs and wrote 6,966 rows in 3.7 seconds** — 7,740 minus the 774
+  skipped as duplicates at the two degenerate sites. **The passing count from that run is a property
+  of synthetic sinusoidal fixture data and is not reported here as a result.**
+- **`0022`–`0023` are new; nothing in `0001`–`0021` was edited.** Twenty-three migrations apply clean.
+
+### Mutation notes — two rows needed two forms
+
+- **Row 2, "drop the BH adjustment, store only raw p", is two distinct mutations.** Removing the
+  adjustment inside `benjamini_hochberg` turns test 6 red on the hand-computed fixture; making the
+  *writer* store the raw p in the q column leaves test 6 green and turns test 7 red on the widened
+  end-to-end half. Both were run. **Had test 7 not been widened, the writer form would have gone
+  undetected by both named tests** — the CHECK constraint permits a p and a q that happen to be
+  equal.
+- **Row 5, "set the gap to `horizon - 1`", was run once per named test** (12 and 13) rather than
+  once. Test 12 fails with "1 training observation has a 7-day forward window reaching into the test
+  window" — exactly one, which is the off-by-one this design predicts. Test 13 fails with "horizon 7
+  produced gaps [6]".
+- **Row 1's message is worth keeping:** with the raw count substituted, `measure()` stored
+  `p = 6.06e-09` where the effective-n computation gives `7.03e-05` — **a factor of ~11,600 on that
+  fixture**, in the flattering direction, from one identifier.
 
 ---
 
@@ -289,6 +439,18 @@ red when it is removed (mutation row 2), so the *mechanism* is confirmed; what h
 exercised is the guard **on real data**. If a fifth gauge is ever seeded with a short record, that is
 the first run where this matters and the first run where nobody will have seen it work.
 
+> **PHASE 6 CLOSED HALF OF THIS — 2026-08-15, debt 1c.**
+> `test_a_five_year_climatology_yields_null_anomaly_end_to_end` seeds a deliberately shallow
+> **five-year** record at Memphis and asserts, **against a real database**, that every anomaly comes
+> back NULL, that `climatology_n_years` is present on the refused rows, and that it is **exactly 5**.
+> So the refusal is now known to survive the whole round trip — the builder's return tuple, the
+> upsert's six-placeholder parameter list, and `0020`'s `features_anomaly_needs_its_year_count`
+> CHECK. A `coalesce(anomaly, 0)` anywhere in that path would now turn a test red.
+>
+> **What is still not closed:** the guard has never fired on *real* data. `climatology_n_years` on
+> the real table still runs 11 to 37 with no NULLs anywhere. The mechanism and the plumbing are both
+> confirmed; the coverage question is unchanged.
+
 ### FIXED IN THE SAME COMMIT — the test suite had become flaky, and Phase 5 caused it
 
 Writing this up surfaced a **`DeadlockDetected` in the schema-reset fixture, on roughly one full-suite
@@ -312,6 +474,12 @@ copies, which are duplicated deliberately.
   2022 deseasonalized tables. The figures above are the anchor points this session was given; the
   row-by-row output was not, and it is not invented here (`CLAUDE.md § 4`). Every number above is
   checkable by re-running the queries in `§ Up Next`.
+
+  > **PHASE 6 MADE THIS ONE COMMAND — 2026-08-15.** `scripts/capture_thesis_queries.py --out <dir>`
+  > runs all four and writes CSV. It deliberately does **not** write to this file: the paste is the
+  > step where somebody reads the numbers, and a document that edits itself is a document nobody
+  > reviews. **Still open until a human runs it and pastes the four blocks in** — see step 2 of the
+  > Phase 6 live procedure in `§ Up Next`.
 
 ---
 
@@ -1492,57 +1660,126 @@ Bring the stack up with `docker compose -f docker-compose.yml -f /root/dws-local
 Delete it once the `worker` service is containerized; at that point `DATABASE_URL` becomes
 `timescaledb:5432` and nothing needs a published port.
 
-## PHASE 6 — THE ±LAG SCAN. THIS IS NEXT.
+## PHASE 6 IS BUILT AND UNRUN. **THE LIVE PROCEDURE IS THE NEXT THING TO DO.**
 
-**Phases 1–5 are all complete and verified on the instance.** Phase 5's verification is what shapes
-this phase, and it redirects it: the level relationship it was going to scan turned out to be mostly
-calendar, and a duration relationship turned up in its place.
+The sweep, the walk-forward evaluation and the `signals` table are written, green offline, and
+mutation-confirmed. **They have measured nothing.** Everything below is for a human on the instance,
+and it is the step this project's process note says gets skipped: *running the verification and not
+recording the result is not finishing the verification.*
 
-### Point the scan at `days_below_*` FIRST, not at level or anomaly
+### Phase 6 live verification — on the instance
 
-This is the instruction, and it is a change of plan backed by a measurement (findings 1 and 2 above).
+1. `python -m app.orchestration.migrate` — expect **0022 and 0023** applied, **twenty-three total**.
+2. `python scripts/capture_thesis_queries.py --out /tmp/thesis` — four CSVs. **Paste them into the
+   `PHASE 4 — VERIFIED` and `PHASE 5 — VERIFIED` sections as fenced blocks, replacing the notes that
+   say the output is still owed. THIS CLOSES DEBT 1a**, which has been open across two phases. The
+   script exits non-zero and names the empty files if any query returns no rows — an empty table
+   there means the query is measuring something narrower than its name, not that there is nothing
+   in the window.
+3. **The full sweep:** `time python -m app.signals.sweep --lag-min -21 --lag-max 21`.
+   Report **grid size, rows written, wall time and the `run_id`.** Expect the grid near **7,740**
+   minus the duplicate skips (`5 × 4 × 3 × 43 × 3`, less one feature at each fully-degenerate site
+   across every horizon, lag and regime — **387 per skipped site-feature**). Phase 5 measured Memphis
+   and Vicksburg as fully degenerate, so **6,966 is the number to expect if that still holds** — and
+   if it does not, the sweep prints which pairs it skipped and why, which is the answer.
+4. **THE DENOMINATOR, STATED FIRST.** The CLI prints it, and take it from the database too:
+   ```sql
+   select count(*) as scanned, count(*) filter (where passes_gate) as passing
+     from signals where run_id = <id>;
+   ```
+   **Report both numbers together, always.** A passing count without its denominator is the
+   dishonest form of this result.
+5. **The top rows, read as the top of a distribution and not as findings:**
+   ```sql
+   select feature_name, site_id, horizon_days, lag_days, regime,
+          statistic, p_value, q_value, n_effective, folds, directional_consistency
+     from signals where run_id = <id> and passes_gate
+    order by q_value limit 20;
+   ```
+6. **Check the negative-lag half explicitly:**
+   ```sql
+   select regime,
+          count(*) filter (where lag_days < 0 and passes_gate) as neg,
+          count(*) filter (where lag_days > 0 and passes_gate) as pos
+     from signals where run_id = <id> group by 1;
+   ```
+   If negative lags dominate, the claim changes from **"the physical signal leads"** to **"the market
+   prices the forecast."** **Report it either way** — the CLI says so itself when they do.
+7. **Compare against the Phase 5 observation.** Find the `days_below_p10` / Memphis rows across lags
+   and regimes:
+   ```sql
+   select horizon_days, lag_days, regime, statistic, q_value, folds, directional_consistency
+     from signals
+    where run_id = <id> and feature_name = 'days_below_p10' and site_id = '07032000'
+    order by regime, horizon_days, lag_days;
+   ```
+   Does the **onset** regime show what the eyeball suggested, and does **recovery** reverse?
+   **READ THE NEXT PARAGRAPH BEFORE INTERPRETING THIS QUERY** — the regime definition and the
+   Phase 5 narrative do not line up the way the words suggest.
+8. **THE NULL-RESULT CHECK, AND IT IS THE ONE THAT MATTERS.** Confirm the passing count is not close
+   to **5% of the grid** (~387 of 7,740). If it is, the sweep is finding significance at exactly the
+   rate chance predicts, and **that is the finding** — record it as such rather than reaching for the
+   strongest row. A table whose survivors are indistinguishable from noise is a real answer about the
+   thesis, and it is the answer this phase was built to be able to give.
+9. `python -m verify.preflight` — six gates green. Its migration-count gate reads the directory, so
+   twenty-three migrations need no change to it.
+10. **Write the outcome back in the same session**, including the denominator, and set `§ Up Next`
+    to Phase 7.
 
-- **`discharge_mean` / `discharge_min` anomalies are the weak candidate.** On 2022-08-09 the anomaly
-  was `+18,095` — above normal — while rates were already climbing, and the deepest 2022 anomalies
-  sit in July and November rather than in the September–October spike. Scan them, but do not expect
-  them to carry the relationship, and **do not tune them until they have failed honestly.**
-- **`days_below_p05` / `p10` / `p20` are the strong candidate.** At Memphis, `days_below_p10` held 0
-  for eleven weeks while the rate drifted 335 → 656, then went 2 → 9 → 16 → 23 as the rate went
-  925 → 1,428 → 2,427 → 2,812.
-- **`discharge_min` and `discharge_mean` ARE THE SAME SERIES at Memphis and Vicksburg** (finding 3),
-  so treating them as two independent inputs scans one variable twice at half the sites. Either
-  restrict `discharge_min` to St. Louis and Baton Rouge or report the duplication in the results.
+### **READ BEFORE STEP 7 — the regime labels and the Phase 5 narrative are not the same split**
 
-### EXPECT THE ONSET/RECOVERY ASYMMETRY TO NEED SEPARATE TREATMENT
+`CLAUDE.md § 18` requires the regime split to come from the predictor, and the implementation follows
+the brief literally: **`onset` is any window where the feature counter is RISING, `recovery` is where
+it is falling or has reset.**
 
-The rate **peaked at 23 days below and declined through 30, 37, 44, 51 and 58 days below.** Duration
-drives the onset; it does not drive the recovery, and the market stops paying for a constraint that
-is still tightening.
+Phase 5's finding described the rate peaking at **23 days below p10** and then falling through **30,
+37, 44, 51 and 58 days below**. Those larger numbers are a **still-rising counter** — so that entire
+stretch, including the part Phase 5 called the market's *recovery*, is classified **`onset`** here.
 
-**A single correlation over a whole event would average a strong positive onset against a strong
-negative recovery and report approximately nothing** — which would read as "no relationship" and
-would be the most expensive wrong answer available here. Scan the two regimes separately, and scan
-**both signs of lag**: the reversal is the interesting part, not a nuisance to be smoothed.
+**The consequence is concrete: the onset regime contains both the rate's climb and its fall, and a
+correlation over it will be diluted by exactly the averaging the split was introduced to prevent.**
+The `recovery` regime holds only the days after the river came back up and the counter reset.
 
-**Walk-forward with a gap, and honour the confidence gate.** `CLAUDE.md § 7`: ≥4 analogs and ≥70%
-directional consistency, else "insufficient history". **Everything above is still n = 2.** The sweep
-is where this stops being two aligned pictures — and if it does not survive, that is the result.
+This is **not** a defect to patch during verification, and it is not something to re-tune after
+seeing the numbers — that is precisely the move `CLAUDE.md § 18`'s last bullet forbids. It is a
+**definition mismatch to be aware of when reading step 7**, and the honest resolutions are:
 
-### Standing debts to clear while you are in there
+- read `onset` as **"the constraint is tightening"** rather than as "the rate is rising", which is
+  what it actually means, and expect it to be diluted; or
+- decide that the split wanted is **rate-of-change of the counter** rather than its sign, or a
+  peak-relative split — **which is a modelling decision for the human** (`CLAUDE.md § 1`), and its
+  own commit, with the current definition's results measured first so the change has a before.
 
-1. **Four query outputs are owed verbatim** and the log records anchor points where it should record
-   tables: the two Phase 4 raw-discharge queries (2022 and 2023) and the two Phase 5 deseasonalized
-   ones. Cheap to re-run, and every figure in both write-ups is checkable against them.
-2. **The eight-year climatology guard has never fired on real data** (finding 4) —
-   `climatology_n_years` runs 11 to 37 with no NULLs anywhere. The mechanism is confirmed by unit
-   test and mutation; its behaviour on a short record is not. **If a fifth gauge is seeded, that is
-   the first run where it matters and the first where nobody will have seen it work.**
-3. **Absolute operational thresholds are still a human decision awaiting a source.** The `p05`/`p10`/
-   `p20` percentiles are stand-ins (`CLAUDE.md § 1`), and Phase 6 is where their arbitrariness starts
-   to matter — a lag scan over three arbitrary levels is three arbitrary answers.
-4. **No movements feature exists**, because `lock_movements` is sparse (MS Lock 15: 1,434 zeros of
-   2,840 rows) and nobody has decided whether to aggregate across commodities before differencing.
-   The volume half of the target is unused until that is settled.
+**Measure it as built before changing it.** The `all` regime is scanned alongside the other two
+precisely so the dilution is visible in the table rather than argued about.
+
+### Still open, and unchanged by this commit
+
+1. **Absolute operational thresholds are still a human decision awaiting a source.** The `p05`/`p10`/
+   `p20` percentiles are stand-ins (`CLAUDE.md § 1`), and the sweep now makes their arbitrariness
+   concrete: a lag scan over three arbitrary levels is three arbitrary answers, and it will report
+   all three with q-values that look equally authoritative.
+2. **No movements feature exists.** `lock_movements` is a sparse per-commodity weekly series — MS
+   Lock 15 reports 1,434 explicit zeros of 2,840 rows — and nobody has decided whether to aggregate
+   across commodities before differencing. Differencing it as-is produces spikes and reversions that
+   look like volatility and are mostly the reporting grain. **The volume half of the target stays
+   unused until that decision is made**, and it is a decision rather than an oversight.
+3. **The eight-year climatology guard has still never fired on real data.** Debt 1c gave it an
+   end-to-end test against a deliberately shallow 5-year fixture, so the refusal is now known to
+   survive the database round-trip. `climatology_n_years` on the real table still runs 11 to 37 with
+   no NULLs anywhere. **If a fifth gauge is ever seeded with a short record, that is the first run
+   where it matters.**
+
+### Phase 7 — after the sweep has run and its outcome is recorded
+
+The analog engine and the confidence gate as a consumer. **It reads `signals`; it does not re-run
+the sweep**, and `directional_consistency` with its `folds` is the column `CLAUDE.md § 7`'s ≥70% half
+consumes. The **≥4 analogs** half has no counterpart in Phase 6 and was deliberately not
+approximated by something fold-shaped — that is Phase 7's to build.
+
+**Phase 7 selects; Phase 6 measured.** Keeping those in separate steps is the whole point of
+`CLAUDE.md § 18`'s seventh bullet, and the sweep exposes no accessor that would let Phase 7 shortcut
+it.
 
 ---
 

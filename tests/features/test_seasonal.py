@@ -4,13 +4,23 @@ Every test here is against a hand-computed expectation. That is the point of the
 pure functions (CLAUDE.md § 17): a test that read the climatology back out of the database would be
 asserting that the code computes what the code computes, and would pass in both directions of every
 mutation below.
+
+ONE TEST IN THIS FILE IS DELIBERATELY NOT OF THAT KIND, and it is the last one. Phase 5's live
+verification measured `climatology_n_years` at 11 to 37 across every row with NO NULLS ANYWHERE:
+THE GUARD HAS NEVER FIRED ON REAL DATA. Its mechanism is unit-tested above and goes red when it is
+removed - what has never happened is the refusal surviving a database round-trip, through the
+builder's return tuple, through the upsert's parameter list, into a column whose CHECK constraint
+has an opinion about it. A NULL a pure function produces correctly can still be written as 0 by a
+`coalesce` somebody added to quiet a warning, and CLAUDE.md § 2's theme 2 asks for verification
+that crosses the boundary where the bug would live. So that one is integration, on purpose, and it
+is the only place in this suite where the database is the thing being asked.
 """
 
 from datetime import date, timedelta
 
 import pytest
 
-from app.features import seasonal
+from app.features import build, seasonal
 
 
 def daily_series(start: date, values) -> list[tuple]:
@@ -201,3 +211,128 @@ def test_a_null_value_contributes_no_year_and_gets_no_anomaly():
     rows = {day: anomaly for day, _value, anomaly, _n in seasonal.build_anomalies(observations)}
     assert rows[date(2020, 3, 3)] is None
     assert rows[date(2015, 3, 3)] == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------------------------
+# DEBT 1c - the eight-year guard, exercised against a real database for the first time.
+#
+# Phase 5's FINDING 4, in `CONTEXT.md`: `climatology_n_years` runs 11 to 37 across every row of the
+# real `features` table, with no NULLs anywhere. Live verification step 3 expected a substantial
+# NULL-anomaly population in Memphis's early years and found none - THE GUARD HOLDS BY LUCK OF
+# COVERAGE, NOT BY DEMONSTRATION. The 15-day smoothing window pools distinct calendar years across
+# the whole window, and with 35 years at two sites and a decade at the others, every day-of-year
+# clears eight comfortably.
+#
+# It was recorded as a gap rather than as a success, and this is the test that closes it: a
+# DELIBERATELY SHALLOW site - five years and no more - so the refusal actually happens, end to end.
+# ---------------------------------------------------------------------------------------------
+
+# Five, and the number is the whole fixture. `seasonal.MIN_YEARS` is eight, so a record this short
+# must produce a NULL anomaly on every row; at eight it would produce none and the test would pass
+# for the wrong reason. Written as an expression of MIN_YEARS rather than as a bare 5 so that
+# raising the guard cannot silently turn this into a test of nothing.
+SHALLOW_YEARS = seasonal.MIN_YEARS - 3
+
+# A contiguous autumn block in each of those years, and autumn because that is the season the
+# project cares about - the 2022 and 2023 events are September-October. The block is wide enough
+# that the 15-day smoothing window around the day asserted below falls entirely inside it, so the
+# expected year count is exactly SHALLOW_YEARS rather than an accident of the window's edges.
+BLOCK_START = (9, 1)
+BLOCK_END = (10, 31)
+
+# The day the assertion is made on. Mid-block, so its centred 15-day window (September 13-27) is
+# fully seeded in all five years.
+ASSERTED_DAY = (9, 20)
+
+
+def _shallow_autumn_series(first_year: int) -> list[tuple]:
+    """`(date, value)` for September 1 - October 31 in each of five consecutive years.
+
+    The values descend within each autumn and differ between years, so the climatology is a real
+    median of five distinct numbers rather than a constant - a flat series would produce an anomaly
+    of exactly 0.0, which is indistinguishable from the NULL this test is looking for once anything
+    downstream coalesces.
+    """
+    series = []
+    for offset in range(SHALLOW_YEARS):
+        year = first_year + offset
+        day = date(year, *BLOCK_START)
+        last = date(year, *BLOCK_END)
+        step = 0
+        while day <= last:
+            series.append((day, 200_000.0 - 500.0 * step + 3_000.0 * offset))
+            day += timedelta(days=1)
+            step += 1
+    return series
+
+
+@pytest.mark.integration
+def test_a_five_year_climatology_yields_null_anomaly_end_to_end(migrated_db, seed_readings):
+    """Test 23, DEBT 1c. The guard refuses, and the refusal survives into the table.
+
+    THE MECHANISM IS ALREADY PROVEN ABOVE; THE ROUND TRIP IS NOT. Everything between the builder's
+    return tuple and the stored row is untested by the unit tier: the parameter list of
+    `FEATURES_UPSERT_SQL`, the ordering of its six placeholders, and migration 0020's
+    `features_anomaly_needs_its_year_count` CHECK. A single `coalesce(anomaly, 0)` anywhere in that
+    path would leave every test above green and this one red, which is the only reason to pay for
+    a database here.
+
+    AND THE YEAR COUNT IS ASSERTED PRESENT, not merely the anomaly absent. That is the half of the
+    guard that gets removed first: a NULL with no count beside it is indistinguishable from a bug,
+    and the first response to an unexplained NULL is to delete the check that produced it
+    (CLAUDE.md § 17). Migration 0020 stores the count on the REFUSED rows precisely so the refusal
+    can be told apart from a defect, and this asserts that the refused rows really do carry it.
+    """
+    from tests.features.conftest import MEMPHIS
+
+    # Memphis, because it is the site whose short daily record (2014-10-01, migration 0011) was the
+    # reason eight was chosen - and the site Phase 5 expected to see the guard fire at.
+    first_year = 2015
+    series = _shallow_autumn_series(first_year)
+    seed_readings.daily(MEMPHIS, series)
+
+    start, end = series[0][0], series[-1][0]
+    result = build.build(migrated_db, start, end)
+    assert result["feature_rows"] > 0, (
+        f"the build wrote no features, so nothing below is being asserted about the guard: {result}"
+    )
+
+    rows = migrated_db.execute(
+        "SELECT date, value, anomaly, climatology_n_years"
+        "  FROM features"
+        " WHERE site_id = %s AND feature_name = 'discharge_mean'"
+        " ORDER BY date",
+        (MEMPHIS,),
+    ).fetchall()
+    assert rows, "no discharge_mean rows at the seeded site"
+
+    # 1. THE REFUSAL. Every row, not merely the asserted day: with five years behind every
+    #    day-of-year in this fixture, a single non-NULL anomaly means the guard is being applied
+    #    somewhere other than where the year count is computed.
+    with_anomaly = [row for row in rows if row[2] is not None]
+    assert not with_anomaly, (
+        f"{len(with_anomaly)} of {len(rows)} rows carry an anomaly computed from a "
+        f"{SHALLOW_YEARS}-year record, and seasonal.MIN_YEARS is {seasonal.MIN_YEARS}. First: "
+        f"{with_anomaly[0]}. The guard did not survive the round trip."
+    )
+
+    # 2. THE COUNT IS STILL THERE. This is the half that makes the NULL auditable rather than
+    #    mysterious, and migration 0020's CHECK deliberately permits it without an anomaly.
+    countless = [row for row in rows if row[3] is None]
+    assert not countless, (
+        f"{len(countless)} refused row(s) carry a NULL anomaly with NO climatology_n_years beside "
+        f"it, which is indistinguishable from a bug - see CLAUDE.md § 17. First: {countless[0]}"
+    )
+
+    # 3. AND IT IS FIVE. Not "some number below eight": the count is what a human reads to decide
+    #    whether a NULL is the guard working or the data missing, so a count that is merely
+    #    under-threshold rather than correct would answer that question wrongly while passing a
+    #    weaker assertion.
+    asserted = date(first_year + SHALLOW_YEARS - 1, *ASSERTED_DAY)
+    n_years = {row[0]: row[3] for row in rows}[asserted]
+    assert n_years == SHALLOW_YEARS, (
+        f"climatology_n_years on {asserted} is {n_years}, expected exactly {SHALLOW_YEARS}. Its "
+        f"centred {seasonal.SMOOTHING_DAYS}-day window falls wholly inside a block seeded in "
+        f"{SHALLOW_YEARS} consecutive years, so any other value means the window is pooling years "
+        f"differently than seasonal.climatology documents."
+    )
