@@ -3,10 +3,11 @@
 This is the **log**: current state, decisions as they are made, and `§ Up Next`. Stable contracts
 live in `CLAUDE.md`. If something here hardens into an invariant, move it there and note the move.
 
-**Last updated:** 2026-08-14 (**PHASE 4 IS COMPLETE AND VERIFIED ON THE INSTANCE.** Both halves of
-the thesis now exist in one database and have been looked at together for the first time — the
-outcome is directly below. Phase 5, the normalizer and feature layer, is written offline in the same
-commit as this writeback.)
+**Last updated:** 2026-08-15 (**PHASES 4 AND 5 ARE BOTH COMPLETE AND VERIFIED ON THE INSTANCE.**
+Phase 5's verification **contradicted Phase 4's headline observation**: the deseasonalized *level*
+relationship is weak and the raw-discharge story was substantially calendar, while a *duration*
+relationship is strong on onset and reverses on recovery. Both write-ups are below, Phase 5's first.
+Phase 6 — the ±lag scan — is next.)
 
 ---
 
@@ -82,6 +83,14 @@ distinguish leading from lagging.
 **NOTHING IN PHASE 5 IS TUNED ON THE BASIS OF THAT OBSERVATION.** Phase 6's ±lag scan measures it.
 The recovery-side asymmetry is named in `§ Up Next` as the first thing that scan should be pointed
 at.
+
+> **CAUTION 2 WAS ANSWERED ON 2026-08-15, AND IT LANDED AGAINST THIS SECTION.** Phase 5's
+> deseasonalization shows the *level* relationship above is **substantially calendar**: on
+> 2022-08-09 the anomaly was `+18,095` — above seasonal normal — while rates were already climbing,
+> and 2022's deepest anomalies fall in July and November rather than during the September–October
+> spike. **Do not quote the 7.2×-against-58% pairing above as evidence for a level relationship.**
+> What survives is a DURATION relationship, and the recovery-side asymmetry sharpens rather than
+> softens. See `PHASE 5 — VERIFIED`, findings 1 and 2.
 
 ### 1b — `gauge_daily` and `gauge_series` are different things, and neither replaces the other
 
@@ -169,8 +178,8 @@ upstream to contradict it when it is wrong.
 - **All 14 mutation-table rows confirmed**, each watched red on its own assertion, restored, with
   `__pycache__` cleared between restore and re-run. **No row needed a second pass.**
 - **`0019`–`0021` are new; nothing in `0001`–`0018` was edited.** Twenty-one migrations apply clean.
-- **NOT YET RUN ON THE INSTANCE.** The from-scratch build and step 9 — re-running the thesis query
-  against the deseasonalized anomaly — are outstanding. See `§ Up Next`.
+- **VERIFIED ON THE INSTANCE 2026-08-15.** All ten steps ran. **Step 9 contradicted what this file
+  recorded the day before** — the four findings are immediately above.
 
 ### Deviations from the brief, and why
 
@@ -189,6 +198,120 @@ upstream to contradict it when it is wrong.
   entry in `JOB_FUNCTIONS` makes `build_scheduler()` refuse to start, by design.
 - **Migration `0020` uses `site_id`, not `usgs_site_id`**, following the brief's column list. It still
   carries the foreign key to `gauges`.
+
+---
+
+## PHASE 5 — VERIFIED ON THE INSTANCE, 2026-08-15. COMPLETE.
+
+**The build ran, and it changed what this project believes about its own thesis.** The raw-discharge
+relationship recorded on 2026-08-14 was substantially calendar; the relationship that survives
+deseasonalization is a *duration* one, and it reverses on recovery.
+
+### What was built
+
+| | Rows |
+|---|---|
+| `gauge_daily` | **32,462** |
+| `features` | **162,310** — exactly 5 registered features × 32,462 daily rows |
+| `targets` | **3,540** — 1,180 Cairo-Memphis weeks × 3 horizons |
+
+**70 seconds from scratch** (`--from-scratch --start 1990-01-01`), and **the idempotent rerun wrote
+0 rows** — decision 8's claim measured rather than asserted. `IS DISTINCT FROM` is what makes that a
+real number; a plain `DO UPDATE` would have reported all 198,312 rows as written and looked fine.
+
+### FINDING 1 — the deseasonalized LEVEL relationship is WEAK. Caution 2 was right.
+
+This is the finding, and it is a correction to what this file recorded yesterday.
+
+**On 2022-08-09 the discharge anomaly was `+18,095` — ABOVE seasonal normal — while rates had
+already begun climbing.** And **the deepest anomalies of 2022 fall in July and in November, not
+during the September–October rate spike.** The level was not unusually low when the market moved,
+and it was at its most unusual when the market was not moving.
+
+**So the raw-discharge story recorded on 2026-08-14 was substantially calendar.** Both events are
+autumn harvest, when rates rise regardless of hydrology; removing the calendar removes most of what
+made the two raw series look aligned. That is exactly what caution 2 said might happen, and it
+happened. **`CLAUDE.md § 0`: when a measurement contradicts the plan, the measurement wins.** The
+7.2× rate move is real and the 58% discharge decline is real; what is now in doubt is that the
+*level* of discharge is the variable connecting them.
+
+### FINDING 2 — the DURATION relationship is strong on onset, and REVERSES on recovery
+
+`days_below_p10` at Memphis, against the Cairo-Memphis nearby rate:
+
+| `days_below_p10` | Rate |
+|---|---|
+| **0**, held for eleven weeks | 335 → 656 (drifting) |
+| **2 → 9 → 16 → 23** | **925 → 1,428 → 2,427 → 2,812** |
+| **30 → 37 → 44 → 51 → 58** | declining from the 2,812 peak |
+
+**The rate peaked at 23 days below and then declined through 30, 37, 44, 51 and 58 days below.**
+Duration drives the ONSET; it does not drive the RECOVERY. The market stops paying for a constraint
+that is still tightening.
+
+**This is the recovery-side asymmetry recorded yesterday as an observation, now visible in a
+constructed feature rather than in two eyeballed series** — and it is sharper here than it was
+there. It is also why a single correlation over a whole event would be near useless: it would
+average a strong positive onset against a strong negative recovery and report approximately nothing.
+
+**Still n = 2.** The confidence gate needs ≥4 analogs and ≥70% directional consistency. Nothing
+above is a finding the output contract may quote yet.
+
+### FINDING 3 — `discharge_min` is a duplicate of `discharge_mean` almost everywhere
+
+Wherever `n_observations = 1`, `value_min` **is** the published daily mean — which is what migration
+`0019` predicted in writing, and the measurement confirms the scale of it:
+
+- **Memphis and Vicksburg: entirely.** Every row.
+- **Baton Rouge: 95%.**
+- Real sub-daily minima exist only at **St. Louis IV (6,880 days)** and **Baton Rouge IV (366
+  days)**.
+
+`n_observations` is what makes this visible instead of a silent duplication, and this is the column
+justifying its existence on the first run. **The consequence for Phase 6: `discharge_min` and
+`discharge_mean` are the same series at two of the four gauges, so a sweep treating them as
+independent inputs is scanning one variable twice at those sites.** Nothing is changed here on the
+strength of it — a real minimum is still the right thing to want, and the coverage may improve as
+instantaneous retention accumulates.
+
+### FINDING 4 — the eight-year climatology guard NEVER FIRED, and is therefore untested
+
+`climatology_n_years` runs **11 to 37 across every row, with no NULLs anywhere.** Live verification
+step 3 expected a substantial NULL-anomaly population in Memphis's early years and found none.
+
+**The guard holds by luck of coverage, not by demonstration.** Memphis's *daily* record starts
+2014-10-01, which was the reasoning behind choosing eight years — but the 15-day smoothing window
+pools distinct calendar years across the whole window, and with 35 years available at two sites and
+a decade at the others, every day-of-year clears the bar comfortably.
+
+**This is recorded as a gap, not as a success.** The unit tests exercise the guard directly and go
+red when it is removed (mutation row 2), so the *mechanism* is confirmed; what has never been
+exercised is the guard **on real data**. If a fifth gauge is ever seeded with a short record, that is
+the first run where this matters and the first run where nobody will have seen it work.
+
+### FIXED IN THE SAME COMMIT — the test suite had become flaky, and Phase 5 caused it
+
+Writing this up surfaced a **`DeadlockDetected` in the schema-reset fixture, on roughly one full-suite
+run in four.** Measured before the fix: 1 error in 4 runs; after: 12 clean runs in 12.
+
+**Phase 5 caused it, and the mechanism is worth keeping.** The reset dropped tables **one statement
+per table**, from a catalog scan with no `ORDER BY`, each `CASCADE` taking locks on that table's
+dependents. `gauge_daily` and `features` both added foreign keys to `gauges`, widening the dependency
+graph — so fifteen separately-locked statements in a varying order, racing TimescaleDB's background
+workers on the two hypertables, became fifteen windows for a lock cycle. Naming every table in **one
+`DROP`** closes the window: Postgres takes the whole lock set in a single operation.
+
+**This was a flaky test fixture, not a defect in anything under `app/`** — but it is recorded here
+rather than fixed quietly, because a suite that fails one run in four is a suite whose failures stop
+being read, and that ends the same way a muted alert does. Applied to all three `conftest.py`
+copies, which are duplicated deliberately.
+
+### Deviations and standing debts
+
+- **The two Phase 4 thesis tables are STILL owed their verbatim output**, and now so are the two
+  2022 deseasonalized tables. The figures above are the anchor points this session was given; the
+  row-by-row output was not, and it is not invented here (`CLAUDE.md § 4`). Every number above is
+  checkable by re-running the queries in `§ Up Next`.
 
 ---
 
@@ -1369,53 +1492,66 @@ Bring the stack up with `docker compose -f docker-compose.yml -f /root/dws-local
 Delete it once the `worker` service is containerized; at that point `DATABASE_URL` becomes
 `timescaledb:5432` and nothing needs a published port.
 
-## PHASE 5'S LIVE VERIFICATION — RUN THIS NEXT
+## PHASE 6 — THE ±LAG SCAN. THIS IS NEXT.
 
-**Phase 4 is done and its outcome is recorded at the top of this file.** What is outstanding is
-Phase 5's own procedure, and its step 9 answers caution 2 from the thesis observation — whether the
-relationship survives removing the calendar.
+**Phases 1–5 are all complete and verified on the instance.** Phase 5's verification is what shapes
+this phase, and it redirects it: the level relationship it was going to scan turned out to be mostly
+calendar, and a duration relationship turned up in its place.
 
-1. `python3 -m app.orchestration.migrate` — expect **0019–0021** applied, **twenty-one total**.
-2. Build from scratch: `time python3 -m app.features.build --from-scratch --start 1990-01-01`.
-   Report rows in `gauge_daily`, `features` and `targets`, plus wall time.
-3. **Confirm the eight-year guard is doing something rather than being decoration:**
-   ```sql
-   select feature_name, count(*) filter (where anomaly is null) as null_anomaly, count(*)
-     from features group by 1 order by 1;
-   ```
-   **Memphis features should show a substantial NULL-anomaly population in its early years; St.
-   Louis should show very few.** The `days_below_*` features are NULL-anomaly by construction — a
-   run length has no meaningful climatology — so read only the two `discharge_*` rows for this.
-4. **Confirm the threshold counter resets rather than zeroing across the Baton Rouge 2023 gap:**
-   query `days_below_*` for `07374000` across 2023-01-01 to 2023-09-01. **Expect no rows at all
-   through the gap** — nothing was observed, so nothing is derived — **and NULL on the first rows
-   after 2023-08-14, not a run of zeros.** A zero anywhere in that re-entry is the failure.
-5. **Confirm no lookahead in the join** — for a sample of ten week-endings, verify the feature date
-   used is `<=` the week ending.
-6. Idempotence: run the build twice over the same window; **confirm the second run reports 0 rows
-   written**, not "the same values again".
-7. `python3 -m verify.preflight` — six gates green.
-8. Start the scheduler; confirm `features_build` fires and writes a `job_runs` row.
-9. **RE-RUN THE 2022 AND 2023 THESIS QUERIES AGAINST THE DESEASONALIZED ANOMALY** rather than raw
-   discharge — join `features` where `feature_name = 'discharge_min'` and use `anomaly` in place of
-   `avg(g.value)`. **Report whether the relationship survives removing the calendar.** Both events
-   are autumn harvest, when rates rise regardless of hydrology, so some of that 7.2× is calendar.
-   **If the relationship weakens substantially, that is the finding and it goes in `CONTEXT.md` as
-   such** (`CLAUDE.md § 0`: when a measurement contradicts the plan, the measurement wins).
-10. **Write the outcome back in the same session**, and set `§ Up Next` to Phase 6.
+### Point the scan at `days_below_*` FIRST, not at level or anomaly
 
-**AND WHILE YOU ARE THERE — the two Phase 4 queries below are still owed their verbatim output.**
-They are cheap, the database holds them, and the section at the top of this file records anchor
-points where it should record tables. Paste both results in.
+This is the instruction, and it is a change of plan backed by a measurement (findings 1 and 2 above).
 
-**PHASE 6 IS NEXT, AND THE FIRST THING ITS ±LAG SCAN SHOULD BE POINTED AT IS THE RECOVERY-SIDE
-ASYMMETRY.** In both 2022 and 2023 the rate PEAKED BEFORE DISCHARGE BOTTOMED — two weeks in 2022,
-three in 2023 — while onset looked like the physical constraint leading. If that survives a proper
-walk-forward lead-lag sweep it changes the claim from "the physical signal leads" to "the market
-prices the forecast on the way out", and **that reversal becomes the story rather than a footnote**.
-Scan both signs of lag, and scan onset and recovery separately: a single correlation over the whole
-event would average the two halves into a number that describes neither. Remember n = 2 and the
-confidence gate's ≥4 analogs — the sweep is where this stops being two aligned pictures.
+- **`discharge_mean` / `discharge_min` anomalies are the weak candidate.** On 2022-08-09 the anomaly
+  was `+18,095` — above normal — while rates were already climbing, and the deepest 2022 anomalies
+  sit in July and November rather than in the September–October spike. Scan them, but do not expect
+  them to carry the relationship, and **do not tune them until they have failed honestly.**
+- **`days_below_p05` / `p10` / `p20` are the strong candidate.** At Memphis, `days_below_p10` held 0
+  for eleven weeks while the rate drifted 335 → 656, then went 2 → 9 → 16 → 23 as the rate went
+  925 → 1,428 → 2,427 → 2,812.
+- **`discharge_min` and `discharge_mean` ARE THE SAME SERIES at Memphis and Vicksburg** (finding 3),
+  so treating them as two independent inputs scans one variable twice at half the sites. Either
+  restrict `discharge_min` to St. Louis and Baton Rouge or report the duplication in the results.
+
+### EXPECT THE ONSET/RECOVERY ASYMMETRY TO NEED SEPARATE TREATMENT
+
+The rate **peaked at 23 days below and declined through 30, 37, 44, 51 and 58 days below.** Duration
+drives the onset; it does not drive the recovery, and the market stops paying for a constraint that
+is still tightening.
+
+**A single correlation over a whole event would average a strong positive onset against a strong
+negative recovery and report approximately nothing** — which would read as "no relationship" and
+would be the most expensive wrong answer available here. Scan the two regimes separately, and scan
+**both signs of lag**: the reversal is the interesting part, not a nuisance to be smoothed.
+
+**Walk-forward with a gap, and honour the confidence gate.** `CLAUDE.md § 7`: ≥4 analogs and ≥70%
+directional consistency, else "insufficient history". **Everything above is still n = 2.** The sweep
+is where this stops being two aligned pictures — and if it does not survive, that is the result.
+
+### Standing debts to clear while you are in there
+
+1. **Four query outputs are owed verbatim** and the log records anchor points where it should record
+   tables: the two Phase 4 raw-discharge queries (2022 and 2023) and the two Phase 5 deseasonalized
+   ones. Cheap to re-run, and every figure in both write-ups is checkable against them.
+2. **The eight-year climatology guard has never fired on real data** (finding 4) —
+   `climatology_n_years` runs 11 to 37 with no NULLs anywhere. The mechanism is confirmed by unit
+   test and mutation; its behaviour on a short record is not. **If a fifth gauge is seeded, that is
+   the first run where it matters and the first where nobody will have seen it work.**
+3. **Absolute operational thresholds are still a human decision awaiting a source.** The `p05`/`p10`/
+   `p20` percentiles are stand-ins (`CLAUDE.md § 1`), and Phase 6 is where their arbitrariness starts
+   to matter — a lag scan over three arbitrary levels is three arbitrary answers.
+4. **No movements feature exists**, because `lock_movements` is sparse (MS Lock 15: 1,434 zeros of
+   2,840 rows) and nobody has decided whether to aggregate across commodities before differencing.
+   The volume half of the target is unused until that is settled.
+
+---
+
+### Phase 5's live verification, retained for its step-9 queries
+
+**Phase 5 — DONE on the instance 2026-08-15.** Outcomes at the top of this file. Step 9 is the one
+worth keeping: re-run the 2022 and 2023 thesis queries against `features` where
+`feature_name = 'discharge_min'`, using `anomaly` in place of `avg(g.value)`, and paste both tables
+into the write-up.
 
 ---
 

@@ -205,33 +205,51 @@ def database_url():
 # in one pytest invocation (see CONTEXT.md, provisioning 1). A shared helper here would be a
 # third import path into the same collision.
 RESET_SCHEMA_SQL = """
+-- ONE `DROP TABLE` STATEMENT FOR EVERY TABLE, NOT ONE STATEMENT PER TABLE.
+--
+-- The per-table loop this replaces DEADLOCKED roughly one run in four once Phase 5 added
+-- `gauge_daily` and `features`, both of which carry foreign keys to `gauges`. Two things combined:
+-- the catalog scan has no ORDER BY, so the drop order varied run to run, and each CASCADE takes
+-- locks on that table's dependents. Fifteen separate statements against a widening dependency
+-- graph, racing TimescaleDB's background workers on the two hypertables, is fifteen windows for a
+-- lock cycle.
+--
+-- Naming every table in a single DROP closes the window: Postgres takes the whole lock set in one
+-- operation instead of accumulating it across statements. The failure was a FLAKY TEST FIXTURE
+-- rather than a defect in anything under app/ - but a suite that fails one run in four is a suite
+-- whose failures stop being read, which is the same ending as a muted alert.
 DO $$
 DECLARE
-    obj record;
+    idents text;
 BEGIN
-    FOR obj IN
-        SELECT format('%I.%I', n.nspname, c.relname) AS ident
-          FROM pg_class c
-          JOIN pg_namespace n ON n.oid = c.relnamespace
-         WHERE n.nspname = 'public'
-           AND c.relkind IN ('r', 'p')
-           AND NOT EXISTS (
-                 SELECT 1 FROM pg_depend d WHERE d.objid = c.oid AND d.deptype = 'e')
-    LOOP
-        EXECUTE format('DROP TABLE IF EXISTS %s CASCADE', obj.ident);
-    END LOOP;
+    SELECT string_agg(format('%I.%I', n.nspname, c.relname), ', ')
+      INTO idents
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'public'
+       AND c.relkind IN ('r', 'p')
+       AND NOT EXISTS (
+             SELECT 1 FROM pg_depend d WHERE d.objid = c.oid AND d.deptype = 'e');
 
-    FOR obj IN
-        SELECT format('%I.%I(%s)', n.nspname, p.proname,
-                      pg_get_function_identity_arguments(p.oid)) AS ident
-          FROM pg_proc p
-          JOIN pg_namespace n ON n.oid = p.pronamespace
-         WHERE n.nspname = 'public'
-           AND NOT EXISTS (
-                 SELECT 1 FROM pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e')
-    LOOP
-        EXECUTE format('DROP FUNCTION IF EXISTS %s CASCADE', obj.ident);
-    END LOOP;
+    -- NULL rather than empty when nothing matched: string_agg over no rows returns NULL, and
+    -- `DROP TABLE IF EXISTS  CASCADE` is a syntax error rather than a no-op.
+    IF idents IS NOT NULL THEN
+        EXECUTE format('DROP TABLE IF EXISTS %s CASCADE', idents);
+    END IF;
+
+    SELECT string_agg(
+               format('%I.%I(%s)', n.nspname, p.proname,
+                      pg_get_function_identity_arguments(p.oid)), ', ')
+      INTO idents
+      FROM pg_proc p
+      JOIN pg_namespace n ON n.oid = p.pronamespace
+     WHERE n.nspname = 'public'
+       AND NOT EXISTS (
+             SELECT 1 FROM pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e');
+
+    IF idents IS NOT NULL THEN
+        EXECUTE format('DROP FUNCTION IF EXISTS %s CASCADE', idents);
+    END IF;
 END $$;
 """
 
