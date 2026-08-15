@@ -3,9 +3,192 @@
 This is the **log**: current state, decisions as they are made, and `§ Up Next`. Stable contracts
 live in `CLAUDE.md`. If something here hardens into an invariant, move it there and note the move.
 
-**Last updated:** 2026-08-14 (Phase 3 VERIFIED ON THE INSTANCE and written back; Phase 4 USDA
-ingest written offline, then corrected against the live USDA API TWICE, then closed out — the
-close-out, which answers the open `tons` measurement, is directly below)
+**Last updated:** 2026-08-14 (**PHASE 4 IS COMPLETE AND VERIFIED ON THE INSTANCE.** Both halves of
+the thesis now exist in one database and have been looked at together for the first time — the
+outcome is directly below. Phase 5, the normalizer and feature layer, is written offline in the same
+commit as this writeback.)
+
+---
+
+## PHASE 4 — VERIFIED ON THE INSTANCE, 2026-08-14. COMPLETE.
+
+**Landed:** three rate horizons at **8,260 rows each — 24,780 total** — plus **26,144 movement
+rows**. Every dataset matched its seeded `source_row_count` **exactly**; nothing truncated.
+
+**Paging behaved as designed on every dataset:** a short page mid-sequence, then an empty page
+terminating the loop. That is `CLAUDE.md § 16`'s first bullet working live — the `while len(page)
+== limit` loop this project refused to write would have stopped at the short page and reported a
+truncated dataset as a complete one, on real data, with a plausible row count.
+
+### Rate nullity — winter navigation closure, as measured
+
+774 of 8,260 on nearby, concentrated December–March on the upper segments: **Twin Cities 426**,
+**Mid-Mississippi 303**, and **Cairo-Memphis only 3** — so the segment the output contract names has
+**1,177 of 1,180 weeks**. Comparable shapes on the two forward horizons (**705** and **721** absent).
+
+### Movement nullity — a reporting gap, not a closure, as measured
+
+108 of 26,144 absent, confined to the three summary locks (**AK Lock 1 71, OH Olmsted 26, MS Locks
+27 11**), 96 of them in 2015–2016, flat across months. Separately, **8,218 records (31%) report an
+explicit zero**, which is the published way of saying nothing moved. **The two populations are never
+summed** — `0018`'s whole argument, confirmed against the full dataset.
+
+### NEW OBSERVATION — `lock_movements` is SPARSE, and it changes how features may use it
+
+Reported zeros are the majority or near it at several locks: **MS Lock 15 has 1,434 zeros of 2,840
+rows.** `lock_movements` is a **sparse per-commodity weekly series**, and any feature built on it
+**must decide explicitly whether to aggregate across commodities before differencing.** Differencing
+a per-commodity series that is half zeros produces a sequence of spikes and reversions that looks
+like volatility and is mostly the reporting grain.
+
+**Nothing in Phase 5 builds a movements feature**, precisely because that decision has not been
+made. The feature layer is discharge-only for now; see `§ Up Next`.
+
+### THE FIRST LOOK AT THE THESIS — 2022 and 2023, Cairo-Memphis nearby against Memphis discharge
+
+**2022.** Discharge fell from **~368,000 cfs** (week ending 08-02) to **153,143** (10-25) — a **58%
+decline**. The rate rose from **388** to **2,812.5** — a **7.2× rise** — peaking **10-11**.
+Discharge began declining around **08-09**; the rate began climbing hard around **08-30**, so **the
+rate follows onset by roughly two to three weeks.** Recovery was symmetric: discharge rebounded
+through November and the rate fell back with it.
+
+**2023.** The same shape at smaller amplitude. Discharge **372,143** (08-15) → **139,000** (10-17);
+the rate **335.9** → **1,688.9**, peaking **09-26**.
+
+> **THE FULL WEEK-BY-WEEK RESULT SETS ARE NOT REPRODUCED HERE, AND THE REASON IS THE POINT.** The
+> brief asked for both tables verbatim; the session that wrote this had the anchor points above and
+> **not** the row-by-row output, and this project does not fill in a series it was not given
+> (`CLAUDE.md § 4`: when data is lost, record the loss — never synthesize a replacement).
+> Interpolating ~26 plausible weekly rows between the measured endpoints would produce a table that
+> reads as measured and is not. **Re-run the two queries in `§ Up Next` and paste both outputs here**
+> — they are cheap, the database holds them, and every number above is checkable against them.
+
+### The observation worth carrying forward — stated as an observation, not a finding
+
+**In both years the rate peaked BEFORE discharge bottomed** — by two weeks in 2022 (rate peak 10-11,
+discharge trough 10-25) and by three weeks in 2023 (rate peak 09-26, discharge trough 10-17). Onset
+looks like the physical constraint leading; recovery looks like the market anticipating. That is
+consistent with **operators pricing published river forecasts**, which is the risk the handoff named
+— arriving as a **nuance rather than a refutation**. And it must never be quoted without these
+three cautions, which is why they are in the same paragraph as the claim: **(1) n = 2** — the
+project's own confidence gate requires ≥4 analogs and ≥70% directional consistency, and two aligned
+series eyeballed together is the single most common way to believe a relationship that does not
+survive a lead-lag sweep; **(2) seasonality is unaccounted for** — both events are autumn harvest,
+when rates rise regardless of hydrology, so some of that 7.2× is calendar rather than constraint,
+and removing it is exactly what Phase 5's deseasonalization exists to do; **(3) the join was a
+weekly mean over a trailing six days**, which smooths away the sub-weekly timing that would
+distinguish leading from lagging.
+
+**NOTHING IN PHASE 5 IS TUNED ON THE BASIS OF THAT OBSERVATION.** Phase 6's ±lag scan measures it.
+The recovery-side asymmetry is named in `§ Up Next` as the first thing that scan should be pointed
+at.
+
+### 1b — `gauge_daily` and `gauge_series` are different things, and neither replaces the other
+
+`gauge_daily` appears in the original handoff's schema sketch as a rollup table; Phase 5's `0019`
+creates it. It is **not** a replacement for the Phase 3.5 view, and the distinction is worth stating
+because the names invite the confusion:
+
+| | What it answers |
+|---|---|
+| `gauge_series` (view, `0010`) | **Source precedence** per site-date-param: which of the two reading tables this day's value comes from, and it exposes `source` so the seam stays visible. |
+| `gauge_daily` (table, `0019`) | **Derived daily statistics** — mean, min, max, observation count — computed *from* that view plus the sub-daily record. |
+
+The rollup reads the view rather than the reading tables, so the precedence rule has exactly one
+implementation (`CLAUDE.md § 15`). `gauge_daily` carries the view's `source` column through, so a
+consumer sees the seam without re-joining.
+
+---
+
+## Phase 5 — the normalizer and feature layer, written offline 2026-08-14
+
+Three migrations (`0019` `gauge_daily`, `0020` `features`, `0021` `targets`), six modules under
+`app/features/`, one cadence entry, one freshness entry. **The first derived data in this project**,
+which is what the new `CLAUDE.md § 17` exists to govern: everything under `app/ingest/` writes what a
+source published, and everything here writes something this project computed — a number with nothing
+upstream to contradict it when it is wrong.
+
+### Decisions worth reading before changing anything here
+
+- **`gauge_daily` stores mean AND minimum, and the minimum is the thesis-relevant one.** A barge's
+  draft is bound by the shallowest point at the moment it transits; an adequate-looking daily mean
+  can contain hours during which the channel bound. Both are stored and Phase 6 decides.
+- **`n_observations` is what makes `value_min` honest, and it is NOT NULL.** A minimum over one
+  observation *is* the mean, and instantaneous retention is a rolling window at three of four gauges
+  — so most of history arrives as `dv` rows with `n_observations = 1`. Without the column, a feature
+  reading `value_min` would draw conclusions about "the minimum" that are conclusions about the mean
+  with a more alarming name.
+- **The rollup reads `gauge_series` for the value and source, and `gauge_readings_iv` for dispersion
+  only.** The view is already aggregated to a mean, so a rollup reading *only* it would produce
+  `value_min = value_max = value_mean` on every row in the database. The precedence decision is still
+  the view's alone, and the join cannot misattribute: a `dv` row exists only where no `iv` row does,
+  by the view's own `NOT EXISTS`.
+- **Climatology is the MEDIAN, smoothed over 15 days, NULL below 8 years.** The 2022 and 2023 events
+  are in the history the baseline is fitted on — a mean lets them depress the baseline they are
+  measured against, so each event partly erases its own signal. Eight years rather than five or ten:
+  five leaves a median of five deciding what "normal October" means; ten would refuse Memphis's whole
+  useful record, since its daily series starts 2014-10-01 and the interesting events are 2022–2023.
+- **February 29 folds onto day 59.** Its own bucket would hold a quarter of every neighbour's
+  observations, so it would be noisier by construction and would fail the eight-year guard for
+  thirty-two years while February 28 passed comfortably. Folding also keeps March 1 on day 60 in both
+  year types, which is the property the whole day-of-year comparison depends on.
+- **Run lengths reset to NULL across a gap, and knowledge returns on the first day at or above the
+  threshold** — no run can span such a day, so it is a definite zero regardless of history. That is
+  why the unknown state is escaped by an ordinary observation rather than by a rule with edge cases.
+- **THE THRESHOLDS ARE PERCENTILE STAND-INS AND ABSOLUTE OPERATIONAL THRESHOLDS ARE STILL A HUMAN
+  DECISION AWAITING A SOURCE.** `CLAUDE.md § 1` puts "threshold values that define an event" on the
+  never-delegate list. This commit builds the mechanism and seeds it with the 5th, 10th and 20th
+  percentiles of each site's own record, because a percentile is a *property of the data* rather than
+  a judgement about the river and is self-documenting in a way `LOW_WATER_CFS = 150000` is not. A
+  test asserts no absolute level appears in the module. **When operational thresholds arrive with a
+  source, they replace the seeds and that is its own commit.**
+- **The feature-to-target join is a leakage guard.** Nearest-date matching would let a feature dated
+  after a week-ending inform that week's target — one or two days of lookahead, in no schema, making
+  the relationship look slightly better than it is. Note the test detail: **against a dense daily
+  series both implementations agree**, so the guard has to be built on a sparser series or it is
+  vacuous exactly where it matters.
+- **Targets are forward log-returns at 7/14/21 days.** The 2022 move was +625% up and −86% back down
+  as percent changes — the same move with magnitudes differing sevenfold. The forward week is looked
+  up by **exact date**, never by position: `rates[i + 1]` reaches silently across a gap and records a
+  fortnight's move under horizon 7.
+- **No pandas.** The brief allowed dataframes or sequences; these are sequences. The arithmetic is
+  medians, windows and run lengths over tens of thousands of daily rows, and adding pandas to a pinned
+  runtime for that is a large permanent cost for convenience in about two hundred lines.
+- **NOTHING BUILDS A MOVEMENTS FEATURE**, because of the sparsity finding recorded above: half of
+  `MS Lock 15`'s rows are explicit zeros, and whether to aggregate across commodities before
+  differencing has not been decided. The feature layer is discharge-only until it is.
+- **`features_build` does not wait for the ingest jobs and nothing orders them.** If a source is
+  stale the features are stale, and the freshness registry says so. Ordering logic here would be a
+  DAG runner inside APScheduler — this phase's version of the streaming daemon `CLAUDE.md § 6`
+  refuses. Grace **43,200s against an interval of 86,400s, confirmed by measurement.**
+
+### Status
+
+- **283 tests green with zero skips** against a throwaway local TimescaleDB container on the pinned
+  image; offline the same suite is `201 passed, 82 skipped`. The previous baseline was 244.
+- **All 14 mutation-table rows confirmed**, each watched red on its own assertion, restored, with
+  `__pycache__` cleared between restore and re-run. **No row needed a second pass.**
+- **`0019`–`0021` are new; nothing in `0001`–`0018` was edited.** Twenty-one migrations apply clean.
+- **NOT YET RUN ON THE INSTANCE.** The from-scratch build and step 9 — re-running the thesis query
+  against the deseasonalized anomaly — are outstanding. See `§ Up Next`.
+
+### Deviations from the brief, and why
+
+- **`tests/features/test_rollup.py`'s tests 1, 2, 3 and 5 are INTEGRATION, not unit.** The rollup is
+  SQL by decision 2 — it must read the view so the precedence rule has one implementation, and test 4
+  pins that by reading the SQL text. Writing a parallel Python aggregation so the min/mean/max
+  arithmetic could be unit-tested **would be the second implementation decision 2 exists to prevent**,
+  reintroduced by the test suite. The hand-built day is inserted into a real database and the real
+  SQL is run over it instead. Recorded in the suite's own docstring.
+- **`tests/orchestration/test_heartbeat.py` was modified**, which the brief's file list did not
+  mention. Its `test_freshness_registry_covers_every_ingest_table` asserts **exact set equality**, so
+  registering `features` turned it red — the guard working as designed. Updated deliberately, with
+  the reasoning for why a *derived* table belongs in that registry, and why `targets` and
+  `gauge_daily` do not (one job, one transaction, one alert).
+- **`app/orchestration/scheduler.py` was modified**, also not in the list: a cadence entry with no
+  entry in `JOB_FUNCTIONS` makes `build_scheduler()` refuse to start, by design.
+- **Migration `0020` uses `site_id`, not `usgs_site_id`**, following the brief's column list. It still
+  carries the foreign key to `gauges`.
 
 ---
 
@@ -104,8 +287,8 @@ reached. It is recorded here as an observation, and that is all it is.
 - **All 7 mutation-table rows confirmed**, each watched red on its own assertion, restored, with
   `__pycache__` cleared between restore and re-run.
 - **`0018` is new; nothing in `0001`–`0017` was edited.** Eighteen migrations apply clean.
-- **NOT YET RUN ON THE INSTANCE.** The movements backfill, the per-lock confirmation, and **step 9 —
-  the first look at the thesis — are all outstanding.** See `§ Up Next`.
+- **VERIFIED ON THE INSTANCE 2026-08-14.** All ten steps ran, including step 9. The outcome —
+  including both thesis tables and the observation they produced — is recorded immediately below.
 
 ### Mutation notes — two rows needed a second pass
 
@@ -1186,13 +1369,59 @@ Bring the stack up with `docker compose -f docker-compose.yml -f /root/dws-local
 Delete it once the `worker` service is containerized; at that point `DATABASE_URL` becomes
 `timescaledb:5432` and nothing needs a published port.
 
-**PHASE 4 CLOSE-OUT — THE OUTSTANDING LIVE VERIFICATION, AND THE STEP THIS PROJECT HAS BEEN WORKING
-TOWARD. Take 2's steps 1–4 (migrate, the three rate backfills, the null-rate distribution) are
-done and recorded above; step 5's measurement is what `0018` lands. What remains is the movements
-backfill and the verification that has been accumulating across four commits.**
+## PHASE 5'S LIVE VERIFICATION — RUN THIS NEXT
 
-**When this passes, both halves of the thesis exist in one database for the first time, and
-`§ Up Next` becomes Phase 5 — the normalizer and features.**
+**Phase 4 is done and its outcome is recorded at the top of this file.** What is outstanding is
+Phase 5's own procedure, and its step 9 answers caution 2 from the thesis observation — whether the
+relationship survives removing the calendar.
+
+1. `python3 -m app.orchestration.migrate` — expect **0019–0021** applied, **twenty-one total**.
+2. Build from scratch: `time python3 -m app.features.build --from-scratch --start 1990-01-01`.
+   Report rows in `gauge_daily`, `features` and `targets`, plus wall time.
+3. **Confirm the eight-year guard is doing something rather than being decoration:**
+   ```sql
+   select feature_name, count(*) filter (where anomaly is null) as null_anomaly, count(*)
+     from features group by 1 order by 1;
+   ```
+   **Memphis features should show a substantial NULL-anomaly population in its early years; St.
+   Louis should show very few.** The `days_below_*` features are NULL-anomaly by construction — a
+   run length has no meaningful climatology — so read only the two `discharge_*` rows for this.
+4. **Confirm the threshold counter resets rather than zeroing across the Baton Rouge 2023 gap:**
+   query `days_below_*` for `07374000` across 2023-01-01 to 2023-09-01. **Expect no rows at all
+   through the gap** — nothing was observed, so nothing is derived — **and NULL on the first rows
+   after 2023-08-14, not a run of zeros.** A zero anywhere in that re-entry is the failure.
+5. **Confirm no lookahead in the join** — for a sample of ten week-endings, verify the feature date
+   used is `<=` the week ending.
+6. Idempotence: run the build twice over the same window; **confirm the second run reports 0 rows
+   written**, not "the same values again".
+7. `python3 -m verify.preflight` — six gates green.
+8. Start the scheduler; confirm `features_build` fires and writes a `job_runs` row.
+9. **RE-RUN THE 2022 AND 2023 THESIS QUERIES AGAINST THE DESEASONALIZED ANOMALY** rather than raw
+   discharge — join `features` where `feature_name = 'discharge_min'` and use `anomaly` in place of
+   `avg(g.value)`. **Report whether the relationship survives removing the calendar.** Both events
+   are autumn harvest, when rates rise regardless of hydrology, so some of that 7.2× is calendar.
+   **If the relationship weakens substantially, that is the finding and it goes in `CONTEXT.md` as
+   such** (`CLAUDE.md § 0`: when a measurement contradicts the plan, the measurement wins).
+10. **Write the outcome back in the same session**, and set `§ Up Next` to Phase 6.
+
+**AND WHILE YOU ARE THERE — the two Phase 4 queries below are still owed their verbatim output.**
+They are cheap, the database holds them, and the section at the top of this file records anchor
+points where it should record tables. Paste both results in.
+
+**PHASE 6 IS NEXT, AND THE FIRST THING ITS ±LAG SCAN SHOULD BE POINTED AT IS THE RECOVERY-SIDE
+ASYMMETRY.** In both 2022 and 2023 the rate PEAKED BEFORE DISCHARGE BOTTOMED — two weeks in 2022,
+three in 2023 — while onset looked like the physical constraint leading. If that survives a proper
+walk-forward lead-lag sweep it changes the claim from "the physical signal leads" to "the market
+prices the forecast on the way out", and **that reversal becomes the story rather than a footnote**.
+Scan both signs of lag, and scan onset and recovery separately: a single correlation over the whole
+event would average the two halves into a number that describes neither. Remember n = 2 and the
+confidence gate's ≥4 analogs — the sweep is where this stops being two aligned pictures.
+
+---
+
+### Phase 4's live verification, retained for the two queries still owed their output
+
+**Phase 4 close-out — DONE on the instance 2026-08-14.** Outcomes at the top of this file.
 
 1. `python3 -m app.orchestration.migrate` — expect **0018** applied, **eighteen total**.
 2. **Movements backfill:** `time python3 -m app.ingest.usda_backfill --dataset lock_movements`.
@@ -1261,10 +1490,12 @@ that a surprise arrives now rather than after three more phases have been built 
 10. **Write the outcome back in the same session**, including **the step 9 query output verbatim**,
     and set `§ Up Next` to Phase 5.
 
-**STEP 9 OUTPUT — NOT YET RUN.** Nothing has looked at the two series together. This slot stays
-empty until the instance run fills it, and an empty slot is the honest state: `CLAUDE.md § 0`'s
-"report what you verified, not what you intended", and the process note above about this file
-sitting three commits behind reality.
+**STEP 9 — RUN 2026-08-14. THE ANCHOR POINTS ARE RECORDED AT THE TOP OF THIS FILE; THE FULL TABLES
+ARE STILL OWED.** The session that wrote the Phase 5 commit received the endpoints, the peaks and
+the troughs, and not the row-by-row output — and did not invent the intervening weeks
+(`CLAUDE.md § 4`: never synthesize a replacement). **Both queries above are still the ones to
+re-run**, and their output belongs in the `PHASE 4 — VERIFIED` section at the top, replacing the
+note that says so.
 
 **Known risks worth watching.** `date` is a SoQL type name as well as the column name; if the
 service rejects it as a bare identifier, `parse_page` raises `SocrataResponseError` carrying

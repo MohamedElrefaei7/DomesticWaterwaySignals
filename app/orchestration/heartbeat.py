@@ -154,6 +154,32 @@ FRESHNESS: tuple[Freshness, ...] = (
         # exactly. They have separate jobs, so they have separate entries.
         max_staleness=timedelta(days=10),
     ),
+    Freshness(
+        job_name="features_build",
+        # THE FIRST DERIVED TABLE IN THIS REGISTRY, and it is registered for a reason none of the
+        # ingest entries have.
+        #
+        # An ingest table goes stale when a SOURCE goes quiet. `features` goes stale when THE BUILD
+        # stops - and the build is the one job whose failure is otherwise invisible from the data,
+        # because every table it reads stays perfectly fresh while it does nothing. A green
+        # heartbeat covering only the four ingest tables would mean "everything we collect is
+        # arriving", which is true, and says nothing about whether anything is being computed from
+        # it. That is CLAUDE.md § 2's theme 2 with an entire layer inside the blind spot.
+        table="features",
+        # `date`, the day the feature describes - never an inserted_at. An inserted_at would
+        # measure that the build wrote something, which is the process measurement this check
+        # exists to replace.
+        timestamp_column="date",
+        # FORTY-EIGHT HOURS, derived from what FEEDS it rather than from the build's own interval.
+        #
+        # The newest feature date can only be as new as the newest gauge_daily date, which comes
+        # from the daily-values job whose own threshold is 48 hours. A tighter threshold here would
+        # fire on ordinary USGS publication lag and report the build broken when it had correctly
+        # computed everything available - and the operator would then be reading two alarms for one
+        # cause, with the wrong one on top. Equal to its input's threshold means this speaks when
+        # the build has genuinely stopped, and stays quiet when it is merely waiting.
+        max_staleness=timedelta(hours=48),
+    ),
 )
 
 

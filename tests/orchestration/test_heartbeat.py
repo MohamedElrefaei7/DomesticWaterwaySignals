@@ -499,6 +499,21 @@ def test_freshness_registry_covers_every_ingest_table(migrated_db, database_url)
     Asserted as EXACT SET EQUALITY, not `>=`. A subset assertion passes with a table missing,
     which is precisely the change this catches - so a new ingest table turns this red until it is
     named here, deliberately, in the commit that creates it. Phase 4 adds the two USDA tables.
+
+    PHASE 5 ADDS `features`, WHICH IS NOT AN INGEST TABLE, and that is a deliberate widening of
+    what this registry covers rather than an exception slipped past the equality check.
+
+    An ingest table goes stale when a SOURCE goes quiet. `features` goes stale when THE BUILD
+    stops - and the build is the one job whose failure is invisible from the data, because every
+    table it reads stays perfectly fresh while it does nothing. A heartbeat covering only the four
+    ingest tables would report green meaning "everything we collect is arriving", which would be
+    true and would say nothing about whether anything was being computed from it: CLAUDE.md § 2's
+    theme 2 with a whole layer inside the blind spot.
+
+    `targets` and `gauge_daily` are NOT registered, and the omission is reasoned. All three tables
+    are written by the same job in the same transaction, so one entry reports on all three - and
+    three entries would produce three alerts for one cause with no way to tell which to read first.
+    `features` is the one chosen because it is the layer everything downstream consumes.
     """
     registered = {f.table for f in heartbeat.FRESHNESS}
     assert registered == {
@@ -506,9 +521,11 @@ def test_freshness_registry_covers_every_ingest_table(migrated_db, database_url)
         "gauge_readings_daily",
         "barge_rates",
         "lock_movements",
+        "features",
     }, (
         f"the freshness registry covers {sorted(registered)}. Every ingest table must be "
-        f"registered in the commit that creates it (CLAUDE.md § 12)."
+        f"registered in the commit that creates it (CLAUDE.md § 12), and the derived layer is "
+        f"registered too - see this test's docstring for why that is not an exception."
     )
 
     # Every entry names a job that is actually scheduled - a freshness entry for a job nothing

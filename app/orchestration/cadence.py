@@ -215,6 +215,27 @@ CADENCES: tuple[Cadence, ...] = (
         interval=timedelta(seconds=604800),
         overdue_after=timedelta(days=14),
     ),
+    Cadence(
+        job_name="features_build",
+        # DAILY, and it is the first entry here that is not an ingest job.
+        #
+        # The build reads what ingest has landed and recomputes a trailing window. Daily matches
+        # the fastest thing feeding it that changes a daily row - the daily-values job - and there
+        # is no fresher answer partway through a day.
+        #
+        # IT DOES NOT WAIT FOR THE INGEST JOBS, AND NOTHING ORDERS THEM. If a source is stale the
+        # features are stale, and the freshness registry is what says so - `features` has its own
+        # 48-hour entry. Adding ordering logic here would be building a DAG runner inside
+        # APScheduler, which is this phase's version of the streaming daemon CLAUDE.md § 6
+        # refuses. The build is idempotent and bounded, so a run against unchanged inputs writes
+        # nothing and costs seconds.
+        interval=timedelta(seconds=86400),
+        # Three intervals, matching the other daily entry. One missed build is a blip - the next
+        # run recomputes the same window anyway, since the window is trailing rather than
+        # incremental. Three days silent means the derived layer is drifting behind the ingested
+        # one, which nothing downstream would otherwise report.
+        overdue_after=timedelta(days=3),
+    ),
 )
 
 BY_NAME: dict[str, Cadence] = {c.job_name: c for c in CADENCES}

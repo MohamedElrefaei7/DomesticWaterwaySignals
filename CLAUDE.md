@@ -673,3 +673,68 @@ pages. Every bullet describes a failure that reports success.
   nothing about the river. **A column comment copied from the sibling asserts something unverified**,
   and it is worse than an absent comment: it reads as measured, it is the thing the next reader
   reasons from, and the two shapes look identical in the diff. Same handling is not same meaning.
+
+---
+
+## 17. Derived data conventions
+
+Learned building the normalizer and feature layer (Phase 5). §§ 14–16 govern data a source
+published; this governs data **this project computed**. The difference is that a derived value has
+nothing upstream to contradict it — every bullet below describes a number that is plausible, smooth,
+and wrong, with no source to check it against.
+
+- **Derived tables are rebuilt by bounded-window upsert, never by truncate-and-rebuild. A full
+  rebuild requires an explicit start date and still upserts.** A derived table *can* always be
+  recomputed, which is exactly what makes the destructive path attractive and exactly why it is not
+  built: **the truncate always succeeds**, so a rebuild that raises halfway leaves the table shorter
+  than it was with nothing upstream holding a second copy. Recomputing a window means a defect
+  corrupts a window. A `--from-scratch` flag that defaults to "everything" is indistinguishable in a
+  shell history from the bounded run somebody meant — the scope of a full rebuild is **stated, never
+  inherited**.
+- **A climatology uses the median, and is NULL below a stated minimum number of years, with that
+  count stored alongside every value.** The median because **the events being detected are in the
+  history the baseline is fitted on** — with a mean, an extreme year pulls down the baseline it is
+  itself measured against, so the event partly erases its own signal, smoothly and invisibly, and
+  the effect is largest where the data matters most. The minimum-years guard because a median of
+  three observations is a number with a false air of authority and nothing downstream can tell it
+  from a median of twenty. The stored count because **a NULL with no count beside it is
+  indistinguishable from a bug, and the first response to an unexplained NULL is to delete the check
+  that produced it.**
+- **A run-length feature resets to NULL across a data gap, never to zero.** Zero is a measurement —
+  "the condition ended here" — and asserting it on a day nobody observed manufactures a recovery
+  that did not happen. NULL says it is unknown. Knowledge returns on the first observation that ends
+  the condition outright, since no run can span it.
+- **Feature-to-target joins take the last feature dated on or before the target period. Never
+  nearest.** Nearest-date matching admits lookahead of a day or two: a feature dated after a period
+  boundary is nearer to it than one dated three days before, so conditions that had not happened
+  inform the target. It appears in no schema, it makes the relationship look slightly better than it
+  is, and **it is the kind that survives review** — nobody reads `ORDER BY abs(date - week_ending)`
+  as a modelling error. Guard it with a test that constructs the case where the two disagree; against
+  a dense daily series both implementations agree and the guard is vacuous.
+- **Returns are computed as log-returns.** Percent change is wildly asymmetric between a rise and the
+  fall that undoes it, so anything fitted on it learns the asymmetry as a fact about the world rather
+  than a fact about division. Log-returns are symmetric and additive across periods.
+- **Derived values a source does not support are NULL and are never imputed or carried forward** — an
+  anomaly below the years guard, a target past the end of the series, a return through an unpublished
+  period. Carrying a value forward through a gap produces a change of **exactly zero**, which is the
+  most ordinary value such a column can hold, so the fabrication is invisible and lands
+  preferentially wherever the gaps cluster.
+- **The feature registry is the single source of truth for what features exist; a row whose name has
+  no registry entry is an error, not an orphan to ignore.** It means a rename left rows nothing will
+  ever update again — they keep answering queries with values frozen at the rename, and **a stale
+  series is harder to notice than a missing one** — or something wrote outside the registry, in which
+  case the registry is not describing the table. Nothing constructs a feature name by concatenation
+  at write time. A CHECK constraint is deliberately *not* the mechanism: unlike a source's
+  vocabulary, this one is ours, and a constraint would be a second copy to migrate in lockstep.
+- **Builders are pure functions of their inputs, and the database round-trip is separate.** Tested
+  against hand-computed values, never against the database's own output — the latter asserts that the
+  code computes what the code computes and passes in both directions of every mutation. Where a
+  builder must be SQL for a reason (a precedence rule that may have only one implementation), do not
+  write a parallel Python version so it can be unit-tested: **that parallel version is the second
+  implementation the single-source rule exists to prevent.** Test the SQL against a real database
+  instead, and say in the suite why the tier is what it is.
+- **A derived table is registered in the freshness registry alongside the ingest tables.** An ingest
+  table goes stale when a source goes quiet; a derived table goes stale when the build stops — and a
+  stopped build is invisible from the data, because every table it reads stays perfectly fresh while
+  it does nothing. One entry per job, not per table: three entries for three tables written in one
+  transaction produce three alerts for one cause.

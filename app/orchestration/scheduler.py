@@ -35,6 +35,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 from app import db
+from app.features import build as features_build
 from app.ingest import usda_movements, usda_rates, usgs_daily_ingest, usgs_ingest
 from app.orchestration import heartbeat
 from app.orchestration.cadence import CADENCES
@@ -63,6 +64,9 @@ JOB_FUNCTIONS = {
     # things, and the heartbeat then cannot say which source went quiet.
     "usda_rates_ingest": usda_rates.usda_rates_ingest_job,
     "usda_movements_ingest": usda_movements.usda_movements_ingest_job,
+    # THE FIRST NON-INGEST JOB. It reads what the four above have landed and writes the derived
+    # layer. Nothing orders it against them - see its cadence entry.
+    "features_build": features_build.features_build_job,
 }
 
 # NOT REGISTERED HERE, DELIBERATELY: app/ingest/backfill.py, app/ingest/daily_backfill.py and
