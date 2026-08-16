@@ -3,18 +3,198 @@
 This is the **log**: current state, decisions as they are made, and `§ Up Next`. Stable contracts
 live in `CLAUDE.md`. If something here hardens into an invariant, move it there and note the move.
 
-**Last updated:** 2026-08-15 (**PHASE 7 IS WRITTEN AND GREEN OFFLINE; IT HAS NOT RUN ON THE
-INSTANCE.** It builds the analog engine and the confidence gate — the user-facing output — **on top
-of a sweep that found essentially nothing**, and it is built to refuse. Phase 6 has run: 1 of
-**6,966** scanned pairs passes the gate, **contemporaneously** at `lag_days = 0`, with a **negative**
-statistic; **271** would have cleared the same threshold unadjusted, and Benjamini-Hochberg collapsed
-that to 1. **No lead survives correction at any lag, in either direction.** Phases 1–6 are complete
-and verified on the instance. **Debt 1a is still open:** the capture script has run and the four CSVs
-exist, and nothing has been pasted into this file yet.)
+**Last updated:** 2026-08-16 (**PHASE 7 HAS RUN ON THE INSTANCE AND THE GATE PASSED ON BOTH LABELLED
+EVENTS — WHICH IS NOT THE GOOD NEWS IT LOOKS LIKE.** 2022: 4 analogs, 3 of 4 consistent, **median
++7%**, range −48%→+18%. 2023: 5 analogs, 4 of 5, **median +10%**, range −48%→**+270%**, where the
+`+270%` is `2022-09-16` — the immediately preceding drought year, and the rank-1 analog. **Every
+analog behind both passes falls inside 2015–2022**, both ranges span zero, and both sentences say the
+rate *rose* while the sweep's one surviving row carries a **negative** statistic. Three things to
+settle before either sentence is quoted: the 3-of-4 consistency granularity, the analog clustering,
+and that sign disagreement. Phase 6 stands: 1 of **6,966** pairs, contemporaneous at `lag_days = 0`,
+no lead at any lag in either direction. **Debt 1a is still open:** the four CSVs exist and are not
+pasted in.)
 
 ---
 
-## PHASE 7 — THE ANALOG ENGINE AND THE CONFIDENCE GATE. WRITTEN OFFLINE 2026-08-15. **NOT YET RUN ON THE INSTANCE.**
+## PHASE 7 — RUN ON THE INSTANCE, 2026-08-16. **THE GATE PASSED ON BOTH LABELLED EVENTS, AND THAT IS NOT THE GOOD NEWS IT LOOKS LIKE.**
+
+Both queries passed. **Read the next four sections before quoting either of them**, because what they
+passed on is a median move of **+7%** and **+10%** across ranges that span zero, on analogs drawn from
+a single twelve-year window, with a direction that **disagrees in sign with the one relationship the
+sweep found.**
+
+### The two gate results, verbatim
+
+**2022 —** `python -m app.analogs.engine --as-of 2022-10-11 --site 07032000 --explain`
+
+```
+parameters 45600c6d05c0   k=10 window=21d
+detections 77 raw -> 5 collapsed events
+gate: passed  analogs=4 consistent=3 incomplete=0
+sweep: best q = 0.0446 (run 1)
+
+Mississippi discharge at Memphis has fallen 16,000 cfs in 14 days and is now 83,967 cfs
+below the 12-year seasonal median. The last 4 times discharge moved like this, the
+Cairo-Memphis barge rate rose, -48% to +18% within 3 weeks - median +7%, 3 of 4
+directionally consistent.
+
+rank  event_start   distance
+   1  2020-10-09     14.718
+   2  2016-11-24     15.006
+   3  2017-09-25     15.084
+   4  2015-10-14     15.401
+```
+
+**2023 —** `python -m app.analogs.engine --as-of 2023-09-19 --site 07032000 --explain`
+
+```
+parameters 45600c6d05c0   k=10 window=21d
+detections 161 raw -> 6 collapsed events
+gate: passed  analogs=5 consistent=4 incomplete=0
+sweep: best q = 0.0446 (run 1)
+
+Mississippi discharge at Memphis has fallen 42,000 cfs in 14 days and is now 120,333 cfs
+below the 11-year seasonal median. The last 5 times discharge moved like this, the
+Cairo-Memphis barge rate rose, -48% to +270% within 3 weeks - median +10%, 4 of 5
+directionally consistent.
+
+rank  event_start   distance
+   1  2022-09-16      7.414
+   2  2020-10-09      7.501
+   3  2016-11-24      7.563
+   4  2017-09-25      7.599
+   5  2015-10-14      7.693
+```
+
+**The 2023 `analog_matches` breakdown, in full:**
+
+```
+ event_start | outcome_log_return  | pct
+-------------+---------------------+-----
+ 2022-09-16  |   1.307554871280256 | 270
+ 2020-10-09  | 0.09679505602470496 |  10
+ 2016-11-24  | 0.04512043528046964 |   5
+ 2017-09-25  | 0.16644820763766438 |  18
+ 2015-10-14  | -0.6509147176885973 | -48
+```
+
+### WHAT 2022-09-16 DRIVES, STATED AS MEASURED
+
+**It drives the RANGE. It does not drive the median.** The distinction matters and the loose version
+of this claim was corrected before it was written down:
+
+- **`2022-09-16`'s outcome is `+270%`, and it is the maximum of the set.** The other four are `+18%`,
+  `+10%`, `+5%` and `−48%`. **The range's upper bound IS its value** — remove it and the sentence's
+  upper bound falls from `+270%` to `+18%`.
+- **The median of the five is `+10%`, which is `2020-10-09`'s value.** Sorted, the log-returns run
+  `−0.6509, 0.0451, 0.0968, 0.1664, 1.3076`; the middle one is `2020-10-09`. **2022 sits at the end
+  of that ordering, not in the middle of it, so it cannot be what the median is reporting.**
+- **It is simultaneously rank 1 by distance, at 7.414** — the nearest analog produced the most
+  extreme outcome in the set.
+
+**And that last point does not generalise, which is the observation worth keeping.** Ordered by
+distance, the outcomes run `+270%, +10%, +5%, +18%, −48%`. **There is no monotone relationship between
+similarity and outcome at all** — rank 3 moved less than rank 4, and the most distant analog produced
+the largest move in the opposite direction. **The metric orders the analogs; it does not order what
+happened next**, and nothing in the rendered sentence would tell a reader that.
+
+### THE CLUSTERING LIMITATION, NO LONGER HYPOTHETICAL
+
+The section below in the build record predicted this from Memphis's record start alone. **The instance
+confirmed it exactly:**
+
+| Query | Analog years | Span |
+|---|---|---|
+| 2022 | 2015, 2016, 2017, 2020 | **5 years** |
+| 2023 | 2015, 2016, 2017, 2020, **2022** | **7 years** |
+
+**Every analog behind both passes falls inside 2015–2022**, and the 2023 pass rests on an analog from
+**the immediately preceding year** — consecutive drought years, which is the shared-causation case in
+its purest form. `2022-09-16` is not an independent draw from `2023-09-19`: same fleet, same channel,
+same multi-year regime, and in some cases the same contracts.
+
+**So the 2023 result reads as "5 of 5 independent historical instances" and is nothing of the kind**,
+and the one analog closest to being a repeat of the query is the one supplying the `+270%` upper
+bound. `CLAUDE.md § 19` now carries the reading rule; **this is the run it was written against.**
+
+### THE DISTANCES CLUSTER SO TIGHTLY THAT A CUTOFF WOULD BE ALL-OR-NOTHING
+
+Step 2 asked whether they cluster or spread. **They cluster, hard, in both queries:**
+
+| Query | Range of distances | Spread as a share of the mean |
+|---|---|---|
+| 2022 | 14.718 – 15.401 | **~4.5%** |
+| 2023 | 7.414 – 7.693 | **~3.7%** |
+
+**A cutoff placed anywhere between rank 1 and rank 5 in the 2023 query would have to discriminate at
+the third significant figure**, which is not a threshold anybody can defend as "similar enough". The
+practical answer this measurement gives is that **a cutoff here would admit all of them or none of
+them**, and the useful question is not where to put one but why five conditions across seven years
+all score within 4% of each other.
+
+**The distances are NOT comparable between the two queries**, and the ~15 against ~7.4 above is not a
+finding: z-scores are computed from the site's own history up to each query's `as_of`, so the two
+queries scale their axes differently. Migration 0025 says so in the column comment, and it is the
+first thing a reader would otherwise get wrong from the table above.
+
+### THE 2022 PASS IS A "3 OF 4" PASS BEING REPORTED AS ≥70%
+
+**This project has already written the argument down, for the sweep**, in the Phase 6 build record:
+
+> Five because directional consistency is a fraction of folds and the gate wants ≥70%: with four
+> folds the only achievable values are 0/25/50/75/100%, so the gate would be testing "3 of 4" while
+> claiming to test 70%.
+
+**That reasoning was applied to `walkforward.MIN_FOLDS` and was never applied to `MIN_ANALOGS`.** With
+`n_analogs = 4` the achievable consistencies are exactly 0/25/50/75/100%, so the 2022 pass at 3 of 4
+clears a 70% threshold that **cannot be evaluated at that resolution** — the same defect, in the same
+project, one phase later.
+
+**Nothing is changed on the strength of it.** `MIN_ANALOGS = 4` is `CLAUDE.md § 7`'s number and
+raising it after seeing which queries pass is selecting a method that suited the answer — the move
+`CLAUDE.md § 18`'s last bullet forbids. **It is recorded as an open question for the human**, and it
+is the first one to settle before anything quotes the 2022 sentence.
+
+### THE DIRECTION DISAGREES WITH THE SWEEP, AND THE ESTIMATES ARE WEAK
+
+Two things that have to be said in the same breath as "the gate passed":
+
+1. **Both sentences say the rate ROSE. The sweep's one surviving row has a NEGATIVE statistic
+   (−0.137)** — more days below p10 going with a *lower* forward return. The two are not measuring the
+   same quantity (a lag-0 correlation over all weeks at horizon 7, against a 21-day forward move from
+   event onset), so this is **not a contradiction on its face** — but it is exactly the check
+   `CLAUDE.md § 19`'s last bullet demands, and it is not resolved. `signal_q_value = 0.0446` rides on
+   both query rows so this can never be read without it.
+2. **A median of +7% and +10%, across ranges of −48%→+18% and −48%→+270%, is a weak claim wearing a
+   confident sentence.** Both ranges span zero. The word "rose" is carrying 3-of-4 and 4-of-5
+   majorities over sets whose middle value is a single-digit percentage.
+
+**The gate passing is a fact about the gate, not evidence for the thesis.**
+
+### The checks that confirm this ran against real data, and against the boundary
+
+- **`features` for `days_below_p10` at Memphis: 4,334 rows**, matching the Phase 5 daily count for the
+  site exactly. *(Independently consistent with the record start: 2014-10-01 to now is ≈4,338 days,
+  which is the same twelve-year window the limitation section is built on.)*
+- **`--as-of 2022-09-06` returned `no_current_event`** — the entry threshold had not crossed a week
+  before the counter first ticked up. **The detector is date-sensitive across the boundary rather than
+  firing indiscriminately**, which is the property decision 1 exists for and the one a fixture cannot
+  demonstrate.
+- **The climatology depth differs between the two queries — 12 years in 2022, 11 in 2023** — because
+  `climatology_n_years` is read per date rather than hardcoded. `CLAUDE.md § 7`'s example says "the
+  10-year seasonal median"; **neither of these is 10**, and a hardcoded ten would have been wrong in
+  both sentences.
+
+### Still unconfirmed from the live procedure
+
+**Steps 1 and 7 were not reported back:** `python -m app.orchestration.migrate` showing **0024 and
+0025 applied, twenty-five total**, and `python -m verify.preflight` showing **six gates green**. The
+queries above could not have run without the two migrations, so step 1 is implied rather than
+recorded — **implied is not recorded**, and preflight is not implied by anything.
+
+---
+
+## Phase 7 — the analog engine and the confidence gate. **THE BUILD RECORD; THE OUTCOME IS ABOVE.** Written offline 2026-08-15.
 
 Two migrations (`0024` `analog_queries`, `0025` `analog_matches`), seven modules under
 `app/analogs/`, seven test files. **No cadence entry and no freshness registration** — the engine
@@ -60,6 +240,46 @@ numbers before proposing a cutoff.**
 
 A cutoff would also be **the quietest way to make the gate pass**: drop the far analogs and what
 remains agrees with itself, while the gate counts the filtered set and reports it as the history.
+
+### STATED LIMITATION — THE ANALOG COUNT ASSUMES THE ANALOGS ARE INDEPENDENT, AND THEY ARE NOT
+
+**`n_analogs` counts events. It does not discount them for sitting close together in time or for
+sharing a cause.** `events.collapse` handles duplication *within* one low-water period; **nothing in
+this phase handles correlation *between* periods**, and that gap is structural rather than an
+oversight — see `CLAUDE.md § 19`.
+
+**Four droughts in one decade are not four independent draws.** They can share a multi-year climate
+regime, one channel configuration, or a single dredging programme, and the barge market's response to
+the fourth is not independent of its response to the first — the same operators, the same fleet
+positioning, in some cases the same contracts. **4 of 4 directionally consistent is the same number
+whether the events span forty years or four, and the rendered sentence is identical either way.**
+
+**This is not hypothetical at Memphis, and the arithmetic is already in this file.** Memphis's daily
+record starts **2014-10-01** (`FINDING 4`), and Phase 6's one surviving row carried
+**`n_effective = 616`** — about the span from that start to now. So **every analog this engine can
+ever find at Memphis comes from a single twelve-year window**, and it is a window containing the
+2022–2023 pair, which were consecutive years. A passing gate here is a claim built on events that are
+close together by construction.
+
+**The consequence, stated as a reading rule rather than as a correction:**
+
+> **A passing gate whose analogs cluster in one multi-year period is WEAKER EVIDENCE than the same
+> count spread across independent decades, and the output does not say so.** Read the dates before
+> reading the consistency.
+
+**Nothing is adjusted for this in code**, and that is deliberate under `CLAUDE.md § 1`: a discount for
+temporal proximity is a modelling decision with a parameter in it, and inventing one here would put a
+number nobody sourced underneath every confidence claim the project makes. What this commit does
+instead is **report the dates** — `analog_matches` stores every `event_start`, `--explain` prints
+them, and the reader makes the discount. If an adjustment is ever wanted it is its own commit, with
+the unadjusted counts measured first so the change has a before.
+
+> **MEASURED ON 2026-08-16, AND IT IS WORSE THAN THIS SECTION PREDICTED.** The prediction was that
+> every analog would fall inside one twelve-year window. What the instance returned is tighter still:
+> **every analog behind both passes falls inside 2015–2022**, a seven-year span, and the 2023 pass
+> includes **2022-09-16 — the immediately preceding year** — as its rank-1 analog *and* the source of
+> its `+270%` upper bound. See `PHASE 7 — RUN ON THE INSTANCE` at the top of this file. **The clustering
+> is not a risk this site carries; it is the only condition this site has.**
 
 ### Decisions worth reading before changing anything here
 
@@ -140,11 +360,11 @@ quiet day. That fixture exists to prove the mechanism works in both directions; 
 about what the real data will do**, and a fixture where the gate could never pass would make "it
 refused" indistinguishable from "it is broken".
 
-**Still owed and needing the instance:** the gate result for the 2022 and 2023 labelled events
-including their refusals, the observed distribution of distances, the collapsed event count per site,
-and whether the gate can pass at Memphis at all. **If it refuses everywhere, that is the headline and
-it gets recorded as such** — one deep site, sixteen years of four-site overlap, and a sweep that
-found one contemporaneous relationship out of 6,966.
+> **ALL FOUR SLOTS WERE FILLED ON 2026-08-16 AND THE RESULTS ARE AT THE TOP OF THIS FILE.** The gate
+> **passed** on both labelled events — 4 analogs at 3 of 4 in 2022, 5 at 4 of 5 in 2023 — on medians
+> of **+7%** and **+10%** across ranges spanning zero, with every analog drawn from 2015–2022. The
+> collapsed event count at Memphis is **5 and 6**, so the gate *can* pass at this site; the distances
+> **cluster within ~4%**, so a cutoff would be all-or-nothing. **Nothing above was tuned afterwards.**
 
 ---
 
@@ -2012,14 +2232,31 @@ Bring the stack up with `docker compose -f docker-compose.yml -f /root/dws-local
 Delete it once the `worker` service is containerized; at that point `DATABASE_URL` becomes
 `timescaledb:5432` and nothing needs a published port.
 
-## PHASE 7 IS BUILT AND UNRUN. **THE LIVE PROCEDURE IS THE NEXT THING TO DO.**
+## PHASE 7 HAS RUN. **THREE QUESTIONS COME BEFORE PHASE 8, AND THEY ARE ALL HUMAN DECISIONS.**
 
-The analog engine, the confidence gate and the two tables are written, green offline, and
-mutation-confirmed on all thirteen rows. **They have answered nothing about the river.** Everything
-below is for a human on the instance, and it is the step this project's process note says gets
-skipped: *running the verification and not recording the result is not finishing the verification.*
+The engine ran on the instance on 2026-08-16 and the outcome is recorded at the top of this file, in
+the same session — the second time this project has managed that. **The gate passed on both labelled
+events**, and the three things below are what stand between that and a quotable claim. **None of them
+is a code change this agent may make** (`CLAUDE.md § 1`, `§ 18`'s last bullet):
 
-**Three small things are still owed from Phase 6 and none of them blocks this:**
+1. **Is `MIN_ANALOGS = 4` compatible with a 70% consistency threshold?** At four analogs the
+   achievable consistencies are 0/25/50/75/100%, so the 2022 pass at **3 of 4** clears a bar that
+   cannot be evaluated at that resolution. **This project already made this exact argument for
+   `walkforward.MIN_FOLDS` in Phase 6 and did not carry it across.** Settling it is its own commit,
+   and the current values' results are now measured, so the change has a before.
+2. **Does the analog count need a discount for temporal clustering?** Every analog behind both passes
+   falls inside 2015–2022, and the 2023 rank-1 analog is the immediately preceding year. `CLAUDE.md
+   § 19` carries the reading rule; whether it becomes arithmetic is a modelling decision.
+3. **Why do the engine and the sweep disagree in sign?** Both sentences say the rate rose; the sweep's
+   one surviving row is **−0.137**. They measure different quantities and that may fully explain it —
+   **but "may fully explain it" is not a finding, and `CLAUDE.md § 19`'s last bullet asks for this
+   check specifically.**
+
+**A similarity cutoff is NOT on that list, and the measurement is why:** the distances cluster within
+~4% in both queries, so a cutoff would admit all of them or none. **Step 2 was run and it answered
+the question by making it moot.**
+
+**Two things are still owed from Phase 6 and neither blocks Phase 8:**
 
 1. **The `run_id` and the wall time of the sweep run.** `select run_id, started_at, finished_at from
    signal_runs order by started_at desc limit 1;` — every query in that write-up is parameterized on
@@ -2027,23 +2264,42 @@ skipped: *running the verification and not recording the result is not finishing
 2. **DEBT 1a — paste the four CSVs.** Captured and unpasted, which is where the debt has been in one
    form or another across three phases. Fenced blocks, into `PHASE 4 — VERIFIED` and `PHASE 5 —
    VERIFIED`, replacing the notes that say the output is still owed.
-3. The recovery-regime data gap stays open and is **explicitly out of scope** for this phase.
 
-### Phase 7 live verification — on the instance
+The recovery-regime data gap stays open and was **explicitly out of scope** for Phase 7.
+
+### Phase 7 live verification — RUN ON THE INSTANCE 2026-08-16, retained for its queries
+
+**Outcomes at the top of this file.** Six of the eight steps were reported back; steps 1 and 7 were
+not, and that is recorded there rather than assumed. Retained because these are the queries any
+re-run is compared against — and because step 2's instruction is worth keeping in the form it was
+written *before* the distances arrived, given what they turned out to be.
 
 **EXPECT REFUSALS.** The engine sits on a sweep that found one contemporaneous relationship out of
 6,966. A run where the gate passes everywhere is a reason to look for a bug before celebrating.
 
+> **AND IT PASSED EVERYWHERE IT WAS ASKED.** That sentence was written before the run and it stands:
+> the passes are recorded, and so are the three unresolved questions that came with them. **The
+> instruction was not softened after the fact.**
+
 1. `python -m app.orchestration.migrate` — expect **0024 and 0025** applied, **twenty-five total**.
+   **NOT REPORTED BACK.** Implied by the queries having run at all; implied is not recorded.
 2. **LOOK AT THE DISTANCES BEFORE SETTING ANY CUTOFF:**
    `python -m app.analogs.engine --as-of 2022-09-06 --site 07032000 --explain`
    **Report the k distances and whether they cluster or spread.** `SIMILARITY_CUTOFF` is `None` and
    **this is what one would be set from, later, by you** — a cutoff proposed before this step is a
    claim about similarity made before anybody had seen one.
+   **RAN, at `--as-of 2022-10-11`. They CLUSTER: 14.718–15.401, a spread of ~4.5% of the mean.**
 3. The same for **2023-09-05**.
+   **RAN, at `--as-of 2023-09-19`. Tighter still: 7.414–7.693, ~3.7%. A cutoff between rank 1 and
+   rank 5 would have to discriminate at the third significant figure — so it would admit all of them
+   or none, and step 2 answered the cutoff question by making it moot.**
 4. **BOTH LABELLED EVENTS, PLAINLY.** For each: did the gate pass or refuse, and with what counts —
    `n_raw_detections`, `n_collapsed_events`, `n_analogs`, `n_consistent`. **If both refuse, that is
    the headline** and it is recorded as such rather than worked around.
+   **BOTH PASSED.** 2022: 77 raw -> 5 collapsed, 4 analogs, 3 consistent. 2023: 161 raw -> 6
+   collapsed, 5 analogs, 4 consistent. **Verbatim output at the top of this file** — and the raw
+   counts against the collapsed ones are the collapse rule earning its place: 161 detections would
+   have satisfied the >=4-analog gate forty times over from six events.
 5. **COUNT HOW MANY EVENTS EXIST AT ALL**, because it may settle the question outright:
    ```sql
    select gate_result, count(*) from analog_queries group by 1 order by 2 desc;
@@ -2053,12 +2309,20 @@ skipped: *running the verification and not recording the result is not finishing
    **If the collapsed event count over the full history at Memphis is under 4, the gate can never
    pass at this site**, and that is a fact about the dataset worth stating in one sentence rather
    than discovering repeatedly.
+   **IT IS 5 AND 6, SO THE GATE CAN PASS AT MEMPHIS.** The constraint is not that there are too few
+   events; it is that the ones there are all fall inside 2015–2022.
 6. **A date with no low-water condition** — e.g. `--as-of 2021-05-12` — must refuse **cleanly** with
    `no_current_event` rather than returning distant analogs for a condition that is not happening.
+   **CONFIRMED, and at a sharper boundary than this step asked for: `--as-of 2022-09-06` returned
+   `no_current_event`** — a week before the counter first ticked up, inside the year of a real event.
+   The detector is date-sensitive across the boundary rather than firing indiscriminately, which is
+   the property decision 1 exists for and the one a fixture cannot demonstrate.
 7. `python -m verify.preflight` — six gates green. Its migration-count gate reads the directory, so
    twenty-five migrations need no change to it.
+   **NOT REPORTED BACK, and nothing implies it.** This is the one step still genuinely open.
 8. **Write the outcome back in the same session**, including the refusals and the distances, and set
    `§ Up Next` to Phase 8.
+   **DONE, in the same session, 2026-08-16 — the second time this project has managed it.**
 
 ### What to record, and what NOT to do with the answer
 
@@ -2080,6 +2344,19 @@ overlap, and a sweep that found one contemporaneous relationship out of 6,966.
 
 Each of those is a **human decision in its own commit**, with the current values' results measured
 first so the change has a before — and this procedure's output is that before.
+
+> **THE RUN PASSED, SO THE PRESSURE POINTS THE OTHER WAY — 2026-08-16.** Every item above guards
+> against loosening the gate after a disappointing refusal. **What actually happened is a pass, and
+> the corresponding failure is to quote it.** So, symmetrically:
+>
+> **DO NOT** put either sentence in a README, a UI or a résumé until the three questions at the top
+> of this section are settled. **DO NOT** quote the 2023 `+270%` without saying it is one analog,
+> from the immediately preceding year, which is also the rank-1 match. **DO NOT** describe either
+> result as the system "working" — the gate passing is a fact about the gate, and the medians it
+> passed on are **+7%** and **+10%** across ranges that span zero.
+>
+> `CLAUDE.md § 7` already requires every quoted number to be reproducible from a query. **These are.
+> That is not the same as their being ready to quote.**
 
 ### Phase 8 — after the engine has been run and its outcome is recorded
 

@@ -855,6 +855,15 @@ refuse, and the whole of this section exists so that the honest answer is the ea
   analogs is four analogs. **Store both counts.** A history whose raw count is in the hundreds and
   whose collapsed count is two is the honest description of a dataset, and a collapse whose effect is
   invisible is a collapse nobody notices the removal of.
+- **The gate's analog count treats every historical event as an independent instance, and it is not
+  adjusted for temporal clustering or shared drought conditions between analogs.** Collapsing handles
+  duplication *within* one event; nothing handles correlation *between* events, and four droughts in
+  one decade are not four independent draws — they can share a multi-year climate regime, a single
+  channel configuration, or one dredging programme. **A human reading a passing result checks the
+  analog dates for exactly this before treating consistency as confirmation**, because 4 of 4
+  agreeing is the same number whether the events span forty years or four, and the sentence renders
+  identically either way. Where an adjustment is wanted it is a modelling decision (§ 1), in its own
+  commit; until then the dates are reported so the reader can make the discount themselves.
 - **The similarity metric carries no fitted weights.** Weights fitted so that near events have similar
   outcomes are **in-sample optimization wearing a metric's clothes**: invisible in the output, with no
   held-out data anywhere in this phase to catch them, and they improve every number, which is what
