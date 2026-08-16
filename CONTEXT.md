@@ -3,13 +3,148 @@
 This is the **log**: current state, decisions as they are made, and `§ Up Next`. Stable contracts
 live in `CLAUDE.md`. If something here hardens into an invariant, move it there and note the move.
 
-**Last updated:** 2026-08-15 (**PHASE 6 HAS RUN ON THE INSTANCE, AND THE SWEEP FOUND ESSENTIALLY
-NOTHING. THAT IS THE RESULT.** 1 of **6,966** scanned pairs passes the gate; **271** would have
-cleared the same threshold applied to the unadjusted p-value, and Benjamini-Hochberg collapsed that
-to 1. The one survivor is **contemporaneous** — `lag_days = 0` — and its statistic is **negative**.
-**No lead survives correction at any lag, in either direction.** Phases 1–5 remain complete and
-verified. **Debt 1a is still open:** the capture script has run and the four CSVs exist, and nothing
-has been pasted into this file yet.)
+**Last updated:** 2026-08-15 (**PHASE 7 IS WRITTEN AND GREEN OFFLINE; IT HAS NOT RUN ON THE
+INSTANCE.** It builds the analog engine and the confidence gate — the user-facing output — **on top
+of a sweep that found essentially nothing**, and it is built to refuse. Phase 6 has run: 1 of
+**6,966** scanned pairs passes the gate, **contemporaneously** at `lag_days = 0`, with a **negative**
+statistic; **271** would have cleared the same threshold unadjusted, and Benjamini-Hochberg collapsed
+that to 1. **No lead survives correction at any lag, in either direction.** Phases 1–6 are complete
+and verified on the instance. **Debt 1a is still open:** the capture script has run and the four CSVs
+exist, and nothing has been pasted into this file yet.)
+
+---
+
+## PHASE 7 — THE ANALOG ENGINE AND THE CONFIDENCE GATE. WRITTEN OFFLINE 2026-08-15. **NOT YET RUN ON THE INSTANCE.**
+
+Two migrations (`0024` `analog_queries`, `0025` `analog_matches`), seven modules under
+`app/analogs/`, seven test files. **No cadence entry and no freshness registration** — the engine
+answers when asked, for the reason the sweep has none.
+
+**THE HEADLINE IS THAT THIS WAS BUILT TO REFUSE.** Phase 6 scanned 6,966 pairs and one passed, at
+**lag 0**, with **zero** passing rows at any non-zero lag in either direction. There is no measured
+predictive relationship in this dataset, so the engine is expected to return **"insufficient
+history"** for most or all queries. **That is the correct output and it is the deliverable.** The
+sentence that governs every decision below, and now `CLAUDE.md § 19`'s last bullet:
+
+> **An analog engine that finds confident analogs where the lead-lag sweep found no relationship has
+> a bug, not a discovery.**
+
+### The delegation boundary — what this commit built, and what it refuses to choose
+
+`CLAUDE.md § 1` puts **analog-matching logic and confidence-gating logic** on the never-delegate
+list. This commit builds the mechanism; **every value it is pointed at lives in
+`app/analogs/parameters.py`** with a comment saying where it came from. **Four of those values are
+`None`, and each `None` is a stated position rather than a gap:**
+
+| Parameter | Seed | Where it came from |
+|---|---|---|
+| `MIN_ANALOGS` | **4** | `CLAUDE.md § 7`, verbatim |
+| `MIN_DIRECTIONAL_CONSISTENCY` | **0.70** | `CLAUDE.md § 7`, verbatim |
+| `ENTRY_FEATURE` | `days_below_p10` | the one pair Phase 6 found anything for — **a reason to point the engine here, not evidence it will find anything** |
+| `ENTRY_RUN_LENGTH_DAYS` | **1** | **adds no second threshold on top of the percentile.** Any larger value is a new number with no source |
+| `MIN_EVENT_SEPARATION_DAYS` | 90 | the brief's seed, roughly the timescale of the 2022 event. Not measured |
+| `K_NEAREST` | 10 | the brief's seed |
+| `OUTCOME_WINDOW_DAYS` | 21 | `CLAUDE.md § 7`'s "within 3 weeks", **fixed before any outcome was computed** |
+| `CONDITION_LOOKBACK_DAYS` | 14 | `CLAUDE.md § 7`'s example. Describes the sentence, does not enter the metric |
+| `SIMILARITY_WEIGHTS` | **None** | a fitted weighting is in-sample optimization wearing a metric's clothes |
+| `SIMILARITY_CUTOFF` | **None** | **see below — this is the one the human owes an answer to** |
+| `SEASON_MATCH_WINDOW_DAYS` | **None** | no seasonal restriction is applied, **so the sentence does not claim one** |
+
+### NO SIMILARITY CUTOFF IS SET, AND THAT IS THE POINT
+
+"How similar is similar enough" is a claim about the world that **nobody can make before looking at a
+distribution of distances**, and `CLAUDE.md § 1` puts it on the human's side of the line. So the
+engine returns the **k nearest whatever they cost**, reports every distance in `--explain`, and
+stores all of them in `analog_matches` — and **step 2 of the live procedure is somebody reading those
+numbers before proposing a cutoff.**
+
+A cutoff would also be **the quietest way to make the gate pass**: drop the far analogs and what
+remains agrees with itself, while the gate counts the filtered set and reports it as the history.
+
+### Decisions worth reading before changing anything here
+
+- **An event is detected from observations up to and including the detection date, and `is_entry`
+  takes exactly one positional parameter — the history.** The tempting definition ("a period that
+  reached 20 days below") cannot be evaluated until the period is over, so every historical event
+  defined that way is **defined using its own future**. Enforced by signature, in
+  `app/signals/regimes.py`'s style, **and** by a behavioural test against a truncated series. Either
+  alone passes vacuously.
+- **Detections collapse into events, and both counts are stored.** A sustained low-water period
+  produces a detection every day it continues — **the 2022 event alone would satisfy "≥ 4 analogs"
+  several times over from one event**, in the exact form the gate cannot see. `n_raw_detections` and
+  `n_collapsed_events` are both columns on `analog_queries`; the gate consumes the second.
+- **Detection is deliberately naive — the condition holds or it does not — so the collapse carries
+  the whole anti-inflation argument visibly.** A crossing-only detector would collapse a sustained
+  event for free and make the collapse rule a no-op that looked correct, with nothing to notice its
+  removal.
+- **The metric is unweighted Euclidean on z-scored features, and it is a placeholder chosen for being
+  self-documenting rather than good.** Two known distortions are **recorded rather than corrected**,
+  because correcting either is a weighting decision: `discharge_min` IS `discharge_mean` at Memphis
+  and Vicksburg (Phase 5 finding 3), so that dimension is counted twice there; and `p05`/`p10`/`p20`
+  are three thresholds on one series carrying three of the five dimensions.
+- **The z-score population ends at `as_of`, like every other series the engine reads.** Standardizing
+  against the full record would score a 2015 condition against a spread that includes 2022 — leakage
+  arriving in a number nobody reads as a prediction.
+- **`eligible_events` is the single place lookahead is prevented**, and it is handed **every** event
+  including the one being asked about. An earlier draft pruned the current event before the call; that
+  split the guard in two, after which removing half of it breaks nothing visible.
+- **The outcome window is one int, and passing a sequence raises.** Three windows is three tests, the
+  strongest of three is not a 21-day result, and **nothing here would record the two that were
+  discarded**.
+- **The gate runs before the estimate exists.** `outcomes.summarize` is called only on the passing
+  branch, so **a refused query has nothing to withhold** — which is stronger than withholding, because
+  a value that exists is one refactor away from being displayed. The test watches whether the function
+  was *called*.
+- **A refused query's returned structure carries no per-analog outcome, while `analog_matches` stores
+  every one of them.** The table is the research log; the returned result is a claim. Collapsing the
+  two would mean either fabricating a gap in the record or shipping an estimate the gate refused.
+- **Migration 0024 enforces the gate's own arithmetic in the database.** A row claiming `passed` on
+  three analogs, or on consistency below 0.70, is refused by a `CHECK` — so a script or a future
+  module cannot write one either, not merely `gate.py`.
+- **A refusal exits zero.** A non-zero exit would make "insufficient history" look like a failure to a
+  shell, a cron, or the next person reading a log, and it is the deliverable.
+
+### Deviations from the brief, and why
+
+- **`analog_queries` carries two columns the brief's list did not name:** `n_raw_detections` and
+  `n_collapsed_events`. Decision 2 requires both counts to be stored and the brief's column list
+  included neither. A row where the first is in the hundreds and the second is 2 is the whole story of
+  this dataset, and it is only readable if both are kept.
+- **`git_dirty` was added beside `git_sha`**, for migration 0022's reason: a dirty run's results are
+  worth keeping *and* are not reproducible, and those are two different facts about one row.
+- **A fifth refusal reason, `no_current_event`, exists.** The brief names three. Asking about a river
+  that is not in a low-water condition is not a coverage problem and must not read as one — step 6 of
+  the live procedure is exactly that case.
+- **`test_events.py`, `test_similarity.py`, `test_outcomes.py`, `test_gate.py` and `test_render.py`
+  each carry two to four tests the brief did not number.** They cover the boundaries the numbered ones
+  imply but do not reach: a NULL feature value not opening an event, deterministic tie-breaking (rank
+  is in `analog_matches`'s primary key), a zero move not counting as directionally consistent, and the
+  rendered sentence not claiming a seasonal filter that was never applied.
+- **Tests 21, 22, 23 and 25 are integration, as the brief specifies; test 22 also has a unit
+  counterpart** over `eligible_events`, because that is where the exclusion rule is legible as
+  arithmetic rather than as an outcome.
+- **`app/analogs/engine.py` imports `git_state` from `app/signals/sweep.py`** rather than
+  reimplementing it. `CLAUDE.md § 17` forbids a second implementation of a rule that has one, and a
+  parallel copy would be the one that quietly starts writing `'unknown'`.
+
+### What is measured so far, and what is not
+
+**Offline: 374 passed, 0 skipped with `DATABASE_URL` set; 268 passed, 106 skipped without it.** All
+thirteen mutations in the brief's table were **watched red and restored**, with `__pycache__` cleared
+between the restore and the re-run, and none went red for the wrong reason.
+
+**NOTHING ABOUT THE RIVER HAS BEEN MEASURED BY THIS COMMIT.** The integration tier runs against a
+**synthetic** eight-year fixture with five seeded low-water events, built so that all three gate
+branches are reachable — a passing query, a refusal on too few analogs, and a clean refusal on a
+quiet day. That fixture exists to prove the mechanism works in both directions; **it says nothing
+about what the real data will do**, and a fixture where the gate could never pass would make "it
+refused" indistinguishable from "it is broken".
+
+**Still owed and needing the instance:** the gate result for the 2022 and 2023 labelled events
+including their refusals, the observed distribution of distances, the collapsed event count per site,
+and whether the gate can pass at Memphis at all. **If it refuses everywhere, that is the headline and
+it gets recorded as such** — one deep site, sixteen years of four-site overlap, and a sweep that
+found one contemporaneous relationship out of 6,966.
 
 ---
 
@@ -1877,37 +2012,81 @@ Bring the stack up with `docker compose -f docker-compose.yml -f /root/dws-local
 Delete it once the `worker` service is containerized; at that point `DATABASE_URL` becomes
 `timescaledb:5432` and nothing needs a published port.
 
-## PHASE 6 HAS RUN. **PHASE 7 IS THE NEXT THING TO DO — AND THE TWO ITEMS BELOW COME FIRST.**
+## PHASE 7 IS BUILT AND UNRUN. **THE LIVE PROCEDURE IS THE NEXT THING TO DO.**
 
-The sweep ran on 2026-08-15; the outcome is recorded at the top of this file under `PHASE 6 —
-VERIFIED`, in the same session, which is the first time this project has managed that. **1 of 6,966
-pairs passes the gate, contemporaneously, with a negative statistic.**
+The analog engine, the confidence gate and the two tables are written, green offline, and
+mutation-confirmed on all thirteen rows. **They have answered nothing about the river.** Everything
+below is for a human on the instance, and it is the step this project's process note says gets
+skipped: *running the verification and not recording the result is not finishing the verification.*
 
-**Two things are owed before Phase 7 starts, and both are small:**
+**Three small things are still owed from Phase 6 and none of them blocks this:**
 
 1. **The `run_id` and the wall time of the sweep run.** `select run_id, started_at, finished_at from
-   signal_runs order by started_at desc limit 1;` — every query in the write-up is parameterized on
+   signal_runs order by started_at desc limit 1;` — every query in that write-up is parameterized on
    a `run_id` the file does not name.
-2. **DEBT 1a — paste the four CSVs.** They are captured and unpasted, which is where the debt has
-   been in one form or another across three phases. Fenced blocks, into `PHASE 4 — VERIFIED` and
-   `PHASE 5 — VERIFIED`, replacing the notes that say the output is still owed.
+2. **DEBT 1a — paste the four CSVs.** Captured and unpasted, which is where the debt has been in one
+   form or another across three phases. Fenced blocks, into `PHASE 4 — VERIFIED` and `PHASE 5 —
+   VERIFIED`, replacing the notes that say the output is still owed.
+3. The recovery-regime data gap stays open and is **explicitly out of scope** for this phase.
 
-### Phase 7 — the analog engine and the confidence gate, against a null result
+### Phase 7 live verification — on the instance
 
-The analog engine and the confidence gate as a consumer. **It reads `signals`; it does not re-run
-the sweep**, and `directional_consistency` with its `folds` is the column `CLAUDE.md § 7`'s ≥70%
-half consumes. The **≥4 analogs** half has no counterpart in Phase 6 and was deliberately not
-approximated by something fold-shaped — that is Phase 7's to build.
+**EXPECT REFUSALS.** The engine sits on a sweep that found one contemporaneous relationship out of
+6,966. A run where the gate passes everywhere is a reason to look for a bug before celebrating.
 
-**Build it knowing the table is empty of signal.** One passing row, at lag 0, sign against the
-thesis, q = 0.0446. The gate's job on this data is to say **"insufficient history"**, and a gate that
-cannot be watched saying it on the data currently in the database is a gate nobody has seen work —
-the same gap `FINDING 4` records about the eight-year climatology guard. **The null result is the
-test case, not an obstacle to it.**
+1. `python -m app.orchestration.migrate` — expect **0024 and 0025** applied, **twenty-five total**.
+2. **LOOK AT THE DISTANCES BEFORE SETTING ANY CUTOFF:**
+   `python -m app.analogs.engine --as-of 2022-09-06 --site 07032000 --explain`
+   **Report the k distances and whether they cluster or spread.** `SIMILARITY_CUTOFF` is `None` and
+   **this is what one would be set from, later, by you** — a cutoff proposed before this step is a
+   claim about similarity made before anybody had seen one.
+3. The same for **2023-09-05**.
+4. **BOTH LABELLED EVENTS, PLAINLY.** For each: did the gate pass or refuse, and with what counts —
+   `n_raw_detections`, `n_collapsed_events`, `n_analogs`, `n_consistent`. **If both refuse, that is
+   the headline** and it is recorded as such rather than worked around.
+5. **COUNT HOW MANY EVENTS EXIST AT ALL**, because it may settle the question outright:
+   ```sql
+   select gate_result, count(*) from analog_queries group by 1 order by 2 desc;
+   select as_of_date, n_raw_detections, n_collapsed_events, n_analogs, n_consistent, gate_result
+     from analog_queries order by created_at desc limit 10;
+   ```
+   **If the collapsed event count over the full history at Memphis is under 4, the gate can never
+   pass at this site**, and that is a fact about the dataset worth stating in one sentence rather
+   than discovering repeatedly.
+6. **A date with no low-water condition** — e.g. `--as-of 2021-05-12` — must refuse **cleanly** with
+   `no_current_event` rather than returning distant analogs for a condition that is not happening.
+7. `python -m verify.preflight` — six gates green. Its migration-count gate reads the directory, so
+   twenty-five migrations need no change to it.
+8. **Write the outcome back in the same session**, including the refusals and the distances, and set
+   `§ Up Next` to Phase 8.
 
-**Phase 7 selects; Phase 6 measured.** Keeping those in separate steps is the whole point of
-`CLAUDE.md § 18`'s seventh bullet, and the sweep exposes no accessor that would let Phase 7 shortcut
-it.
+### What to record, and what NOT to do with the answer
+
+**Record:** the gate result for both labelled events including refusals; the observed distance
+distribution; the collapsed event count per site; and — if the gate refuses everywhere — **that this
+is the honest state of the project, with the reason**: one deep site, sixteen years of four-site
+overlap, and a sweep that found one contemporaneous relationship out of 6,966.
+
+**DO NOT**, on seeing a refusal:
+
+- lower `MIN_ANALOGS` or `MIN_DIRECTIONAL_CONSISTENCY`. They are `CLAUDE.md § 7`'s numbers, they are
+  not this phase's to move, and the moment to change them is never the moment a refusal disappoints.
+- set a similarity cutoff to make the surviving analogs agree. That is the filtered-set failure
+  `CLAUDE.md § 19` names, and it would leave the gate counting a subset while reporting it as the
+  history.
+- lower `ENTRY_RUN_LENGTH_DAYS` to manufacture more events. It admits shorter, thinner events —
+  exactly the ones most likely to look similar to each other by chance.
+- widen `OUTCOME_WINDOW_DAYS` until a move appears.
+
+Each of those is a **human decision in its own commit**, with the current values' results measured
+first so the change has a before — and this procedure's output is that before.
+
+### Phase 8 — after the engine has been run and its outcome is recorded
+
+The FastAPI surface and the React frontend: `CLAUDE.md § 6`'s `api` and `caddy` services, the river
+map, and the chart. **It calls `engine.query` and renders `AnalogResult`** — which carries no
+estimate on a refusal, so the UI cannot display one by accident. The refusal sentence is a
+first-class state in that UI, not an empty chart.
 
 ---
 
@@ -2035,7 +2214,7 @@ precisely so the dilution is visible in the table rather than argued about.
    no NULLs anywhere. **If a fifth gauge is ever seeded with a short record, that is the first run
    where it matters.**
 
-### Phase 7 — promoted to the top of this section, now that the sweep has run
+### Phase 7 — built on 2026-08-15. Its live procedure is at the top of this section.
 
 ---
 

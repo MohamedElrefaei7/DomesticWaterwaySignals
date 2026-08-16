@@ -823,3 +823,88 @@ relationships, correctly computed, individually reproducible, and mostly noise.
   only in their own commit. Lowering one makes more pairs scannable and **the pairs it admits are
   exactly the short, sparse ones most likely to produce a large correlation by chance**; raising one
   after seeing the results is selecting a method that suited the answer.
+
+---
+
+## 19. Analog engine conventions
+
+Learned building the analog engine and the confidence gate (Phase 7). § 18 governs claims about
+relationships measured across all history; **this governs claims about what happened the last few
+times conditions looked like this** — the user-facing output CLAUDE.md § 7 fixes.
+
+The difference is the sample size. A sweep's error is a q-value that should have been larger; an
+analog engine's error is **a confident sentence built on four coincidences**, rendered in prose, with
+no q-value anywhere in it and nothing in the wording to show what it was made of. And it inherits the
+sweep's verdict rather than replacing it: **Phase 6 scanned 6,966 pairs and one passed, at lag 0, with
+zero passing rows at any non-zero lag in either direction.** An engine standing on that is expected to
+refuse, and the whole of this section exists so that the honest answer is the easy answer.
+
+- **An event is detected using only observations up to and including the detection date. Its duration
+  and depth are outcomes, never part of its definition.** "A period during which the counter reached
+  at least twenty days" cannot be evaluated until the period is over, so every historical event
+  defined that way is **defined using its own future** — and selecting analogs by how the river turned
+  out correlates them with how the market turned out. The numbers come out strong and nothing in the
+  output shows it. **Enforce it by signature:** the function deciding about a date is handed the
+  series up to that date and nothing else, so the lookahead version would have to ask for an argument
+  that does not exist. A behavioural test alone goes green the moment somebody adds an `as_of`
+  parameter and passes the whole series; assert both.
+- **Detections within the separation window collapse into one event. The gate consumes collapsed
+  events, never raw detections.** A sustained low-water period produces a detection every day it
+  continues, and **one event would then satisfy "≥ 4 analogs" several times over** — manufactured
+  conviction from a single coincidence, arriving in the exact form the gate cannot see, because four
+  analogs is four analogs. **Store both counts.** A history whose raw count is in the hundreds and
+  whose collapsed count is two is the honest description of a dataset, and a collapse whose effect is
+  invisible is a collapse nobody notices the removal of.
+- **The similarity metric carries no fitted weights.** Weights fitted so that near events have similar
+  outcomes are **in-sample optimization wearing a metric's clothes**: invisible in the output, with no
+  held-out data anywhere in this phase to catch them, and they improve every number, which is what
+  makes it feel like progress. Unweighted claims nothing about which feature matters, which is the
+  only honest claim available after a sweep that found no feature that predicts anything. Guard it by
+  **module surface** — the failure is a fitting path that does not exist yet, and no behavioural test
+  can be written against a function nobody has written.
+- **There is no similarity cutoff until a human has looked at a distribution of distances.** "How
+  similar is similar enough" is a modelling decision (§ 1). Return the k nearest whatever they cost,
+  **report every distance, and store them** — a cutoff is also the quietest way to make the gate pass,
+  because dropping the far analogs leaves a set that agrees with itself while the gate reports it as
+  the history.
+- **The outcome window is a parameter fixed before outcomes are inspected.** Measuring at three
+  windows and reporting the strongest is § 18's multiple-comparisons problem relocated somewhere with
+  no q-values to catch it — and unlike a sweep, **nothing records the windows that were discarded.**
+  If more than one window is wanted, every window is reported for every query, always, with none
+  selected.
+- **A missing outcome endpoint is NULL with a stated reason, counted, and never filled in.** Carrying
+  the previous rate forward produces a return of **exactly zero** — the most ordinary value the column
+  can hold — landing preferentially wherever the source goes quiet. Walking back to the last published
+  value silently measures a longer window, by a different amount per analog. Dropping the analog
+  shortens the evidence with nothing to show it happened. **"The fourth analog had no measurable
+  outcome" and "there was no fourth analog" are different facts**, and only one of them says more
+  ingest would help.
+- **The confidence gate is evaluated before outcome statistics exist, and a refused query carries no
+  estimate anywhere in its result.** Not withheld — **never computed**. A value that exists is one
+  refactor away from being displayed: it becomes a field in a debug payload, then a tooltip, and each
+  step looks like a small convenience. Assert it by watching whether the summarizing function was
+  *called*, and walk the whole returned structure for numeric leaves rather than checking named
+  fields, because the failure is a number somewhere nobody thought to look.
+- **A refusal is a returned value with a stated reason and its counts, not an exception and not a log
+  line — and it is recorded as a row.** A table holding only the queries that produced an estimate
+  makes an engine that refuses ninety-nine times in a hundred look like an engine that answers: § 18's
+  disappearing denominator, one layer up, with no q-value to catch it. The reasons stay distinct
+  because they are different news — too few events is a coverage problem, an unmeasurable outcome is a
+  publication problem, and an inconsistent direction is a statement about the relationship that no
+  amount of ingest improves.
+- **A rendered claim carries its own sample size, consistency count and window IN THE SENTENCE.** Not
+  in a caption, not in a sibling field. The sentence is the unit that gets quoted, and a claim that
+  does not carry its denominator will be quoted without one. **Every number in it must be reproducible
+  from a query** (§ 7), including the depth of any baseline it names — a hardcoded "10-year median"
+  beside a median computed over thirty-seven years is a number in a quotable sentence that traces to
+  nothing.
+- **The rendered sentence never asserts a filter that was not applied.** If no seasonal restriction
+  ran, the words "during harvest season" do not appear; if discharge was measured, the sentence does
+  not say stage. The template is a shape to fill, **not a claim to live up to**.
+- **Every analog output records the parameters that produced it and the sweep's verdict on the
+  relationship it assumes.** A hash over the human-owned values, because two outputs under different
+  similarity settings are not two observations of one thing; and the sweep's q-value, because an
+  output must not be readable without it.
+- **An engine that finds confident analogs where the sweep found no relationship has a bug, not a
+  discovery.** This is the last bullet because it is the one to check first when the output looks
+  good.
