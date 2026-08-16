@@ -3,12 +3,16 @@
 This is the **log**: current state, decisions as they are made, and `§ Up Next`. Stable contracts
 live in `CLAUDE.md`. If something here hardens into an invariant, move it there and note the move.
 
-**Last updated:** 2026-08-16 (**PHASE 8 BUILT OFFLINE — THE READ API. NOT YET RUN ON THE
-INSTANCE.** Eight GET endpoints under `app/api/`, `fastapi==0.141.1` and `uvicorn==0.52.3` pinned,
-444 passed with `DATABASE_URL` set and 314 passed / 130 skipped without, **all sixteen mutation rows
-watched red and restored** — two of them needing a second form, and both of those are recorded below
-because the second forms are findings rather than bookkeeping. **The live procedure at the bottom of
-this file has not been run and nothing in this commit has touched the instance.**
+**Last updated:** 2026-08-16 (**PHASE 8 IS VERIFIED ON THE INSTANCE — THE READ API HAS RUN.** Eight
+GET endpoints under `app/api/`, `fastapi==0.141.1` and `uvicorn==0.52.3` pinned, 444 passed with
+`DATABASE_URL` set and 314 passed / 130 skipped without, **all sixteen mutation rows watched red and
+restored** — two of them needing a second form, and both of those are recorded below because the
+second forms are findings rather than bookkeeping. **`waterway_api` has been watched refusing a
+`DELETE` with `permission denied for table job_runs`** — the one Phase 8 property no test could
+stand in for — with no fallback WARNING in the startup log, so the six live responses went through
+the read-only role and not the owner. `/api/health` reported `degraded: true` on real inactivity,
+and the job-overdue-versus-data-stale disagreement it showed is a finding recorded below rather than
+an inconsistency.
 **Phase 7 still stands and its three open questions are still open** — the gate passed on both
 labelled events (2022: 4 analogs, 3 of 4, median **+7%**; 2023: 5 analogs, 4 of 5, median **+10%**,
 range up to **+270%** from `2022-09-16`, the immediately preceding year), every analog inside
@@ -18,7 +22,184 @@ one surviving row is **negative**. Phase 6 stands: 1 of **6,966** pairs, contemp
 
 ---
 
-## Phase 8 — the FastAPI read layer. **WRITTEN OFFLINE 2026-08-16. NOT YET RUN ON THE INSTANCE.**
+## PHASE 8 — VERIFIED ON THE INSTANCE, 2026-08-16. COMPLETE.
+
+**The read API has run against real data through the read-only role, and the role has been watched
+refusing a write.** Six requests, six responses, and the property that no test could stand in for is
+now observed rather than inferred.
+
+### 1. THE READ-ONLY ROLE, PROVEN RATHER THAN ASSUMED
+
+`waterway_api` was created with `GRANT SELECT ON ALL TABLES IN SCHEMA public` plus `ALTER DEFAULT
+PRIVILEGES … GRANT SELECT ON TABLES`, and nothing else. **The refusal was watched:**
+
+```
+docker compose exec timescaledb psql -U waterway_api -d waterway -c "delete from job_runs where 1=0"
+ERROR:  permission denied for table job_runs
+```
+
+**This is the one property in Phase 8 that no unit or integration test could have stood in for.**
+The offline suite proves the *application code* issues no writes — no non-GET route is declared, the
+route walk reaches all eight endpoints before asserting anything about their methods, `app/api/`
+contains no writing SQL, and `engine.query` is called with `persist=False`. Every one of those is a
+statement about this repo. **None of them says anything about what the database would do if the code
+tried anyway.** The `DELETE` above is that second statement, and the two halves are now verified
+independently: the code does not ask, and the role would refuse if it did. `CLAUDE.md § 20`'s "a
+read-only role that has never been observed refusing a write is not known to be read-only" is
+discharged.
+
+`where 1=0` so the statement was harmless even if the grant had been wrong — the check had to be
+safe to run *before* the answer was known, which is the whole point of running it.
+
+**The uvicorn startup log was checked for the fallback WARNING and it was not there.** When
+`API_DATABASE_URL` is absent the API falls back to `DATABASE_URL` — the owner connection — and logs
+a warning saying so (`app/api/dependencies.py:53-67`). **No such line appeared**, so the six
+responses below came through `waterway_api` and not through the owner. Without that check every
+request below would pass identically under either role and this section would be describing a test
+of the owner.
+
+### 2. THE SIX LIVE RESPONSES
+
+Key evidence only. The full bodies are in the session transcript; what is recorded here is the field
+or two in each that carries the property.
+
+| Request | Came back | The evidence |
+|---|---|---|
+| `/api/health` | `degraded: true` | every job `overdue: true`; `barge_rates` and `lock_movements` `stale: false` — see § 3 |
+| `/api/conclusion?site_id=07032000&as_of=2022-10-11` | `gate: "passed"` | `analogs: 4`, `consistent: 3`, `median_pct: 7.35`, **and `sweep.passing_pairs: 1` / `sweep.scanned_pairs: 6966` in the same body** |
+| `/api/conclusion?site_id=07032000&as_of=2022-09-06` | `gate: "no_current_event"` | `median_pct`, `range_pct`, `matches` **absent** — not null |
+| `/api/rates?segment=Twin Cities&horizon=nearby&start=2022-01-01&end=2022-03-31` | 11 rows read | 5 of them `pct_of_tariff: null`, then `850.0` on `2022-03-22` |
+| `/api/gauges/07032000/series?start=2022-09-01&end=2022-11-01` | `total: 62`, 62 rows | no truncation; the 2022 event's own discharge trace |
+| `/api/rates?start=2000-01-01&end=2026-01-01` | **422** | the five-year span limit, enforced over HTTP |
+
+**The +7% is never returned without its sweep context.** `median_pct: 7.35` and `passing_pairs: 1`
+of `scanned_pairs: 6966` arrived in one body, on the passing shape, at the first request that ever
+stated Phase 6's denominator through the API. 1 reads as a finding; 1 of 6,966 reads as the top of a
+distribution, and a reader who screenshots the median gets the denominator in the same rectangle.
+
+**The refusal was read in full by eye, and it contains no key that could be misread as an
+estimate.** Not `median_pct: null`, not a zero three levels down, not a debug block — the keys are
+absent. The recursive-walk test asserts this offline against fixtures; this is the same property
+confirmed against real data on a real date, which is a different check and the one `CLAUDE.md § 20`
+asks for. `no_current_event` came back as its own shape rather than as `refused`: a quiet river is
+not a coverage problem.
+
+**The nulls survived serialization.** Five of the first eleven Twin Cities rows carry
+`pct_of_tariff: null` — winter closure, matching Phase 4's measurement that 426 of that segment's
+records have no rate and that 661 of the 774 absent nearby rates fall in December–March — and then
+`850.0` lands on `2022-03-22` as ice-out resumes. **Not one of the five arrived as `0`.** A zero
+there would have been a week when barge freight was free, well formed, correctly typed, and
+indistinguishable from a real reading on any chart.
+
+**The series window happens to show the event the analog engine detected on the same dates.** 62
+days, `total: 62`, no truncation: discharge from ~250,000 down to a trough of ~147,000–149,000
+around 10-17 to 10-21, then recovery. The conclusion request above ran `as_of=2022-10-11` and found
+4 analogs; this is the trace underneath that answer, served by a different endpoint, and the two
+agree about when the river was low. Nothing was tuned to make them agree — the same rows fed both.
+
+**The span limit is enforced over HTTP, not only in the route-level unit test.** `MAX_SPAN_YEARS = 5`
+(`app/api/dependencies.py:48`) rejected a 26-year request with a 422 rather than serving it or
+clamping it. A clamp is the failure mode that matters here: a client asking for 26 years and
+receiving 5 has no way to tell that from a filter that matched 5.
+
+### 3. FINDING — "JOB OVERDUE" AND "DATA STALE" ARE DIFFERENT QUESTIONS, AND THEY DISAGREED
+
+Every job reported `overdue: true` while `barge_rates` and `lock_movements` both reported
+`stale: false` in the `data` block. **That is correct behaviour, and the reason is worth stating
+precisely because the response looks self-contradictory at a glance:**
+
+- **`overdue` answers "has this been RUN recently."** It is measured from `job_runs` — the most
+  recent `success` row's `finished_at`, never the most recent row of any status — against that job's
+  own `overdue_after` from the cadence table.
+- **`stale` answers "is what is ALREADY STORED still inside its freshness window."** It is measured
+  from the data — `MAX(week_ending)` on the table — against that entry's own `max_staleness`.
+  `CLAUDE.md § 4`: liveness is measured from the data, never from the process.
+
+Two clocks, two sources, two questions. **A table can be perfectly fresh while the job that fills it
+has not run, and that is exactly what happened here.**
+
+**The mechanism is the null branch, and it is not the threshold arithmetic.** `last_success` came
+back **`null`** on both USDA jobs, with `age_seconds: null` beside it. `app/orchestration/
+heartbeat.py:297` computes `overdue=(age is None or age > entry.overdue_after)` — **a job with no
+successful run on record is overdue rather than quiet** (`CLAUDE.md § 12`), regardless of any
+threshold. Meanwhile the tables hold rows a backfill CLI landed (`CLAUDE.md § 14`: a backfill is a
+CLI a human runs, never a scheduled job), so `MAX(week_ending)` sits inside the 10-day window and
+`stale` is correctly false. **The scheduled job has never recorded a success; the data it would have
+written is present anyway.**
+
+**This was very nearly written up with the wrong explanation, and the wrong one is worth recording
+so it does not get re-derived.** The natural account — "the freshness window is longer than the gap
+since the job last ran" — is a sound general principle and is **false for these two jobs**, because
+their thresholds run the other way:
+
+| | `overdue_after` | `max_staleness` |
+|---|---|---|
+| `usda_rates_ingest` / `barge_rates` | **14 days** (1,209,600 s) | **10 days** (864,000 s) |
+| `usda_movements_ingest` / `lock_movements` | **14 days** | **10 days** |
+
+The freshness window is the **shorter** of the two. Under that pairing a gap short enough to leave
+the data fresh (< 10 days) is also short enough that the job is not overdue (< 14 days), so the
+arithmetic cannot produce the combination that was observed. And `app/orchestration/cadence.py:193-199`
+picked 14 days *deliberately* to make that ordering hold — two intervals rather than the three every
+other entry uses, because "a three-week job threshold would let the DATA check speak twice before the
+JOB check spoke once, which inverts which of the two an operator reads first." **The design intends
+data-stale to fire before job-overdue on these two jobs.** An explanation resting on the reverse
+would have contradicted the code while sounding entirely reasonable, and `last_success: null` is what
+settled it.
+
+**`degraded: true` in this run reflects real inactivity, not a defect in Phase 8.** No scheduler
+process has been running continuously across sessions, so no ingest job has a recent success and
+several have none at all. The endpoint is reporting the instance accurately. **The 200 alongside it
+is the decision, not an oversight** (`CLAUDE.md § 20`): an uptime monitor that goes red on a stale
+ingest job is indistinguishable from one that goes red because the API is down, and `degraded` is a
+field so a monitor can alert on the field.
+
+### 4. STANDING ITEM, NOT A DEFECT — THE SCHEDULER IS NOT A PERSISTENT PROCESS
+
+**Whether the scheduler should run as a persistent background process — eventually a systemd unit —
+rather than being started by hand per development session is an open question for Phase 10 or 12.**
+It is what produces the `degraded: true` above and the `last_success: null` values behind it. It
+does **not** block Phase 8, nothing in this commit addresses it, and nothing should: it is a
+deployment decision, it belongs in the phase that containerizes the worker, and changing it now
+would mean changing what the health endpoint was measured against in the same session it was first
+measured.
+
+### What is NOT recorded as a test
+
+**No test asserts `median_pct == 7.35`, `total == 62`, or that five particular rows are null.** Those
+are a point-in-time observation on real, changing data — not invariants. The offline suite already
+guards the *properties*: that a null survives serialization and a zero does too, each in its own
+direction; that a refusal carries no estimate, asserted twice because a `null` key and a numeric key
+are different failures; that `passing_pairs` never appears without `scanned_pairs`; that an
+over-maximum span is rejected rather than clamped. **This section records one instance of those
+properties holding. It does not encode the instance as a new assertion**, which would be a test that
+goes red when the river changes.
+
+### Still owed — three sub-steps of the live procedure are NOT covered by the six responses above
+
+Recorded as not-run rather than left to be inferred from the six that were, because a procedure with
+twelve steps and six recorded outcomes is otherwise indistinguishable from one where all twelve
+passed:
+
+- **Step 9's second half — `curl -s localhost:8000/api/gauges`.** Memphis's `observed_start` against
+  its declared `2014-10-01` is the `CLAUDE.md § 15` envelope-versus-served comparison, and it is the
+  one measurement in this procedure that is about the *catalog* rather than about serialization. Not
+  requested in this session. The series endpoint was, and it is a different question.
+- **Step 10's second half — `…&limit=50000` on a valid window, expecting 422 rather than a clamped
+  200.** The span limit was confirmed over HTTP; the over-maximum *limit* was not. These are two
+  separate rejections in `app/api/dependencies.py` and only one of them has been exercised live.
+- **Step 11 — `python -m verify.preflight`, six gates green.** Owed from Phase 7's run as well, and
+  now owed from two.
+
+### Also still owed, unchanged by this run
+
+- **Phase 7's step 1** — `python -m app.orchestration.migrate` showing twenty-five applied.
+- **The sweep's `run_id` and wall time**, which every Phase 6 query in this file is written against.
+- **DEBT 1a — the four thesis CSVs.** The script ran, the files exist, the paste has not happened.
+
+---
+
+## Phase 8 — the FastAPI read layer. **WRITTEN OFFLINE 2026-08-16. THE BUILD RECORD; THE OUTCOME IS ABOVE.**
 
 Twelve modules under `app/api/`, six test files under `tests/api/`, two lines added to
 `requirements.txt` and one to `requirements-dev.txt`. **No migration, no cadence entry, no
@@ -2411,18 +2592,31 @@ Bring the stack up with `docker compose -f docker-compose.yml -f /root/dws-local
 Delete it once the `worker` service is containerized; at that point `DATABASE_URL` becomes
 `timescaledb:5432` and nothing needs a published port.
 
-## PHASE 8 IS BUILT AND NOT VERIFIED. **THE LIVE PROCEDURE BELOW IS THE NEXT THING TO RUN.**
+## PHASE 8 IS VERIFIED. **PHASE 9 IS NEXT.**
 
-Nothing in the Phase 8 commit has touched the instance. Until the steps below are run **and their
-outcomes written back into this file in the same session** (see the process note above — this is
-the rule this file most needs and has historically not followed), Phase 8 is code that passes its
-own tests and nothing more.
+**The live procedure below has been run and its outcomes are recorded at the top of this file**, in
+the same session, which is the process note above being followed rather than deferred for the first
+time in this project. The steps are kept because they are rerunnable — after a reboot, after a
+dependency bump, before trusting the read layer again — not because anything is outstanding in them.
 
-### Phase 8 live verification — NOT YET RUN
+**Step 3 was the one that could not be inferred, and it is the one that paid.** `waterway_api` was
+watched refusing a `DELETE` with `permission denied for table job_runs`; every other step passes
+identically whether the role is `waterway_api` or the owner, which is why the startup log was also
+checked for the fallback WARNING that would have meant the owner was under test. It was absent.
 
-**Step 3 is the one that cannot be inferred.** A read-only role that has never been observed
-refusing a write is not known to be read-only, and every other step passes identically whether the
-role is `waterway_api` or the owner.
+**Two things came out of the run that the procedure did not anticipate:** `last_success` is `null`
+on both USDA jobs rather than merely old — no scheduled ingest has ever recorded a success — and
+that, not any threshold comparison, is why the health response shows overdue jobs beside fresh
+tables. Both are written up in § 1–3 of the verification block at the top of this file.
+
+**Three sub-steps below were NOT run and are listed as such in the verification block:** step 9's
+`/api/gauges` request (the § 15 envelope-versus-served comparison), step 10's `limit=50000` rejection,
+and step 11's `preflight`. **Also still owed and none of it Phase 8:** Phase 7's step 1 (`migrate`
+showing twenty-five applied), the sweep's `run_id` and wall time, and **DEBT 1a — the four CSVs**.
+The scheduler running as a persistent process rather than being started by hand per session is a
+**Phase 10 or 12 question**, recorded as a standing item and deliberately not addressed here.
+
+### Phase 8 live verification — RUN 2026-08-16, OUTCOMES AT THE TOP OF THIS FILE
 
 1. `pip install -r requirements.txt` — confirm **`fastapi==0.141.1`** and **`uvicorn==0.52.3`**
    install at those versions. Also `pip install -r requirements-dev.txt` for `httpx2==2.10.0` if
@@ -2467,12 +2661,14 @@ role is `waterway_api` or the owner.
    its declared `2014-10-01` is the § 15 envelope-versus-served comparison, measured.
 10. `curl -s -o /dev/null -w "%{http_code}\n" "localhost:8000/api/rates?start=2000-01-01&end=2026-01-01"`
     — expect **422**. And `...&limit=50000` on a valid window — also **422**, not a clamped 200.
-11. `python -m verify.preflight` — six gates green. **Still owed from Phase 7's run as well.**
+11. `python -m verify.preflight` — six gates green. **NOT RUN 2026-08-16. Still owed from Phase 7's
+    run as well, and now owed from two.**
 12. **Write the outcomes back into this file in the same session**, and set `§ Up Next` to Phase 9.
+    **Done 2026-08-16 — the first time in this project that a live verification and its write-back
+    happened in one session.**
 
-**Also still owed, and neither blocks Phase 8:** Phase 7's steps 1 and 7 (`migrate` showing
-twenty-five applied, and `preflight`), the sweep's `run_id` and wall time, and **DEBT 1a — the four
-CSVs**.
+**Steps 5, 6, 7, 8, 9 (first half) and 10 (first half) produced the six responses recorded at the
+top of this file. Steps 9 (second half), 10 (second half) and 11 were not run.**
 
 ---
 

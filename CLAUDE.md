@@ -950,6 +950,15 @@ and the client renders something plausible.**
   red on a stale ingest job is indistinguishable from one that goes red because the API is down,
   and the two need different responses at different hours. A cached health check reports the state
   of the world before the incident somebody is reading it about.
+- **A job's `overdue` verdict and its table's `stale` verdict are independent measurements of
+  different things; a disagreement between them is information, not a defect. Neither is ever
+  derived from the other and they are never collapsed into one status.** `overdue` asks "has this
+  been RUN recently", from `job_runs`; `stale` asks "is what is ALREADY STORED still inside its
+  freshness window", from `MAX(ts)` on the table (§ 4). A job with no successful run on record is
+  overdue (§ 12) while rows a backfill CLI landed (§ 14) stay perfectly fresh — measured on
+  2026-08-16, on both USDA jobs at once — so an endpoint reporting only one of the two is blind in
+  whichever direction it dropped, and a reader who assumes one implies the other will reach for the
+  wrong threshold to explain it.
 - **A refused or unavailable result is a distinct response shape whose estimate keys are ABSENT,
   not null. A client cannot default a key that does not exist.** `median_pct ?? 0`,
   `Number(x) || 0`, a chart library's `defaultValue` — each is a reasonable line of client code and
