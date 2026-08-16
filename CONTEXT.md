@@ -3,15 +3,200 @@
 This is the **log**: current state, decisions as they are made, and `§ Up Next`. Stable contracts
 live in `CLAUDE.md`. If something here hardens into an invariant, move it there and note the move.
 
-**Last updated:** 2026-08-15 (**PHASE 6 IS WRITTEN AND GREEN OFFLINE; IT HAS NOT RUN ON THE
-INSTANCE.** Phases 1–5 are complete and verified there. Phase 6 builds the ±lag sweep, the
-walk-forward evaluation, and the `signals` table, and closes three of the four standing debts —
-the fourth, the four verbatim query outputs, needs the instance and is now a script away.
-**No sweep result exists yet. Nothing in this file claims one.**)
+**Last updated:** 2026-08-15 (**PHASE 6 HAS RUN ON THE INSTANCE, AND THE SWEEP FOUND ESSENTIALLY
+NOTHING. THAT IS THE RESULT.** 1 of **6,966** scanned pairs passes the gate; **271** would have
+cleared the same threshold applied to the unadjusted p-value, and Benjamini-Hochberg collapsed that
+to 1. The one survivor is **contemporaneous** — `lag_days = 0` — and its statistic is **negative**.
+**No lead survives correction at any lag, in either direction.** Phases 1–5 remain complete and
+verified. **Debt 1a is still open:** the capture script has run and the four CSVs exist, and nothing
+has been pasted into this file yet.)
 
 ---
 
-## PHASE 6 — THE ±LAG SWEEP. WRITTEN OFFLINE 2026-08-15. **NOT YET RUN ON THE INSTANCE.**
+## PHASE 6 — VERIFIED ON THE INSTANCE, 2026-08-15. COMPLETE.
+
+**1 of 6,966 scanned pairs passes the gate.** The denominator is stated in the same sentence as the
+survivor because a passing count without one is the dishonest form of this result
+(`CLAUDE.md § 18`), and because one row out of six thousand nine hundred and sixty-six is a
+different claim from one row out of one.
+
+### THE COMPARISON IS THE RESULT, NOT THE SURVIVOR
+
+| | Count | Share of the scanned grid |
+|---|---|---|
+| Scanned and written to `signals` | **6,966** | — |
+| Would have cleared the threshold on the **unadjusted** p-value | **271** | **3.9%** |
+| Clear the gate after **Benjamini-Hochberg** | **1** | **0.014%** |
+
+**271 → 1 is what the multiple-comparisons correction did, and it is the entire justification for
+`CLAUDE.md § 18` existing.** A sweep that had stored only its survivors would have produced 271 rows
+in a table of 271: a page of significant-looking relationships, every one correctly computed, every
+one individually reproducible, and almost all of them noise. Nobody would have had to delete
+anything for that to happen — the filter happens at write time and leaves no trace of itself.
+
+**And the unadjusted count is BELOW what chance alone predicts.** At α = 0.05 a grid of 6,966
+independent tests yields ~**348** significant results on pure noise; this grid yielded **271**. The
+tests are not independent — adjacent lags of one feature are very nearly the same test, which widens
+the spread around that expectation in both directions — so 271 on its own is not evidence *against*
+the thesis. What it forecloses is the reading in the other direction: **nothing in this table is
+finding significance at more than the rate chance predicts.**
+
+Step 8 of the live procedure said that if the passing count came out near 5% of the grid, the sweep
+was finding noise at exactly the rate chance predicts and *that* was the finding, to be recorded as
+such rather than mined for its strongest row. **The raw count came in just under that line, and
+after correction it is 1. This section is that recording.**
+
+### THE SINGLE SURVIVOR, AND IT IS CONTEMPORANEOUS RATHER THAN PREDICTIVE
+
+| Column | Value |
+|---|---|
+| `feature_name` | `days_below_p10` |
+| `site_id` | `07032000` — Memphis |
+| `horizon_days` | **7** |
+| `lag_days` | **0** |
+| `regime` | `all` |
+| `statistic` | **−0.137** |
+| `q_value` | **0.0446** |
+| `n_effective` | **616** |
+| `directional_consistency` | **1.00**, over **5** folds |
+
+**`lag_days = 0` is the sentence in that table.** The one pair that survives correction is the
+feature measured over the same period as the target. It is a **contemporaneous association, not a
+lead.** This project's thesis is that the physical constraint *leads* the market; this row is not
+evidence for that thesis, it is evidence that the two move together within the same week.
+
+**The sign is negative.** −0.137 says more days below p10 goes with a *lower* forward rate return,
+which is the opposite direction from the headline this project started with. It is also roughly what
+`regime = all` should be expected to produce if Phase 5's finding 2 holds — that regime averages a
+positive onset against a negative recovery — **but that is a story told about a result after seeing
+it, and the rows that would test it are the ones below, neither of which supports it.** It is
+recorded as an unexplained sign, not as a confirmation.
+
+**q = 0.0446 is one row away from no survivors at all.** It clears 0.05 by 0.0054. `grid_size` and
+`n_tests_adjusted` ride on the row for exactly this reason: the same statistic adjusted across a
+narrower scan would carry a smaller q, in the same column, in the same units, from a different
+experiment.
+
+**The feature it is built on is a stand-in.** `days_below_p10` counts days below a percentile this
+project picked because no operational threshold has a source yet (`CLAUDE.md § 1`). `days_below_p05`
+and `days_below_p20` were scanned beside it, over the same sites, horizons, lags and regimes, and
+**produced no passing rows at all.** Whatever this row is evidence of, it is evidence about p10 —
+and the sensitivity of a lone survivor to the arbitrary level underneath it is not reassuring.
+
+**`directional_consistency = 1.00` meets one half of `CLAUDE.md § 7`'s gate and not the other.**
+Five of five folds agreed in sign, which clears ≥70% — and five is the minimum this phase admits,
+because a fraction of five folds is the coarsest thing that can honestly be compared to 70%. The
+**≥4 analogs** half has no counterpart in this table and was deliberately not approximated by
+anything fold-shaped. **Nothing here is quotable under the output contract yet.**
+
+**On `n_effective = 616`:** at horizon 7 the overlap correction `n / (horizon_days / 7)` is the
+identity, so this is the raw count and not a discounted one. **Horizon 7 is the only horizon in the
+scan where those two numbers are equal, and the single survivor is at horizon 7** — worth noticing
+rather than explaining away. *(616 weeks is also about the span from Memphis's daily record start of
+2014-10-01 to now. Consistent with it; not measured, and not a claim about which rows joined.)*
+
+### 0 NEGATIVE-LAG PASSES, 0 POSITIVE-LAG PASSES
+
+```sql
+select regime,
+       count(*) filter (where lag_days < 0 and passes_gate) as neg,
+       count(*) filter (where lag_days > 0 and passes_gate) as pos
+  from signals where run_id = <id> group by 1;
+```
+
+**Zero and zero, in every regime.** Forty-three lags spanning ±21 days, across three horizons, four
+sites, five features and three regimes, and **no directional signal survives correction at any lag
+in either direction.** The only passing row is at lag 0, which this query does not count.
+
+Step 6 said that if negative lags dominated, the project's claim changes from **"the physical signal
+leads"** to **"the market prices the forecast"**, and to report it either way. **Neither claim is
+supported.** The competing explanation was given a first-class half of the scan precisely so that
+its absence would be *observed* rather than assumed — and what was observed is that neither the
+thesis nor its competitor clears the bar.
+
+### THE ONSET PATTERN AT HORIZON 14 — VISIBLE, SUB-THRESHOLD, AND EXPLICITLY NOT A FINDING
+
+In the `onset` regime at `horizon_days = 14`, `directional_consistency` rises to **0.8–1.0** and the
+statistic **bottoms near lags −3 to 0**. The rows cluster: neighbouring lags agree, consistency is
+high across the run of them, and the minimum sits about where Phase 5's eyeball said it would.
+
+**Not one of those rows passes the gate.** They are recorded as a **visible clustering below the
+threshold**, and the refusal belongs in the same paragraph as the description:
+
+- **A run of neighbouring lags agreeing with each other is the expected texture of this table, not
+  corroboration.** Adjacent lags of one feature are nearly the same test — that is why BH was chosen
+  over Bonferroni, and it is equally why a cluster is not evidence.
+- **Reading the −3-to-0 bottom as "the market prices the forecast" is the move `CLAUDE.md § 18`
+  forbids.** A result at a negative lag is a finding about the world *when it survives correction*.
+  This one did not.
+- **Nothing is tuned on it.** Not the lag range, not the horizon set, not the minimum folds, not the
+  effective-n floor. Raising a threshold after seeing which rows sit under it is choosing a method
+  that suited the answer; lowering one admits exactly the short, sparse pairs most likely to produce
+  a large correlation by chance.
+
+**If it is real it will still be there when there is more history**, and the run that shows it will
+be one nobody had to argue for. That is why it is written down as an observation rather than
+dropped — and why it is written down with the refusal attached, so it cannot be quoted without it.
+
+### THE RECOVERY REGIME IS STRUCTURALLY DATA-STARVED
+
+For `days_below_p10` at Memphis — **the exact pair Phase 5's finding 2 was about** — the `recovery`
+regime carries **1 to 7 observations at every horizon**, and every one of those rows is written with
+status **`insufficient_observations`**. No statistic, no q-value, nothing to set against the onset
+side.
+
+**Phase 5's finding 2 is therefore NOT tested by this sweep, in either direction.** The reversal —
+the rate peaking at 23 days below p10 and declining through 30, 37, 44, 51 and 58 — is neither
+confirmed nor refuted here. **It is unmeasured**, and that is a different thing from a null result,
+which is why it is not filed under the section above.
+
+**The reason is structural, and the pre-run note predicted it in writing.** `recovery` means the
+counter is falling or has reset. Phase 5's "recovery" — the stretch from 30 through 58 days below —
+is a **still-rising** counter, classified `onset` under this definition. So `recovery` holds only the
+days after the river came back up and the counter reset: a handful of days per event, across a
+handful of events. **The regime Phase 5's most interesting finding lives in is the one this
+definition leaves almost empty.**
+
+The refusals are **rows with a status, not omissions** — the pair is visibly enumerated and visibly
+refused, rather than absent in a way indistinguishable from never having been scanned.
+
+**This improves with accruing history and with nothing else.** More low-water events, more resets,
+more recovery days, arriving through ongoing ingest at the rate the river produces them — one or two
+events a year. **It is not fixed by redefining the regime split now that the counts are known.**
+Changing that split is a modelling decision for a human, in its own commit, with the current
+definition's results measured first so the change has a before. **This section is that before.**
+
+### The harness, after the sweep
+
+- `python -m app.orchestration.migrate` — **0022 and 0023 applied. Twenty-three total.**
+- `python -m verify.preflight` — **clean. Six gates green.** Its migration-count gate reads the
+  directory, so twenty-three needed no change to it.
+
+### WHAT THIS CHANGES FOR PHASE 7
+
+`signals` holds exactly one row Phase 7's confidence gate could be pointed at; it is
+contemporaneous, its sign runs against the thesis, and its q clears 0.05 by 0.0054. **Phase 7 reads
+this table and does not re-run the sweep.** What the table says today is that there is nothing here
+worth building a detector on.
+
+**Build the analog engine anyway.** The ≥4-analog half of `CLAUDE.md § 7`'s gate has no counterpart
+in Phase 6 and has to exist before anything can be refused for the right reason. But it will be
+built against a null result, and it should be built to say **"insufficient history"** and mean it —
+not to be tuned until this one row comes out the other side looking like a signal.
+
+### STILL OWED FROM THIS RUN
+
+- **The `run_id` and the wall time are not recorded here.** Step 3 asked for grid size, rows
+  written, wall time and the `run_id`; this write-up had the grid size and the outcome. Every query
+  in this section is written against `run_id = <id>` and this file does not yet say what that id is.
+  Both are one query away — `select run_id, started_at, finished_at from signal_runs order by
+  started_at desc limit 1;` — and they belong in this section rather than in a later one.
+- **DEBT 1a — the four thesis CSVs have been captured and are still not pasted in.** The script ran;
+  the files exist; the paste is the review step and it has not happened. **The debt is not closed.**
+
+---
+
+## PHASE 6 — THE ±LAG SWEEP. WRITTEN OFFLINE 2026-08-15. **THE BUILD RECORD; THE OUTCOME IS ABOVE.**
 
 Two migrations (`0022` `signal_runs`, `0023` `signals`), five modules under `app/signals/`, one
 script under `scripts/`, and six test files. **No cadence entry and no freshness registration** —
@@ -23,6 +208,10 @@ first result, and **step 8 of it is the instruction that matters**: if the passi
 near 5% of the grid, the sweep is finding noise at exactly the rate chance predicts, and *that is
 the finding* — to be recorded as such rather than mined for its strongest row.
 
+> **STEP 8 LANDED, 2026-08-15.** 271 of 6,966 on the unadjusted p-value — just under the ~348 that
+> chance alone predicts — and **1** after Benjamini-Hochberg. The sentence above was written before
+> the run and did not need changing after it. See `PHASE 6 — VERIFIED`, above.
+
 ### The arithmetic this whole phase is arranged around
 
 **5 features × 4 sites × 3 horizons × 43 lags × 3 regimes = 7,740 combinations.** At α = 0.05
@@ -33,6 +222,10 @@ source, and a sweep with no multiple-comparisons accounting produces a table of 
 relationships that are correctly computed, individually reproducible, and mostly noise.
 
 The contract is now `CLAUDE.md § 18`.
+
+> **THE REALIZED GRID WAS 6,966, AS PREDICTED.** 7,740 less 387 apiece for `discharge_min` at
+> Memphis and Vicksburg, the two sites Phase 5 finding 3 measured as fully degenerate. The skip was
+> detected from the data rather than from a site list, and the arithmetic above held on the day.
 
 ### Decisions worth reading before changing anything here
 
@@ -85,6 +278,10 @@ The contract is now `CLAUDE.md § 18`.
    that is the design: a document that edits itself is a document nobody reviews, and the paste is
    the step where somebody actually reads the numbers. **STILL OPEN until a human runs it and pastes
    the four blocks in.**
+
+   > **2026-08-15 — the script has run and the four CSVs exist. The paste has not happened, so the
+   > debt has not closed**, and it is recorded as open rather than as "captured" — a file in `/tmp`
+   > that nobody read is the same amount of review as no file at all.
 2. **Debt 1b is closed.** `discharge_min` is skipped where `bool_and(n_observations = 1)` holds for a
    site, and the skip is reported with the measured reason. **Detected from the data, never from a
    site list** — a hardcoded list would be wrong the day the instantaneous backfill fills Baton
@@ -233,6 +430,12 @@ distinguish leading from lagging.
 **NOTHING IN PHASE 5 IS TUNED ON THE BASIS OF THAT OBSERVATION.** Phase 6's ±lag scan measures it.
 The recovery-side asymmetry is named in `§ Up Next` as the first thing that scan should be pointed
 at.
+
+> **THE SCAN RAN ON 2026-08-15 AND DID NOT FIND IT.** The rate-leads-discharge reading above implies
+> a result at a **negative lag**; the sweep scanned ±21 days and **no negative-lag row passes the
+> gate, in any regime, at any horizon.** The eyeballed lead of two and three weeks is not corroborated
+> by the ±lag scan built to test it. **Caution 1 — n = 2 — was the one that mattered.** See
+> `PHASE 6 — VERIFIED`.
 
 > **CAUTION 2 WAS ANSWERED ON 2026-08-15, AND IT LANDED AGAINST THIS SECTION.** Phase 5's
 > deseasonalization shows the *level* relationship above is **substantially calendar**: on
@@ -407,6 +610,15 @@ average a strong positive onset against a strong negative recovery and report ap
 **Still n = 2.** The confidence gate needs ≥4 analogs and ≥70% directional consistency. Nothing
 above is a finding the output contract may quote yet.
 
+> **PHASE 6 DID NOT TEST THIS, IN EITHER DIRECTION — 2026-08-15.** The sweep's `recovery` regime for
+> this exact pair — `days_below_p10` at Memphis — carries **1 to 7 observations at every horizon**
+> and is refused as `insufficient_observations` on all of them. **The reversal is unmeasured, not
+> disconfirmed**, and the reason is the regime-definition mismatch recorded in `§ Up Next`: the
+> stretch from 30 through 58 days below is a still-rising counter and lands in `onset`, so
+> `recovery` holds only post-reset days. **Do not read the sweep's null result as a refutation of
+> this finding. It is a refusal to test it.** The onset side did show a sub-threshold clustering at
+> horizon 14 — recorded in `PHASE 6 — VERIFIED` as an observation, explicitly not a finding.
+
 ### FINDING 3 — `discharge_min` is a duplicate of `discharge_mean` almost everywhere
 
 Wherever `n_observations = 1`, `value_min` **is** the published daily mean — which is what migration
@@ -480,6 +692,11 @@ copies, which are duplicated deliberately.
   > step where somebody reads the numbers, and a document that edits itself is a document nobody
   > reviews. **Still open until a human runs it and pastes the four blocks in** — see step 2 of the
   > Phase 6 live procedure in `§ Up Next`.
+  >
+  > **2026-08-15 — THE SCRIPT HAS RUN. THE FOUR CSVs EXIST AND ARE NOT PASTED IN.** `2022_raw_
+  > discharge.csv`, `2023_raw_discharge.csv`, `2022_deseasonalized.csv`, `2023_deseasonalized.csv`.
+  > **This debt stays open until the four blocks are in this file**, next to the anchor points they
+  > check — capturing them and not pasting them is the same failure in a shorter form.
 
 ---
 
@@ -1660,14 +1877,45 @@ Bring the stack up with `docker compose -f docker-compose.yml -f /root/dws-local
 Delete it once the `worker` service is containerized; at that point `DATABASE_URL` becomes
 `timescaledb:5432` and nothing needs a published port.
 
-## PHASE 6 IS BUILT AND UNRUN. **THE LIVE PROCEDURE IS THE NEXT THING TO DO.**
+## PHASE 6 HAS RUN. **PHASE 7 IS THE NEXT THING TO DO — AND THE TWO ITEMS BELOW COME FIRST.**
 
-The sweep, the walk-forward evaluation and the `signals` table are written, green offline, and
-mutation-confirmed. **They have measured nothing.** Everything below is for a human on the instance,
-and it is the step this project's process note says gets skipped: *running the verification and not
-recording the result is not finishing the verification.*
+The sweep ran on 2026-08-15; the outcome is recorded at the top of this file under `PHASE 6 —
+VERIFIED`, in the same session, which is the first time this project has managed that. **1 of 6,966
+pairs passes the gate, contemporaneously, with a negative statistic.**
 
-### Phase 6 live verification — on the instance
+**Two things are owed before Phase 7 starts, and both are small:**
+
+1. **The `run_id` and the wall time of the sweep run.** `select run_id, started_at, finished_at from
+   signal_runs order by started_at desc limit 1;` — every query in the write-up is parameterized on
+   a `run_id` the file does not name.
+2. **DEBT 1a — paste the four CSVs.** They are captured and unpasted, which is where the debt has
+   been in one form or another across three phases. Fenced blocks, into `PHASE 4 — VERIFIED` and
+   `PHASE 5 — VERIFIED`, replacing the notes that say the output is still owed.
+
+### Phase 7 — the analog engine and the confidence gate, against a null result
+
+The analog engine and the confidence gate as a consumer. **It reads `signals`; it does not re-run
+the sweep**, and `directional_consistency` with its `folds` is the column `CLAUDE.md § 7`'s ≥70%
+half consumes. The **≥4 analogs** half has no counterpart in Phase 6 and was deliberately not
+approximated by something fold-shaped — that is Phase 7's to build.
+
+**Build it knowing the table is empty of signal.** One passing row, at lag 0, sign against the
+thesis, q = 0.0446. The gate's job on this data is to say **"insufficient history"**, and a gate that
+cannot be watched saying it on the data currently in the database is a gate nobody has seen work —
+the same gap `FINDING 4` records about the eight-year climatology guard. **The null result is the
+test case, not an obstacle to it.**
+
+**Phase 7 selects; Phase 6 measured.** Keeping those in separate steps is the whole point of
+`CLAUDE.md § 18`'s seventh bullet, and the sweep exposes no accessor that would let Phase 7 shortcut
+it.
+
+---
+
+### Phase 6 live verification — RUN ON THE INSTANCE 2026-08-15, retained for its queries
+
+**All ten steps ran. Outcomes at the top of this file.** Retained because the queries are the ones
+any re-run is compared against, and because step 8's instruction is worth keeping in the form it was
+written in *before* the numbers arrived.
 
 1. `python -m app.orchestration.migrate` — expect **0022 and 0023** applied, **twenty-three total**.
 2. `python scripts/capture_thesis_queries.py --out /tmp/thesis` — four CSVs. **Paste them into the
@@ -1676,6 +1924,8 @@ recording the result is not finishing the verification.*
    script exits non-zero and names the empty files if any query returns no rows — an empty table
    there means the query is measuring something narrower than its name, not that there is nothing
    in the window.
+   **RAN. The four CSVs exist. THEY ARE NOT PASTED IN, so debt 1a is still open — this is the one
+   step of the ten that is not finished.**
 3. **The full sweep:** `time python -m app.signals.sweep --lag-min -21 --lag-max 21`.
    Report **grid size, rows written, wall time and the `run_id`.** Expect the grid near **7,740**
    minus the duplicate skips (`5 × 4 × 3 × 43 × 3`, less one feature at each fully-degenerate site
@@ -1725,6 +1975,8 @@ recording the result is not finishing the verification.*
    twenty-three migrations need no change to it.
 10. **Write the outcome back in the same session**, including the denominator, and set `§ Up Next`
     to Phase 7.
+    **DONE, in the same session, 2026-08-15 — the first time this project has done that.** The
+    denominator leads the write-up. Outstanding from step 3: the `run_id` and the wall time.
 
 ### **READ BEFORE STEP 7 — the regime labels and the Phase 5 narrative are not the same split**
 
@@ -1753,12 +2005,25 @@ seeing the numbers — that is precisely the move `CLAUDE.md § 18`'s last bulle
 **Measure it as built before changing it.** The `all` regime is scanned alongside the other two
 precisely so the dilution is visible in the table rather than argued about.
 
+> **THIS PLAYED OUT, AND MORE SHARPLY THAN THE WARNING ANTICIPATED — 2026-08-15.** It is not that
+> `recovery` was diluted; it is that `recovery` is **almost empty**. For `days_below_p10` at Memphis
+> the regime carries **1 to 7 observations at every horizon**, all refused as
+> `insufficient_observations`, so **Phase 5's finding 2 was not tested in either direction.** The
+> second honest resolution above — rate-of-change or a peak-relative split — is now a live modelling
+> question for the human rather than a hypothetical one. **It still gets its own commit, and the
+> current definition's results are now measured, so it has a before.** See `PHASE 6 — VERIFIED`.
+
 ### Still open, and unchanged by this commit
 
 1. **Absolute operational thresholds are still a human decision awaiting a source.** The `p05`/`p10`/
    `p20` percentiles are stand-ins (`CLAUDE.md § 1`), and the sweep now makes their arbitrariness
    concrete: a lag scan over three arbitrary levels is three arbitrary answers, and it will report
    all three with q-values that look equally authoritative.
+   **AND THE ONE SURVIVING ROW IS BUILT ON ONE OF THEM.** `days_below_p10` counts days below a
+   percentile this project chose as a stand-in, not below a draft anyone operates against. Whatever
+   that row is evidence of, it is evidence about `p10` — and `p05` and `p20` were scanned beside it
+   and produced nothing. **The source for a real operational threshold is still a human decision
+   and it is now the input that would most change this table.**
 2. **No movements feature exists.** `lock_movements` is a sparse per-commodity weekly series — MS
    Lock 15 reports 1,434 explicit zeros of 2,840 rows — and nobody has decided whether to aggregate
    across commodities before differencing. Differencing it as-is produces spikes and reversions that
@@ -1770,16 +2035,7 @@ precisely so the dilution is visible in the table rather than argued about.
    no NULLs anywhere. **If a fifth gauge is ever seeded with a short record, that is the first run
    where it matters.**
 
-### Phase 7 — after the sweep has run and its outcome is recorded
-
-The analog engine and the confidence gate as a consumer. **It reads `signals`; it does not re-run
-the sweep**, and `directional_consistency` with its `folds` is the column `CLAUDE.md § 7`'s ≥70% half
-consumes. The **≥4 analogs** half has no counterpart in Phase 6 and was deliberately not
-approximated by something fold-shaped — that is Phase 7's to build.
-
-**Phase 7 selects; Phase 6 measured.** Keeping those in separate steps is the whole point of
-`CLAUDE.md § 18`'s seventh bullet, and the sweep exposes no accessor that would let Phase 7 shortcut
-it.
+### Phase 7 — promoted to the top of this section, now that the sweep has run
 
 ---
 
