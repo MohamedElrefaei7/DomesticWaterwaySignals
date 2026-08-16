@@ -1,0 +1,49 @@
+{
+  "gate": "passed",
+  "site_id": "07032000",
+  "as_of": "2022-10-11",
+  "sentence": "Mississippi discharge at Memphis has fallen 16,000 cfs in 14 days and is now 83,967 cfs below the 12-year seasonal median. The last 4 times discharge moved like this, the Cairo-Memphis barge rate rose, -48% to +18% within 3 weeks - median +7%, 3 of 4 directionally consistent.",
+  "analogs": 4,
+  "consistent": 3,
+  "window_days": 21,
+  "median_pct": 7.35,
+  "range_pct": [
+    -48,
+    18
+  ],
+  "matches": [
+    {
+      "rank": 1,
+      "event_start": "2020-10-09",
+      "distance": 14.718
+    },
+    {
+      "rank": 2,
+      "event_start": "2016-11-24",
+      "distance": 15.006
+    },
+    {
+      "rank": 3,
+      "event_start": "2017-09-25",
+      "distance": 15.084
+    },
+    {
+      "rank": 4,
+      "event_start": "2015-10-14",
+      "distance": 15.401
+    }
+  ],
+  "detections": {
+    "raw": 77,
+    "collapsed": 5
+  },
+  "parameters_hash": "45600c6d05c0",
+  "sweep": {
+    "best_q": 0.0446,
+    "run_id": 1,
+    "grid_size": 6966,
+    "passing_pairs": 1,
+    "scanned_pairs": 6966
+  },
+  "computed_at": "2026-08-16T14:22:09.441000Z"
+}

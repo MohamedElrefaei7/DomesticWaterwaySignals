@@ -3,7 +3,17 @@
 This is the **log**: current state, decisions as they are made, and `§ Up Next`. Stable contracts
 live in `CLAUDE.md`. If something here hardens into an invariant, move it there and note the move.
 
-**Last updated:** 2026-08-16 (**PHASE 8 IS VERIFIED ON THE INSTANCE — THE READ API HAS RUN.** Eight
+**Last updated:** 2026-08-16 (**PHASE 9 BUILT OFFLINE — THE REACT FRONTEND. NOT YET RUN ON THE
+INSTANCE.** Four views over the Phase 8 API, 37 tests, `tsc --noEmit` clean under `strict`, **all
+twelve mutation rows watched red for the named test and restored** — and the first mutation run was
+meaningless because a removed Vitest flag turned every row red with no test names, which is recorded
+below because it is the harness version of `CLAUDE.md § 0`'s wrong-reason rule. **Two things in the
+brief could not be built as written:** `CONTEXT.md` forbids putting the passing sentence in a UI
+until the three human decisions are settled, so it renders inside a non-dismissible provisional
+band; and the river map's percentile, climatology and coordinates **do not exist in the API**, so
+`/river` is a coverage schematic with every gauge in the no-baseline state. `CLAUDE.md § 21` is the
+new contract. **No view has ever rendered a real API response.**
+**Phase 8 remains verified on the instance — the read API has run.** Eight
 GET endpoints under `app/api/`, `fastapi==0.141.1` and `uvicorn==0.52.3` pinned, 444 passed with
 `DATABASE_URL` set and 314 passed / 130 skipped without, **all sixteen mutation rows watched red and
 restored** — two of them needing a second form, and both of those are recorded below because the
@@ -19,6 +29,154 @@ range up to **+270%** from `2022-09-16`, the immediately preceding year), every 
 2015–2022, both ranges spanning zero, and both sentences saying the rate *rose* while the sweep's
 one surviving row is **negative**. Phase 6 stands: 1 of **6,966** pairs, contemporaneous at
 `lag_days = 0`. **Debt 1a is still open:** the four CSVs exist and are not pasted in.)
+
+---
+
+## Phase 9 — the React frontend. **WRITTEN OFFLINE 2026-08-16. NOT YET RUN ON THE INSTANCE.**
+
+Twenty-two files under `frontend/`, four views, eighteen numbered guards across six test files, and
+**all twelve mutation rows watched red for the named test and restored.** `CLAUDE.md § 21` is the
+contract that came out of it. **Nothing under `app/`, `tests/`, `migrations/`, `infra/` or `verify/`
+was touched, and the API is unchanged.**
+
+**37 tests pass, `tsc --noEmit` is clean under `strict`, and `vite build` produces a bundle.** No
+instance was contacted: the tests run against fixtures captured from the real responses recorded in
+the Phase 8 block below.
+
+### TWO THINGS IN THE BRIEF COULD NOT BE BUILT AS WRITTEN, AND BOTH ARE RECORDED RATHER THAN WORKED AROUND
+
+**1. `CONTEXT.md` forbids putting the passing sentence in a UI, and it outranks the phase brief.**
+The block headed "THREE QUESTIONS COME BEFORE PHASE 9" says, in terms:
+
+> **DO NOT** put either sentence in a README, a UI or a résumé until the three questions at the top
+> of this section are settled.
+
+All three are open and none of them is this agent's (`CLAUDE.md § 1`). `CLAUDE.md`'s precedence line
+is **this file > `CONTEXT.md` > any handoff document**, and a phase brief is a handoff document, so
+the log wins. **The passing view was built in full — sentence, span bar, sweep denominator adjacent
+— inside a persistent, non-dismissible band naming the three unsettled decisions.** It is its own
+component (`ProvisionalBand.tsx`) with one usage, so removing it after the questions are settled is
+a visible one-line diff rather than an edit somebody makes while doing something else. **Human
+decision, taken 2026-08-16.**
+
+**2. The river map's data does not exist in the API, and the API is fixed for this commit.** All
+eight endpoints were read. `Gauge` carries no percentile, no anomaly, no climatology year count and
+**no coordinates**:
+
+| Wanted | Why it is not there |
+|---|---|
+| Colour by percentile | No endpoint serves an anomaly or a baseline. `app/api/routes/__init__.py` says the API computes no climatology **by design**, and computing one in a component is a derived statistic (decision 9) — the exact number Phase 5's minimum-years guard exists to refuse. |
+| Climatology year count per gauge | Same. Nothing serves it. |
+| Geographic placement | No lat/lon on `Gauge`. This file already records that river mile and coordinates are **deliberately NULL rather than estimated**, with a test that goes red when they land. Hardcoding published USGS coordinates would put seed data in a second place where the database could not correct it (`CLAUDE.md § 1`). **MapLibre is therefore not used in this commit.** |
+| Locks sized by throughput | `/api/movements` returns rows per commodity with a nullable `tons`. Summing them decides a NULL contributes zero — the coalesce `app/api/models.py` refuses, performed one layer up. |
+
+**So `/river` is a coverage schematic rather than a map**: each gauge's declared record start beside
+its observed coverage, which is `CLAUDE.md § 15`'s envelope-versus-served comparison and the one
+measurement the Phase 8 procedure asked for and did not get. **Every gauge renders in the
+no-baseline state and the legend says why**, rather than letting a colour ramp imply a shared
+baseline across records that are 0, 4,335, 6,801 and 13,375 days deep.
+
+**Tests 13 and 14 were adapted, and the adaptation is the honest half.** A test asserting a rendered
+year count could only pass against a number the frontend invented. What they assert instead is the
+property those tests exist to protect — the baseline is stated **per gauge and never once for the
+page**, and a gauge without one renders as unmeasured rather than mid-scale — and both run against a
+**mixture** of served and unserved baselines, so neither is vacuous the day an endpoint serves them.
+
+### The design, as built
+
+**Brand words: weathered, exacting, unflinching. The physical object is a USACE hydrographic survey
+sheet** — buff stock, engraved rules, stencilled numerals — and the enamel gauge plate bolted to a
+lock wall. **Light theme, warm buff ground**, derived from who reads it: a dispatcher at a desk in
+daylight, reading something whose lineage is a printed government bulletin, not a dark ops console.
+
+**Type: Archivo Narrow** (condensed grotesque, newspaper and forms tradition) against **Zilla Slab**
+(mechanical slab, stamped-bulletin register) — contrast on two axes, serif/sans and wide/condensed,
+tabular numerals throughout. **Self-hosted and pinned via `@fontsource`**, so the bundle makes no
+request to a font CDN and Phase 10's CSP needs no exception for one.
+
+**Palette is OKLCH and deliberately two-hue**, which is a departure from the usual tint-everything-
+toward-one-brand-hue advice and is justified by the object: a printed chart *is* two hues. Neutrals
+lean warm (hue 84–86, the paper), text and rules lean cold (hue 196, the ink). One accent —
+`oklch(51% 0.168 39)`, a survey-stamp vermilion — reserved for **constraint, degraded and overdue**
+and nothing else. There is no green "success" colour anywhere: nothing here succeeds, things are
+either measured or they are not.
+
+**Three signature elements, and the first one is the thesis rendered:**
+
+1. **THE HATCH.** One visual vocabulary for *not measured*, used identically for a null rate in a
+   chart, a gauge with no served baseline, and a sweep pair nobody scanned. Survey sheets hatch
+   water nobody sounded. This project spends four layers keeping "not measured", "zero" and "no
+   relationship" apart, and a mid-scale grey undoes all of it at the last inch — **a texture cannot
+   be read as an average result.**
+2. **THE SPAN BAR.** The range is the primary object, drawn against a zero axis; the median is a
+   **tick on it**, rendered at a smaller size than the range label. When the range spans zero the
+   interface says so in words rather than leaving it to be read off two signs.
+3. **RULED BULLETIN BANDS, NOT CARDS.** 1px rules, asymmetric columns, no card-in-card.
+
+**Refusal parity is structural.** All three gate shapes render through one `.verdict` band with one
+set of type tokens, so a refusal cannot drift lighter without the shared rule changing for all
+three — asserted, rather than intended.
+
+### The four views
+
+```
+/            Today      the conclusion (three shapes), the discharge window, the degraded banner
+/river       River      four gauges, declared vs observed coverage, all in the no-baseline state
+/signals     Signals    1 of 6,966 stated before the table; refused pairs are hatched rows
+/health      Health     two tables, two questions, never one status light
+```
+
+### Decisions worth reading before changing anything here
+
+- **The refusal types declare no estimate fields, so `result.median_pct` on a refusal is a COMPILE
+  ERROR** rather than an `undefined` that renders blank. `tsc --noEmit` is test 18 for exactly this
+  reason: left to a separate CI step it is a check that exists and does not run.
+- **`connectNulls={false}` is set explicitly and asserted as a value, not trusted to the default.**
+  Recharts already defaults to false; a test passing because of that would prove nothing about this
+  codebase and would stay green when somebody set it true.
+- **The sweep denominator is asserted to be inside the same container element as the median**, not
+  merely somewhere in the document. A document-wide assertion passes over a layout that puts
+  "1 of 6,966" in a footer, which is the dishonesty the test exists to prevent.
+- **`/api/signals` is called with no `passing_only` parameter at all**, so the API's own default —
+  every scanned row — is what the view gets. A client-side default of `true` would hand a reader 1
+  row in a table of 1 rather than 1 in 6,966, at read time, leaving no trace of itself.
+- **Layout arithmetic is permitted, marked, and enumerated by a test.** Two files position things
+  (`SpanBar` places a tick, `Today` picks a calendar window); both carry a `layout-arithmetic:`
+  marker and test 17b asserts the marked set is exactly those two, so an unmarked expression added
+  later is visible in review. **This is the weakest of the eighteen guards** — a marker is a comment
+  somebody could add while doing the wrong thing — and it is recorded as such rather than described
+  as airtight.
+- **`format.ts` contains no function that takes two numbers and returns a third.** A
+  `percentChange(a, b)` there would be the gate bypass wearing a formatter's clothes, and test 17c
+  greps for the vocabulary.
+
+### Mutation confirmation — twelve rows, and the harness bug is the finding
+
+**All twelve watched red for the NAMED test and restored, suite green afterwards.**
+
+**The first run reported all twelve red and it was meaningless.** `--reporter=basic` was removed in
+Vitest 4 and is now treated as a custom reporter *module path*, so every invocation died in the
+loader with a non-zero exit and **no test names in the output at all**. Twelve rows exiting non-zero
+for a reason having nothing to do with the mutations is **indistinguishable from twelve confirmed
+guards** unless the harness checks *which* test failed — which is `CLAUDE.md § 0`'s "a mutation that
+goes red for the wrong reason is not a confirmed guard", reached by a route that commit did not
+anticipate: not a compile error in the mutated file, but a broken flag in the harness itself.
+
+The harness names the expected test per row, greps the verbose output for it, and reports
+`WRONG TEST` otherwise — which is what it did, twelve times, instead of reporting success. It also
+snapshots **file contents** and restores in a `finally`, per the Phase 8 finding about stale
+baselines.
+
+### What is measured, and what is not
+
+**Offline: 37 tests, `tsc --noEmit` clean, `vite build` succeeds.** Bundle: **609.74 kB raw,
+183.27 kB gzipped**, plus 15.37 kB CSS and self-hosted woff2. Vite warns that the chunk exceeds
+500 kB; **Recharts is the bulk of it** and code-splitting is a Phase 10 question, not a correctness
+one.
+
+**NOTHING IN THIS COMMIT HAS TOUCHED THE INSTANCE, AND NO VIEW HAS EVER RENDERED A REAL RESPONSE.**
+Every fixture was hand-built from values recorded in this file. The live procedure below is what
+closes that, and until it runs Phase 9 is code that passes its own tests.
 
 ---
 
@@ -2592,7 +2750,52 @@ Bring the stack up with `docker compose -f docker-compose.yml -f /root/dws-local
 Delete it once the `worker` service is containerized; at that point `DATABASE_URL` becomes
 `timescaledb:5432` and nothing needs a published port.
 
-## PHASE 8 IS VERIFIED. **PHASE 9 IS NEXT.**
+## PHASE 9 IS BUILT AND NOT VERIFIED. **THE LIVE PROCEDURE BELOW IS THE NEXT THING TO RUN.**
+
+Nothing in the Phase 9 commit has touched the instance and **no view has ever rendered a real API
+response** — every test runs against fixtures hand-built from the values recorded at the top of this
+file. Until the steps below are run **and their outcomes written back into this file in the same
+session**, Phase 9 is code that passes its own tests.
+
+### Phase 9 live verification — NOT YET RUN
+
+**Step 4 is the one that cannot be inferred**, and it is the whole point: the offline suite proves
+these components render fixtures correctly. It says nothing about what the real API returns on a
+real date, and every honesty property in this phase is about that.
+
+1. `cd frontend && npm ci && npm run build` — report bundle size and any warnings. Expect a chunk
+   over 500 kB (Recharts).
+2. `npm run test` — expect **37 passed**.
+3. `npx tsc --noEmit` — clean.
+4. Serve `frontend/dist/` and point it at the running API (`uvicorn app.api.main:app --host
+   127.0.0.1 --port 8000`; the dev server proxies `/api` there, a static serve needs the same
+   origin or a proxy). **Confirm by eye and report each:**
+   - Today at `as_of=2022-10-11`, Memphis — the passing conclusion, with **`1 of 6,966` visible
+     without interaction** and the provisional band above it.
+   - Today at `as_of=2022-09-06` — the no-current-event state, and **no number on screen readable
+     as a forecast.**
+   - A Twin Cities rates chart across Jan–Mar 2022 — a **broken line** across the winter nulls, not
+     a line through zero, and the legend note stating how many points were not measured.
+   - Health — every job overdue **and** `barge_rates` not stale, in two distinct columns, with
+     `last_success` rendering as **never** on both USDA jobs.
+   - The degraded banner on Today.
+5. Keyboard focus visible on every interactive element; layout holds at 375px.
+6. `python -m verify.preflight` — six gates green. **Owed from Phase 7 and Phase 8 as well; now owed
+   from three.**
+7. Write the outcome back in the same session; set `§ Up Next` to Phase 10.
+
+**Also still owed, and none of it blocks Phase 9:** Phase 8's step 9 second half (`/api/gauges`,
+which this phase's `/river` view now depends on and which has still never been called live), step 10
+second half (`limit=50000` → 422), Phase 7's step 1 (`migrate` showing twenty-five applied), the
+sweep's `run_id` and wall time, and **DEBT 1a — the four CSVs**.
+
+**The three human decisions are still open and Phase 9 did not touch them.** They are what removes
+`ProvisionalBand.tsx`, and they are still the only thing standing between a passing gate and a
+quotable claim.
+
+---
+
+## PHASE 8 IS VERIFIED. **PHASE 9 WAS NEXT AND IS NOW BUILT.**
 
 **The live procedure below has been run and its outcomes are recorded at the top of this file**, in
 the same session, which is the process note above being followed rather than deferred for the first

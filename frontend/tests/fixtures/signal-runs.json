@@ -1,0 +1,31 @@
+{
+  "limit": 50,
+  "offset": 0,
+  "total": 1,
+  "rows": [
+    {
+      "run_id": 1,
+      "started_at": "2026-08-15T18:02:11.000000Z",
+      "finished_at": "2026-08-15T18:37:49.000000Z",
+      "grid_size": 6966,
+      "lag_min": -21,
+      "lag_max": 21,
+      "horizons": [
+        7,
+        14,
+        28
+      ],
+      "regimes": [
+        "all",
+        "onset",
+        "recovery"
+      ],
+      "feature_filter": null,
+      "git_sha": "9fb44a5c1e2d4b8a7f60c3e5d9a1b2c4e6f8a0d2",
+      "git_dirty": false,
+      "seed": 20260815,
+      "scanned_pairs": 6966,
+      "passing_pairs": 1
+    }
+  ]
+}

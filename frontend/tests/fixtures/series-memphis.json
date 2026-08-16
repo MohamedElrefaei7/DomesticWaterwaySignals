@@ -1,0 +1,382 @@
+{
+  "limit": 500,
+  "offset": 0,
+  "total": 62,
+  "site_id": "07032000",
+  "start": "2022-09-01",
+  "end": "2022-11-01",
+  "rows": [
+    {
+      "date": "2022-09-01",
+      "param_code": "00060",
+      "value": 250000,
+      "source": "daily"
+    },
+    {
+      "date": "2022-09-02",
+      "param_code": "00060",
+      "value": 247778,
+      "source": "daily"
+    },
+    {
+      "date": "2022-09-03",
+      "param_code": "00060",
+      "value": 245557,
+      "source": "daily"
+    },
+    {
+      "date": "2022-09-04",
+      "param_code": "00060",
+      "value": 243335,
+      "source": "daily"
+    },
+    {
+      "date": "2022-09-05",
+      "param_code": "00060",
+      "value": 241113,
+      "source": "daily"
+    },
+    {
+      "date": "2022-09-06",
+      "param_code": "00060",
+      "value": 238891,
+      "source": "daily"
+    },
+    {
+      "date": "2022-09-07",
+      "param_code": "00060",
+      "value": 236670,
+      "source": "daily"
+    },
+    {
+      "date": "2022-09-08",
+      "param_code": "00060",
+      "value": 234448,
+      "source": "daily"
+    },
+    {
+      "date": "2022-09-09",
+      "param_code": "00060",
+      "value": 232226,
+      "source": "daily"
+    },
+    {
+      "date": "2022-09-10",
+      "param_code": "00060",
+      "value": 230004,
+      "source": "daily"
+    },
+    {
+      "date": "2022-09-11",
+      "param_code": "00060",
+      "value": 227783,
+      "source": "daily"
+    },
+    {
+      "date": "2022-09-12",
+      "param_code": "00060",
+      "value": 225561,
+      "source": "daily"
+    },
+    {
+      "date": "2022-09-13",
+      "param_code": "00060",
+      "value": 223339,
+      "source": "daily"
+    },
+    {
+      "date": "2022-09-14",
+      "param_code": "00060",
+      "value": 221117,
+      "source": "daily"
+    },
+    {
+      "date": "2022-09-15",
+      "param_code": "00060",
+      "value": 218896,
+      "source": "daily"
+    },
+    {
+      "date": "2022-09-16",
+      "param_code": "00060",
+      "value": 216674,
+      "source": "daily"
+    },
+    {
+      "date": "2022-09-17",
+      "param_code": "00060",
+      "value": 214452,
+      "source": "daily"
+    },
+    {
+      "date": "2022-09-18",
+      "param_code": "00060",
+      "value": 212230,
+      "source": "daily"
+    },
+    {
+      "date": "2022-09-19",
+      "param_code": "00060",
+      "value": 210009,
+      "source": "daily"
+    },
+    {
+      "date": "2022-09-20",
+      "param_code": "00060",
+      "value": 207787,
+      "source": "daily"
+    },
+    {
+      "date": "2022-09-21",
+      "param_code": "00060",
+      "value": 205565,
+      "source": "daily"
+    },
+    {
+      "date": "2022-09-22",
+      "param_code": "00060",
+      "value": 203343,
+      "source": "daily"
+    },
+    {
+      "date": "2022-09-23",
+      "param_code": "00060",
+      "value": 201122,
+      "source": "daily"
+    },
+    {
+      "date": "2022-09-24",
+      "param_code": "00060",
+      "value": 198900,
+      "source": "daily"
+    },
+    {
+      "date": "2022-09-25",
+      "param_code": "00060",
+      "value": 196678,
+      "source": "daily"
+    },
+    {
+      "date": "2022-09-26",
+      "param_code": "00060",
+      "value": 194457,
+      "source": "daily"
+    },
+    {
+      "date": "2022-09-27",
+      "param_code": "00060",
+      "value": 192235,
+      "source": "daily"
+    },
+    {
+      "date": "2022-09-28",
+      "param_code": "00060",
+      "value": 190013,
+      "source": "daily"
+    },
+    {
+      "date": "2022-09-29",
+      "param_code": "00060",
+      "value": 187791,
+      "source": "daily"
+    },
+    {
+      "date": "2022-09-30",
+      "param_code": "00060",
+      "value": 185570,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-01",
+      "param_code": "00060",
+      "value": 183348,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-02",
+      "param_code": "00060",
+      "value": 181126,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-03",
+      "param_code": "00060",
+      "value": 178904,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-04",
+      "param_code": "00060",
+      "value": 176683,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-05",
+      "param_code": "00060",
+      "value": 174461,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-06",
+      "param_code": "00060",
+      "value": 172239,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-07",
+      "param_code": "00060",
+      "value": 170017,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-08",
+      "param_code": "00060",
+      "value": 167796,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-09",
+      "param_code": "00060",
+      "value": 165574,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-10",
+      "param_code": "00060",
+      "value": 163352,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-11",
+      "param_code": "00060",
+      "value": 161130,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-12",
+      "param_code": "00060",
+      "value": 158909,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-13",
+      "param_code": "00060",
+      "value": 156687,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-14",
+      "param_code": "00060",
+      "value": 154465,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-15",
+      "param_code": "00060",
+      "value": 152243,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-16",
+      "param_code": "00060",
+      "value": 150022,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-17",
+      "param_code": "00060",
+      "value": 147800,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-18",
+      "param_code": "00060",
+      "value": 148180,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-19",
+      "param_code": "00060",
+      "value": 148560,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-20",
+      "param_code": "00060",
+      "value": 148940,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-21",
+      "param_code": "00060",
+      "value": 149320,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-22",
+      "param_code": "00060",
+      "value": 154720,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-23",
+      "param_code": "00060",
+      "value": 160120,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-24",
+      "param_code": "00060",
+      "value": 165520,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-25",
+      "param_code": "00060",
+      "value": 170920,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-26",
+      "param_code": "00060",
+      "value": 176320,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-27",
+      "param_code": "00060",
+      "value": 181720,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-28",
+      "param_code": "00060",
+      "value": 187120,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-29",
+      "param_code": "00060",
+      "value": 192520,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-30",
+      "param_code": "00060",
+      "value": 197920,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-31",
+      "param_code": "00060",
+      "value": 203320,
+      "source": "daily"
+    },
+    {
+      "date": "2022-11-01",
+      "param_code": "00060",
+      "value": 208720,
+      "source": "daily"
+    }
+  ]
+}

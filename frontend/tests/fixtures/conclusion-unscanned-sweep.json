@@ -1,0 +1,19 @@
+{
+  "gate": "no_current_event",
+  "site_id": "07374000",
+  "as_of": "2022-09-06",
+  "sentence": "Mississippi discharge at Baton Rouge is not in a low-water condition on 2022-09-06. No comparable historical conditions were looked for.",
+  "detections": {
+    "raw": 0,
+    "collapsed": 0
+  },
+  "parameters_hash": "45600c6d05c0",
+  "sweep": {
+    "best_q": null,
+    "run_id": null,
+    "grid_size": null,
+    "passing_pairs": null,
+    "scanned_pairs": null
+  },
+  "computed_at": "2026-08-16T14:25:44.120000Z"
+}

@@ -1,0 +1,69 @@
+{
+  "limit": 500,
+  "offset": 0,
+  "total": 4,
+  "rows": [
+    {
+      "site_id": "07010000",
+      "name": "Mississippi River at St. Louis, MO",
+      "river": "Mississippi",
+      "tier": 1,
+      "available_params": [
+        "00060",
+        "00065"
+      ],
+      "native_cadence_minutes": 15,
+      "declared_iv_record_start": "2007-10-01",
+      "declared_dv_record_start": "1990-01-01",
+      "observed_start": "1990-01-01",
+      "observed_end": "2026-08-14",
+      "observed_days": 13375
+    },
+    {
+      "site_id": "07032000",
+      "name": "Mississippi River at Memphis, TN",
+      "river": "Mississippi",
+      "tier": 1,
+      "available_params": [
+        "00060"
+      ],
+      "native_cadence_minutes": 30,
+      "declared_iv_record_start": "2014-10-01",
+      "declared_dv_record_start": "2014-10-01",
+      "observed_start": "2014-10-01",
+      "observed_end": "2026-08-14",
+      "observed_days": 4335
+    },
+    {
+      "site_id": "07289000",
+      "name": "Mississippi River at Vicksburg, MS",
+      "river": "Mississippi",
+      "tier": 1,
+      "available_params": [
+        "00060",
+        "00065"
+      ],
+      "native_cadence_minutes": 60,
+      "declared_iv_record_start": "2008-01-01",
+      "declared_dv_record_start": "2008-01-01",
+      "observed_start": "2008-01-01",
+      "observed_end": "2026-08-14",
+      "observed_days": 6801
+    },
+    {
+      "site_id": "07374000",
+      "name": "Mississippi River at Baton Rouge, LA",
+      "river": "Mississippi",
+      "tier": 2,
+      "available_params": [
+        "00065"
+      ],
+      "native_cadence_minutes": 60,
+      "declared_iv_record_start": "2011-05-01",
+      "declared_dv_record_start": null,
+      "observed_start": null,
+      "observed_end": null,
+      "observed_days": 0
+    }
+  ]
+}

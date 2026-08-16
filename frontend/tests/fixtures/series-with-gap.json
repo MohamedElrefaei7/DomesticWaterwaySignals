@@ -1,0 +1,70 @@
+{
+  "limit": 500,
+  "offset": 0,
+  "total": 10,
+  "site_id": "07010000",
+  "start": "2022-10-01",
+  "end": "2022-10-10",
+  "rows": [
+    {
+      "date": "2022-10-01",
+      "param_code": "00060",
+      "value": 96400,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-02",
+      "param_code": "00060",
+      "value": 95100,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-03",
+      "param_code": "00060",
+      "value": 93800,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-04",
+      "param_code": "00060",
+      "value": null,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-05",
+      "param_code": "00060",
+      "value": null,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-06",
+      "param_code": "00060",
+      "value": null,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-07",
+      "param_code": "00060",
+      "value": 90200,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-08",
+      "param_code": "00060",
+      "value": 89100,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-09",
+      "param_code": "00060",
+      "value": 88400,
+      "source": "daily"
+    },
+    {
+      "date": "2022-10-10",
+      "param_code": "00060",
+      "value": 87900,
+      "source": "daily"
+    }
+  ]
+}

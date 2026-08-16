@@ -1020,3 +1020,74 @@ and the client renders something plausible.**
   down — so "every declared method is a GET" would be green over a set containing none of this
   project's routes, and would stay green after somebody added a POST. That is § 2's theme 2, and it
   is the same shape as the ingress test that passed because the set it constrained was empty.
+
+---
+
+## 21. Frontend conventions
+
+Learned building the React frontend (Phase 9). §§ 14–16 govern data a source published, § 17 data
+this project computed, § 18 claims about relationships between them, § 19 claims about what happened
+the last few times conditions looked like this, § 20 what happens to all of it through a JSON
+encoder. **This governs what a human actually sees**, and it is the last boundary — there is no
+further layer to catch anything, and the screenshot is what gets quoted.
+
+The difference from § 20 is that the API can only omit; a renderer can *assert*. A key that is
+absent from the body still becomes `0%` if a component defaults it. A line chart still draws through
+a winter closure if the library's default says to. Every failure below produces a picture that is
+well formed, plausible, and wrong, and **nobody downstream can check it, because there is nothing
+wrong with the picture.**
+
+- **Each gate result has its own component. There is no shared component whose fields are
+  conditional**, because a conditional numeric render is one default away from a fabrication.
+  `{median != null && <Median/>}` is shorter, reads as DRY, and puts an estimate one truthy-check
+  from appearing on a refusal. The types carry the other half: a refusal interface declares no
+  estimate keys, so reaching for one is a compile error rather than an `undefined` that renders as
+  a blank.
+- **A refusal is rendered with the same typographic weight and visual completeness as a result, and
+  parity is structural rather than intentional.** All gate shapes render through one band primitive
+  with one set of type tokens, so a refusal cannot drift lighter without the shared rule changing
+  for every shape at once. A refusal is the correct output of a working system — the sweep passed 1
+  of 6,966 — and error styling on it tells a reader the system is broken while it behaves exactly as
+  designed.
+- **"Not enough history" and "the river is quiet" are different answers and never share a
+  treatment.** Only one of them is a coverage problem, and rendering a quiet river as a refusal
+  sends somebody to buy data for a question nobody asked.
+- **An uncertainty range is never rendered smaller than the point estimate it qualifies.** The 2022
+  range is −48% to +18% and it spans zero; a layout with a large median and a small range tells a
+  reader the rate rose, which is the one thing the range says nobody knows. Where the assertion is
+  on computed style, the sizes are declared where a test can actually read them — a guard that
+  compares two unresolved CSS variables passes over every mutation.
+- **Charts never interpolate across nulls, the setting is explicit at the call site, and the test
+  asserts the value rather than the library default.** A test that passes because `connectNulls`
+  defaults to false proves nothing about this codebase and stays green when somebody sets it true.
+  **A rendered window containing nulls says so in words**: a broken line is only legible as a gap to
+  a reader already looking for one.
+- **A truncated series states its truncation in the interface, not only in the payload.** `total`
+  is on every list envelope so this is renderable; receiving it and not rendering it is the same
+  omission one layer up. A disabled "load more" is not this — the reader has to be told, in a
+  sentence, that they are looking at a window.
+- **Job-overdue and data-stale are rendered as distinct facts, never collapsed into one status.**
+  They answer different questions from different sources, and they legitimately disagree (§ 20).
+  One status light either reports a false problem or hides a real one. `last_success: null` is its
+  own state, not a very old date.
+- **A colour scale over per-site baselines states each site's baseline period, and a site without
+  one is rendered as unmeasured rather than mid-scale.** One scale over four different baselines
+  implies a comparison nobody made. **Unmeasured gets a texture, not a colour**: a grey in the
+  middle of a ramp reads as an average result, which is the opposite of what it means.
+- **The frontend computes no derived statistic. A number that is wanted and not returned is an API
+  change, not a component calculation.** A frontend-computed median bypasses the gate entirely.
+  Layout arithmetic — placing a tick, choosing a window — is permitted, declared at the site, and
+  produces no rendered number; the formatting module may round and add symbols and contains no
+  function that takes two numbers and returns a third.
+- **All requests go through one typed client; no component constructs a URL or calls `fetch`.** The
+  API rejects rather than clamps, so a hand-built query string turns a one-character mistake into a
+  view that looks broken instead of one that is obviously wrong. Required parameters are required
+  in the client's signature, so omitting a date range is a compile error and not a 422.
+- **A static assertion over the source tree proves it resolved the source tree first.** Tests that
+  grep this project's own files for `fetch`, for arithmetic, or for a forbidden import pass
+  vacuously against an empty directory — § 2's theme 2 — so the path helper fails loudly when it
+  cannot see `src/`, and each scanner asserts a minimum file count.
+- **A mutation harness names the test that must go red and fails the row if a different one does.**
+  A mutation that breaks the build turns everything red and proves only that the harness runs.
+  Measured: a removed reporter flag made twelve rows report red with no test names at all, which is
+  indistinguishable from twelve confirmed guards unless the harness is checking which test failed.

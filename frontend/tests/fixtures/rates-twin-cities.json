@@ -1,0 +1,93 @@
+{
+  "limit": 500,
+  "offset": 0,
+  "total": 12,
+  "start": "2022-01-01",
+  "end": "2022-03-31",
+  "rows": [
+    {
+      "location": "Twin Cities",
+      "week_ending": "2022-01-04",
+      "horizon": "nearby",
+      "pct_of_tariff": null,
+      "rate_month": null
+    },
+    {
+      "location": "Twin Cities",
+      "week_ending": "2022-01-11",
+      "horizon": "nearby",
+      "pct_of_tariff": null,
+      "rate_month": null
+    },
+    {
+      "location": "Twin Cities",
+      "week_ending": "2022-01-18",
+      "horizon": "nearby",
+      "pct_of_tariff": null,
+      "rate_month": null
+    },
+    {
+      "location": "Twin Cities",
+      "week_ending": "2022-01-25",
+      "horizon": "nearby",
+      "pct_of_tariff": null,
+      "rate_month": null
+    },
+    {
+      "location": "Twin Cities",
+      "week_ending": "2022-02-01",
+      "horizon": "nearby",
+      "pct_of_tariff": null,
+      "rate_month": null
+    },
+    {
+      "location": "Twin Cities",
+      "week_ending": "2022-02-08",
+      "horizon": "nearby",
+      "pct_of_tariff": 512,
+      "rate_month": null
+    },
+    {
+      "location": "Twin Cities",
+      "week_ending": "2022-02-15",
+      "horizon": "nearby",
+      "pct_of_tariff": 498,
+      "rate_month": null
+    },
+    {
+      "location": "Twin Cities",
+      "week_ending": "2022-02-22",
+      "horizon": "nearby",
+      "pct_of_tariff": 505,
+      "rate_month": null
+    },
+    {
+      "location": "Twin Cities",
+      "week_ending": "2022-03-01",
+      "horizon": "nearby",
+      "pct_of_tariff": 523,
+      "rate_month": null
+    },
+    {
+      "location": "Twin Cities",
+      "week_ending": "2022-03-08",
+      "horizon": "nearby",
+      "pct_of_tariff": 561,
+      "rate_month": null
+    },
+    {
+      "location": "Twin Cities",
+      "week_ending": "2022-03-15",
+      "horizon": "nearby",
+      "pct_of_tariff": 604,
+      "rate_month": null
+    },
+    {
+      "location": "Twin Cities",
+      "week_ending": "2022-03-22",
+      "horizon": "nearby",
+      "pct_of_tariff": 850,
+      "rate_month": null
+    }
+  ]
+}

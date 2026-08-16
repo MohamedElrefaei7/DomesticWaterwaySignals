@@ -1,0 +1,701 @@
+/* Layout and components. A survey sheet: ruled bands, asymmetric columns, no cards.
+ *
+ * REFUSAL PARITY IS ENFORCED HERE, NOT BY INTENTION. `.verdict` carries the type sizes, the rule
+ * weights and the spacing for ALL THREE gate shapes. A refusal cannot drift lighter than a result
+ * without this one rule changing, which is what makes "the design does not editorialize the
+ * science" a structural property rather than a thing somebody remembered.
+ */
+
+.shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.skip {
+  position: absolute;
+  left: -9999px;
+}
+.skip:focus {
+  position: static;
+  display: inline-block;
+  margin: var(--space-xs);
+  padding: var(--space-xs) var(--space-sm);
+  background: var(--paper-raised);
+  border: 1px solid var(--ink);
+}
+
+/* ---- masthead ---------------------------------------------------------------------------- */
+
+.masthead {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-md) var(--space-xl);
+  align-items: flex-end;
+  justify-content: space-between;
+  padding: var(--space-xl) var(--space-xl) var(--space-md);
+  border-bottom: 2px solid var(--ink);
+  max-width: 1180px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.masthead-brand {
+  display: flex;
+  gap: var(--space-md);
+  align-items: stretch;
+}
+
+/* The gauge plate: a stencilled rule down the left edge of the masthead. */
+.masthead-rule {
+  width: 10px;
+  flex: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    var(--ink) 0 2px,
+    transparent 2px 9px
+  );
+  border-left: 1px solid var(--ink);
+}
+
+.masthead-title {
+  font-size: var(--text-xl);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.masthead-sub {
+  margin: 2px 0 0;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+  max-width: 46ch;
+}
+
+.nav {
+  display: flex;
+  gap: var(--space-lg);
+}
+
+.nav-link {
+  font-family: var(--font-display);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--ink-2);
+  text-decoration: none;
+  padding-bottom: 3px;
+  border-bottom: 2px solid transparent;
+}
+.nav-link:hover {
+  color: var(--ink);
+}
+.nav-link.on {
+  color: var(--ink);
+  border-bottom-color: var(--signal);
+}
+
+main {
+  flex: 1;
+  width: 100%;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: var(--space-2xl) var(--space-xl) var(--space-4xl);
+}
+
+.footer {
+  border-top: 1px solid var(--rule);
+  padding: var(--space-lg) var(--space-xl) var(--space-2xl);
+  max-width: 1180px;
+  margin: 0 auto;
+  width: 100%;
+}
+.footer p {
+  margin: 0;
+  max-width: var(--measure);
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+/* ---- view furniture ---------------------------------------------------------------------- */
+
+.view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xl);
+}
+
+.view-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.view-title {
+  font-size: var(--text-3xl);
+  letter-spacing: -0.01em;
+}
+
+.view-lede {
+  margin: 0;
+  max-width: var(--measure);
+  font-size: var(--text-lg);
+  color: var(--ink-2);
+  line-height: 1.45;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  padding-top: var(--space-lg);
+  border-top: 1px solid var(--rule);
+}
+
+.panel-title {
+  font-size: var(--text-lg);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  align-items: baseline;
+}
+
+.panel-sub {
+  font-family: var(--font-body);
+  font-weight: 400;
+  font-size: var(--text-sm);
+  color: var(--ink-3);
+}
+
+.empty {
+  padding: var(--space-lg) 0;
+  color: var(--ink-2);
+  max-width: var(--measure);
+}
+
+.footnote {
+  margin: 0;
+  max-width: var(--measure);
+  font-size: var(--text-sm);
+  color: var(--ink-3);
+  line-height: 1.5;
+}
+
+.mono {
+  font-family: var(--font-display);
+  letter-spacing: 0.02em;
+}
+.subtle {
+  color: var(--ink-3);
+}
+.big {
+  font-size: var(--text-2xl);
+}
+
+/* ---- the three verdict shapes, sharing one set of weights ------------------------------- */
+
+.verdict {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+  padding: var(--space-xl) 0 0;
+  border-top: 2px solid var(--ink);
+}
+
+.verdict-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+}
+
+.verdict-title {
+  font-size: var(--text-2xl);
+  max-width: 22ch;
+}
+
+.verdict-sentence {
+  margin: 0;
+  max-width: var(--measure);
+  font-size: var(--text-lg);
+  line-height: 1.5;
+}
+
+.verdict-news {
+  margin: 0;
+  max-width: var(--measure);
+  color: var(--ink-2);
+}
+
+/* A quiet river is the calmest surface here. Note what this is NOT: it is not smaller, not
+ * greyed, and not error-styled. It is the same band with a lighter ground. */
+.verdict-quiet {
+  border-top-color: var(--steady);
+}
+
+.estimate {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr);
+  gap: var(--space-xl);
+  align-items: start;
+  padding: var(--space-lg);
+  background: var(--paper-raised);
+  border: 1px solid var(--rule);
+}
+
+.verdict-detail {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  gap: var(--space-xl);
+  align-items: start;
+}
+
+.facts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  margin: 0;
+}
+.facts-wide {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: var(--space-xl);
+}
+.facts dt {
+  margin-bottom: 2px;
+}
+.facts dd {
+  margin: 0;
+  font-size: var(--text-lg);
+}
+
+/* ---- the span bar: uncertainty as the primary object ------------------------------------ */
+
+.span {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.span-scale {
+  position: relative;
+  height: 46px;
+  background: var(--paper-sunk);
+  border: 1px solid var(--rule);
+}
+
+.span-fill {
+  position: absolute;
+  top: 10px;
+  bottom: 10px;
+  background: var(--ink);
+  opacity: 0.14;
+}
+
+.span-zero {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--rule-strong);
+}
+
+.span-tick {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  width: 3px;
+  background: var(--signal);
+  transform: translateX(-1px);
+}
+
+.span-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-md);
+}
+
+.span-range {
+  line-height: 1.1;
+  letter-spacing: -0.01em;
+}
+
+.span-median-wrap {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-xs);
+}
+
+.span-median {
+  color: var(--signal);
+  line-height: 1.1;
+}
+
+.span-note {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+  max-width: 48ch;
+}
+
+/* ---- sweep verdict ---------------------------------------------------------------------- */
+
+.sweep {
+  padding: var(--space-md);
+  border: 1px solid var(--rule);
+  background: var(--paper);
+}
+.sweep-line {
+  margin: var(--space-2xs) 0 0;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+/* ---- provisional band ------------------------------------------------------------------- */
+
+.provisional {
+  padding: var(--space-md) var(--space-lg);
+  background: var(--signal-quiet);
+  border: 1px solid var(--signal-rule);
+}
+
+.provisional-head {
+  margin: 0;
+  font-size: var(--text-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--signal);
+}
+
+.provisional-body {
+  margin: var(--space-xs) 0 0;
+  max-width: var(--measure);
+  font-size: var(--text-sm);
+}
+
+.provisional-list {
+  margin: var(--space-xs) 0 0;
+  padding-left: 1.2em;
+  max-width: var(--measure);
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+}
+
+/* ---- degraded banner -------------------------------------------------------------------- */
+
+.degraded {
+  display: flex;
+  gap: var(--space-md);
+  align-items: baseline;
+  flex-wrap: wrap;
+  padding: var(--space-sm) var(--space-md);
+  background: var(--signal-quiet);
+  border: 1px solid var(--signal-rule);
+}
+.degraded-label {
+  color: var(--signal);
+}
+.degraded-body {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+/* ---- tables ----------------------------------------------------------------------------- */
+
+.scroll-x {
+  overflow-x: auto;
+}
+
+.ledger {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+.ledger th,
+.ledger td {
+  text-align: left;
+  padding: var(--space-xs) var(--space-md) var(--space-xs) 0;
+  border-bottom: 1px solid var(--rule);
+  white-space: nowrap;
+}
+.ledger thead th {
+  font-family: var(--font-display);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--ink-2);
+  border-bottom-color: var(--rule-strong);
+}
+.ledger tbody th {
+  font-weight: 600;
+}
+.ledger .num {
+  text-align: right;
+}
+.row-passing {
+  background: var(--paper-raised);
+}
+
+.flag {
+  font-family: var(--font-display);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-2);
+}
+.flag-on {
+  color: var(--signal);
+  font-weight: 600;
+}
+.flag-pass {
+  color: var(--ink);
+  font-weight: 600;
+  border-bottom: 2px solid var(--signal);
+}
+
+.never {
+  font-family: var(--font-display);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--signal);
+  font-weight: 600;
+}
+
+/* ---- health finding --------------------------------------------------------------------- */
+
+.finding {
+  padding: var(--space-md) var(--space-lg);
+  border: 1px solid var(--rule-strong);
+  background: var(--paper-raised);
+  max-width: var(--measure);
+}
+.finding-head {
+  margin: 0 0 var(--space-xs);
+  font-size: var(--text-base);
+}
+.finding p {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: 1.55;
+}
+
+/* ---- signals ---------------------------------------------------------------------------- */
+
+.denominator {
+  padding: var(--space-lg);
+  border: 1px solid var(--rule);
+  background: var(--paper-raised);
+}
+.denominator-line {
+  margin: 0 0 var(--space-xs);
+  font-size: var(--text-lg);
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  font-size: var(--text-sm);
+}
+.toggle-warn {
+  color: var(--signal);
+  font-family: var(--font-display);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+/* ---- charts ----------------------------------------------------------------------------- */
+
+.chart {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+.chart-plot {
+  border: 1px solid var(--rule);
+  background: var(--paper-raised);
+  padding: var(--space-sm) var(--space-xs) 0 0;
+}
+.chart-caption {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.truncation {
+  margin: 0;
+  padding: var(--space-sm) var(--space-md);
+  background: var(--signal-quiet);
+  border: 1px solid var(--signal-rule);
+  font-size: var(--text-sm);
+  max-width: var(--measure);
+}
+.complete-note {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--ink-3);
+}
+
+.legend-note,
+.legend-row {
+  display: flex;
+  gap: var(--space-sm);
+  align-items: flex-start;
+  margin: 0;
+  font-size: var(--text-sm);
+  max-width: var(--measure);
+  line-height: 1.5;
+}
+
+.swatch {
+  width: 26px;
+  height: 16px;
+  flex: none;
+  border: 1px solid var(--rule-strong);
+  margin-top: 3px;
+}
+
+/* ---- river schematic -------------------------------------------------------------------- */
+
+.reach {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.station {
+  display: flex;
+  gap: var(--space-lg);
+  padding: var(--space-lg) 0;
+  border-top: 1px solid var(--rule);
+}
+.station:last-child {
+  border-bottom: 1px solid var(--rule);
+}
+
+.station-mark {
+  width: 14px;
+  flex: none;
+  background: var(--steady);
+  border: 1px solid var(--rule-strong);
+}
+
+.station-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  min-width: 0;
+}
+.station-name {
+  font-size: var(--text-lg);
+}
+.station-meta {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.coverage {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: var(--space-md);
+  margin: var(--space-xs) 0 0;
+}
+.coverage dd {
+  margin: 0;
+  font-size: var(--text-base);
+}
+
+.legend {
+  padding: var(--space-lg);
+  border: 1px solid var(--rule);
+  background: var(--paper-raised);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+.legend-list {
+  margin: 0;
+  padding-left: 1.2em;
+  font-size: var(--text-sm);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+}
+
+/* ---- controls --------------------------------------------------------------------------- */
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-lg);
+}
+.controls label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+}
+.controls select,
+.controls input {
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  padding: var(--space-xs) var(--space-sm);
+  background: var(--paper-raised);
+  border: 1px solid var(--rule-strong);
+  color: var(--ink);
+  min-height: 44px;
+}
+
+/* ---- responsive: adapt, do not amputate -------------------------------------------------- */
+
+@media (max-width: 900px) {
+  .estimate,
+  .verdict-detail {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 620px) {
+  .masthead,
+  main,
+  .footer {
+    padding-left: var(--space-md);
+    padding-right: var(--space-md);
+  }
+  main {
+    padding-top: var(--space-xl);
+  }
+  .view {
+    gap: var(--space-xl);
+  }
+  .view-title {
+    font-size: var(--text-2xl);
+  }
+  .verdict-title {
+    font-size: var(--text-xl);
+  }
+  .nav {
+    gap: var(--space-md);
+    width: 100%;
+  }
+  .estimate {
+    padding: var(--space-md);
+  }
+  .facts-wide {
+    gap: var(--space-lg);
+  }
+  /* The span bar keeps its size on a phone: it is the finding, and shrinking it first would
+   * be the same inversion the layout exists to prevent. */
+}

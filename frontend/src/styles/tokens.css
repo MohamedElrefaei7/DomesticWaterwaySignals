@@ -1,0 +1,150 @@
+/* Design tokens. A river instrument drawn as a survey sheet.
+ *
+ * TWO HUES, DELIBERATELY. The usual advice is to tint every neutral toward one brand hue. The
+ * physical object this interface is modelled on is two-hue by construction - buff paper, dark ink -
+ * so the neutrals lean warm (hue 84-86, the paper) and the text and rules lean cold (hue 196, the
+ * ink). They are cohesive because that is what a printed chart looks like, not because they share a
+ * number.
+ *
+ * THE HATCH IS THE LOAD-BEARING TOKEN IN THIS FILE. `--unmeasured` and `--hatch` render "this was
+ * not measured" - a null rate, a gauge with no served baseline, a sweep pair nobody scanned. This
+ * project spends four layers keeping "not measured", "zero" and "no relationship" distinct
+ * (CLAUDE.md 16, 17, 18); a colour scale that renders the first as a mid-scale grey undoes all of
+ * it at the last inch. Survey sheets hatch water nobody sounded. So does this.
+ */
+
+:root {
+  /* Paper. */
+  --paper: oklch(96.2% 0.013 84);
+  --paper-raised: oklch(98.4% 0.008 84);
+  --paper-sunk: oklch(93.4% 0.017 84);
+
+  /* Ink. Never #000 - a printed rule is iron-gall, not black. */
+  --ink: oklch(24% 0.026 196);
+  --ink-2: oklch(46% 0.021 196);
+  --ink-3: oklch(60% 0.016 196);
+  --rule: oklch(84% 0.016 86);
+  --rule-strong: oklch(66% 0.02 90);
+
+  /* The single accent. A survey stamp. Constraint, degraded, overdue - nothing else.
+   * It is rare on purpose; that rarity is what makes it mean something when it appears. */
+  --signal: oklch(51% 0.168 39);
+  --signal-quiet: oklch(94.5% 0.032 44);
+  --signal-rule: oklch(72% 0.11 40);
+
+  /* Not measured. Never mid-scale, never neutral-grey-in-the-middle-of-a-ramp. */
+  --unmeasured: oklch(74% 0.007 86);
+  --unmeasured-quiet: oklch(91% 0.006 86);
+
+  /* Observed, and inside its window. The quiet "this is fine" - low chroma so it never competes
+   * with the accent. There is no green "success" colour in this file: nothing here succeeds, things
+   * are either measured or they are not. */
+  --steady: oklch(52% 0.045 196);
+
+  --font-display: "Archivo Narrow", "Arial Narrow", ui-sans-serif, sans-serif;
+  --font-body: "Zilla Slab", ui-serif, Georgia, serif;
+
+  /* Fixed rem scale, not fluid: this is a data-dense product UI, where spatial predictability
+   * matters more than breathing across viewports. Ratio ~1.28. */
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.28rem;
+  --text-xl: 1.65rem;
+  --text-2xl: 2.1rem;
+  --text-3xl: 2.7rem;
+
+  --space-2xs: 4px;
+  --space-xs: 8px;
+  --space-sm: 12px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --space-2xl: 48px;
+  --space-3xl: 64px;
+  --space-4xl: 96px;
+
+  --measure: 68ch;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  line-height: 1.55;
+  font-kerning: normal;
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+.display {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  line-height: 1.15;
+  margin: 0;
+}
+
+/* Stencilled label. Short strings only - never body copy (all-caps at length is unreadable). */
+.label {
+  font-family: var(--font-display);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--ink-2);
+}
+
+.num {
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+a {
+  color: var(--ink);
+  text-underline-offset: 3px;
+}
+
+/* Focus is visible on every interactive surface, and it is the accent so it cannot be missed
+ * against buff paper. Never `outline: none`. */
+:where(a, button, [tabindex]):focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 3px;
+  border-radius: 1px;
+}
+
+/* THE HATCH. One definition, used by every "not measured" surface in the app. */
+.hatch {
+  background-color: var(--unmeasured-quiet);
+  background-image: repeating-linear-gradient(
+    45deg,
+    transparent 0 5px,
+    var(--unmeasured) 5px 6px
+  );
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .rise {
+    animation: rise 420ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+  }
+}
