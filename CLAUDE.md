@@ -32,6 +32,13 @@ wrong, say so in the commit report and leave it in place.
 - **A mutation that goes red for the wrong reason is not a confirmed guard.** An import error, a
   `NameError`, or a different assertion failing proves only that the test runs. Re-do the mutation
   in a form that reaches the assertion the guard is about, and report both passes.
+- **A port-forwarding SSM session and an interactive SSM session are different session types, and
+  neither substitutes for the other.** A list of live sessions looks the same either way, so several
+  plain `aws ssm start-session` shells can accumulate with no forwarding session among them and
+  nothing on screen says the tunnel is missing. **Check `lsof -i :<port>` before assuming a freshly
+  started server bound the port you expect** — a port already held by an earlier attempt is not
+  taken from its holder, so the new server does not bind, the old process answers, and a page comes
+  back from something that is not under test. Cost most of the Phase 9 verification session.
 - **Report what you verified, not what you intended.** Commit reports are checked against the repo
   with `git show` and `grep`. A report describing a change that did not land is worse than no report.
 - **When a measurement contradicts the plan, the measurement wins.** Report the contradiction; do not
@@ -917,6 +924,16 @@ refuse, and the whole of this section exists so that the honest answer is the ea
 - **An engine that finds confident analogs where the sweep found no relationship has a bug, not a
   discovery.** This is the last bullet because it is the one to check first when the output looks
   good.
+- **A sweep statistic and an analog outcome measure different quantities, and the bullet above is
+  about the sweep finding NOTHING — not about the two disagreeing in sign.** A sweep statistic is an
+  association between a feature's **level** and a forward return, measured across **every**
+  observation in a regime; an analog outcome is the forward return from **one event date**, and an
+  event is a crossing, so its anchors sit at one end of the feature's range. A negative slope across
+  a whole range is compatible with a positive outcome at the low end of it, and neither number
+  contradicts the other. **State what each one measures when they are reported together**, because
+  the reader's default reading is that they are two measurements of one thing. Measured 2026-08-16
+  on `days_below_p10` at Memphis: the sweep's surviving row is −0.137 and the engine's median is
+  +7.4%, both correct.
 
 ---
 

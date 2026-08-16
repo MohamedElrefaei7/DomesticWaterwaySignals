@@ -3,16 +3,24 @@
 This is the **log**: current state, decisions as they are made, and `§ Up Next`. Stable contracts
 live in `CLAUDE.md`. If something here hardens into an invariant, move it there and note the move.
 
-**Last updated:** 2026-08-16 (**PHASE 9 BUILT OFFLINE — THE REACT FRONTEND. NOT YET RUN ON THE
-INSTANCE.** Four views over the Phase 8 API, 37 tests, `tsc --noEmit` clean under `strict`, **all
-twelve mutation rows watched red for the named test and restored** — and the first mutation run was
-meaningless because a removed Vitest flag turned every row red with no test names, which is recorded
-below because it is the harness version of `CLAUDE.md § 0`'s wrong-reason rule. **Two things in the
-brief could not be built as written:** `CONTEXT.md` forbids putting the passing sentence in a UI
-until the three human decisions are settled, so it renders inside a non-dismissible provisional
-band; and the river map's percentile, climatology and coordinates **do not exist in the API**, so
-`/river` is a coverage schematic with every gauge in the no-baseline state. `CLAUDE.md § 21` is the
-new contract. **No view has ever rendered a real API response.**
+**Last updated:** 2026-08-16 (**PHASE 9 IS VERIFIED IN BROWSER — THE FOUR VIEWS HAVE RENDERED REAL
+API RESPONSES.** `1 of 6,966 pairs passed correction` visible without interaction beside the median;
+the range drawn dominant over the median tick; the provisional band naming three open questions;
+`degraded: true` with six jobs overdue and two tables fresh, in two separate tables. **The sign
+disagreement is INVESTIGATED AND EXPECTED, NOT A BUG** — the sweep measures a slope across the whole
+counter range, the engine measures the outcome at the single point where the counter is 1, and both
+returns come from one shared `ln(forward/now)`, so a sign-convention error could not survive. The
+UI's warning stays. **Two things came out of the session that are not about the frontend:** Node 18
+on the instance could not run the build and **Node has never been pinned or provisioned anywhere in
+this project**, and a port-forwarding SSM session is a different session type from an interactive
+one — `CLAUDE.md § 0` now says so. Four views over the Phase 8 API, 37 tests, `tsc --noEmit` clean
+under `strict`, **all twelve mutation rows watched red for the named test and restored** — the first
+mutation run was meaningless because a removed Vitest flag turned every row red with no test names,
+which is the harness version of `CLAUDE.md § 0`'s wrong-reason rule. **Two things in the brief could
+not be built as written:** `CONTEXT.md` forbids putting the passing sentence in a UI until the three
+human decisions are settled, so it renders inside a non-dismissible provisional band; and the river
+map's percentile, climatology and coordinates **do not exist in the API**, so `/river` is a coverage
+schematic with every gauge in the no-baseline state. `CLAUDE.md § 21` is the new contract.
 **Phase 8 remains verified on the instance — the read API has run.** Eight
 GET endpoints under `app/api/`, `fastapi==0.141.1` and `uvicorn==0.52.3` pinned, 444 passed with
 `DATABASE_URL` set and 314 passed / 130 skipped without, **all sixteen mutation rows watched red and
@@ -32,7 +40,218 @@ one surviving row is **negative**. Phase 6 stands: 1 of **6,966** pairs, contemp
 
 ---
 
-## Phase 9 — the React frontend. **WRITTEN OFFLINE 2026-08-16. NOT YET RUN ON THE INSTANCE.**
+## PHASE 9 — VERIFIED IN BROWSER, 2026-08-16. COMPLETE.
+
+**Four views have rendered real API responses in a browser for the first time.** Everything below was
+read off the screen, not inferred from a fixture. Two things came out of the session that are not
+about the frontend at all — a toolchain dependency this project has never pinned, and a
+process-management chain that cost most of the elapsed time — and they are recorded first because
+they are the parts that will be rediscovered otherwise.
+
+**One investigation ran alongside the walk and it has a verdict: the sign disagreement between the
+conclusion sentence and the sweep's surviving row is EXPECTED, not a bug.** Section 4. Nothing was
+changed in `app/` on the strength of it, and nothing should be.
+
+### 1. THE TOOLCHAIN GAP — NODE WAS NEVER PINNED ANYWHERE, AND NOTHING FAILED UNTIL IT DID
+
+**The instance ran Node 18.19.1.** Vite 8, Vitest 4 and rolldown 1.2 all require Node ≥ 20, several
+of them ≥ 22. `npm ci` warned on **every package** with `EBADENGINE` and **exited zero** — the
+install completed, the tree was there, and nothing in the output said the toolchain would not run.
+The failure arrived one command later, from `vite build`, as an import of `styleText` from
+`node:util` — a symbol that does not exist before Node 20. **Resolved by installing Node 22 via
+`nvm`,** after which the build, the 37 tests and `tsc --noEmit` all behaved as they do offline.
+
+**NODE HAS NEVER BEEN PINNED OR PROVISIONED ANYWHERE IN THIS PROJECT.** Phase 2 pinned Python and
+pinned Docker by exact `pkg=version` with an `apt-mark hold` (`CLAUDE.md § 10`); every container
+image is pinned by digest and resolved on the machine that runs it (`§ 5`). **Node is in none of
+it** — not in `CLAUDE.md § 5`, not in a provisioning script, not in `package.json` as an `engines`
+field, not in an `.nvmrc`. The frontend was built offline on a laptop that happened to have a recent
+Node, and the first clean machine to try it was the instance.
+
+This is `CLAUDE.md § 2`'s theme 1 in a new place: **a layer reported success — `npm ci` exited zero —
+while the thing downstream of it could not run.** An `EBADENGINE` warning on every package is
+the loudest possible form of that warning and it is still only a warning. **Whether Node becomes a
+provisioned, pinned dependency the way Docker is, is now an open item at the top of `§ Up Next`.**
+
+### 2. PROCESS NOTE — THREE THINGS STOOD BETWEEN A GREEN BUILD AND A PAGE, AND NONE WAS THE CODE
+
+Recorded as process rather than as a technical finding. Reaching a live page required, in order:
+
+1. **The Node upgrade above.**
+2. **Distinguishing the Vite dev server from a stray `python -m http.server`** left bound to the same
+   port by an earlier attempt. The port was occupied, so the new server did not bind it, and the
+   page that came back was the old process serving a directory listing — a server was running, a
+   page was served, and neither was the one under test.
+3. **Recognizing that a port-forwarding SSM session and an interactive SSM session are different
+   session types.** Several plain `aws ssm start-session` shells had accumulated over the session
+   with **no forwarding session among them**, and a list of live sessions looks identical either
+   way. Nothing was wrong with any of them; none of them forwarded a port.
+
+**`CLAUDE.md § 0` now carries the contract line** — the two session types do not substitute for each
+other, and `lsof -i :<port>` is checked before a freshly started server is assumed to have bound the
+port anybody expects. See the note there about where it landed.
+
+### 3. WHAT WAS CONFIRMED, VIEW BY VIEW
+
+**Today, passing case** (`site_id=07032000`, `as_of=2022-10-11`):
+
+- The sentence rendered.
+- **The sweep verdict read `1 of 6,966 pairs passed correction`, visible without interaction**, inside
+  the same `estimate-block` element as the median rather than in a footer or behind a hover.
+- **The range rendered as the dominant object — `−47.8%` to `+18.1%` — with the median `+7.4%` as a
+  smaller tick on the bar.** This is the design's "uncertainty is rendered, not decorated" rule and
+  `CLAUDE.md § 21`'s "an uncertainty range is never rendered smaller than the point estimate it
+  qualifies", observed rather than asserted. A range spanning zero drawn small beside a large median
+  is the one layout that tells a reader the rate rose, which is exactly what this range does not say.
+
+**Today, provisional framing.** The passing result rendered behind a non-dismissible
+**"Provisional — not cleared for quotation"** band naming three specific, human-owned open questions:
+`MIN_ANALOGS = 4` against a 70% consistency threshold at n=4 (achievable consistencies are
+0/25/50/75/100%); the temporal clustering of all four analogs inside 2015–2022; and the sign
+disagreement with the sweep. **This exceeds what the Phase 9 prompt specified.** The prompt asked for
+the band; **the three named reasons were the frontend session's own addition**, grounded in facts
+already recorded in this file. Recorded as a deviation-upward rather than left to look like it was
+specified — a band saying "provisional" without saying *why* is a caveat a reader cannot act on.
+
+**Signals.** `1 of 6,966 scanned pairs passed Benjamini-Hochberg correction`, with the unadjusted
+noise estimate stated inline: "roughly 348 significant results on pure noise, by construction, every
+time". **That 348 is confirmed correct — section 5** — and one thing about how it is rendered is
+flagged there.
+
+**Health.** `degraded: true` banner visible. **Six jobs, all `overdue`, all `last success: never`** —
+accurate, and not a defect: no scheduler has run continuously across development sessions, and a job
+with no successful run on record is overdue rather than quiet (`CLAUDE.md § 12`). **Job-overdue and
+data-stale rendered as two separate tables** with the explicit sentence distinguishing them, and
+**`barge_rates` and `lock_movements` showed `fresh` while their jobs showed overdue** — the Phase 8
+finding rendered as two facts rather than collapsed into one status light. This is the single
+property most likely to have been quietly lost between the API and the screen, and it was not.
+
+**River.** Renders as the stated coverage schematic: four gauges, declared record start beside
+observed coverage, **"Baseline for a percentile: not served" on every row**, and a hatch legend
+explaining why no gauge is coloured by percentile. No mid-scale colour anywhere — an unmeasured
+baseline reads as texture, not as an average result.
+
+### 4. INVESTIGATION — THE SIGN DISAGREEMENT IS **EXPECTED. DIFFERENT QUANTITIES.** NOT A BUG.
+
+**The question.** The rendered conclusion for Memphis / 2022-10-11 says the barge rate **rose** in the
+four historical analogs (median `+7.4%`, range `−47.8%` to `+18.1%`). The Signals view's one surviving
+row — `days_below_p10`, Memphis, horizon 7, lag 0, regime `all` — carries `statistic: −0.137`. The
+frontend surfaced this as an open question rather than hiding it, which was correct.
+
+**THE VERDICT, IN ONE PARAGRAPH.** The sweep and the engine are not two measurements of one thing that
+disagree; **they are measurements of two different things, and both are correct.** The sweep asks: across
+every week of the record, does a *higher counter* — more consecutive days already spent below the 10th
+percentile — go with a *bigger or smaller* barge-rate move over the following week? Its answer, −0.137,
+is that further into a low-water spell, the coming week's move is smaller. The engine asks a different
+question entirely: on the handful of days when the river *first crossed* into low water, what did the
+rate do over the next 21 days? Its answer is that it rose. **A slope that runs downhill across the
+whole range says nothing about the height at the bottom end of it** — a line can fall steadily and
+still sit above zero at its left edge. The sweep is reporting the slope; the engine is reporting the
+value at one end.
+
+**And "one end" is exact rather than figurative, which is what turns this from a plausible story into
+a proof.** It follows from the code, with no data required:
+
+- `events.is_entry` fires when the counter is `>= ENTRY_RUN_LENGTH_DAYS`, and
+  `parameters.ENTRY_RUN_LENGTH_DAYS = 1`.
+- `events.collapse` opens a new event only when the previous detection was more than
+  `MIN_EVENT_SEPARATION_DAYS = 90` days earlier, so an event's `start` is a detection whose previous
+  day was **not** a detection.
+- `thresholds.days_below` increments the run length by **exactly one per day** and can only reach 1
+  from a definite 0; from a `None` it stays `None`, and a `None` is not a detection.
+
+**Therefore every analog `event_start` carries `days_below_p10 == 1`, with the previous day at exactly
+0.** Not approximately, not usually — by construction. The four analogs behind the 2022 sentence
+(`2015-10-14`, `2016-11-24`, `2017-09-25`, `2020-10-09`) are all anchored at the single lowest
+non-zero point of the axis the sweep is regressing along, and `regimes.classify` labels each of them
+`onset`, since 1 > 0 on contiguous days. **The engine samples one point of the sweep's predictor
+range; the sweep's statistic is a slope over the whole of it.**
+
+**Neither module has a sign-convention error, and this is checkable rather than assumed.** There is
+exactly **one** implementation of a return in this project — `app/features/targets.forward_log_return`,
+`ln(forward / now)`, positive when the rate rose. `app/analogs/outcomes.py` **imports that function**
+rather than reimplementing it (its docstring says why, citing `CLAUDE.md § 17`), and the sweep's
+targets are built from the same function. **A sign disagreement between the two could not survive a
+single shared implementation**, and `statistics.pearson` applies no negation to anything. There is no
+line to name as the defect because there is no defect.
+
+**A CORRECTION TO THE HYPOTHESIS AS IT WAS PUT TO THIS SESSION, AND IT MATTERS.** The proposed
+mechanism was that the sweep's sample contains many *high, falling* counter values — the recovery
+condition — dragging a same-week correlation negative. **The counter almost never falls.** It is a
+run-length: it climbs by one a day for the length of the spell and then resets to 0 in a single step.
+Phase 5's own measured trajectory, quoted verbatim in `app/signals/regimes.py`, is the evidence:
+
+    0, held for eleven weeks      rate drifting   335 -> 656
+    2 -> 9 -> 16 -> 23            rate climbing   925 -> 1,428 -> 2,427 -> 2,812
+    30 -> 37 -> 44 -> 51 -> 58    rate FALLING back from the 2,812 peak
+
+**The counter rises monotonically 2 → 58 across the whole event.** The rate rises and then falls, but
+the counter never does. So the population pulling the `all` correlation negative is **high and still
+rising**, not high and falling — and `regimes.classify` calls every one of those days `onset`, the
+same label it gives the analog anchor points at counter 1. **This is why Phase 6's own proposed
+explanation of the negative sign could not be tested by Phase 6's own regime split**, and why that
+block was right to record it as an unexplained sign rather than accept it: the split is on the
+counter's *direction*, and the two populations that produce the disagreement differ in the counter's
+*level* while sharing a direction. It also explains, without any new measurement, why the `recovery`
+regime carries **1 to 7 observations at every horizon** — it collects only the single reset day at
+the end of each spell.
+
+**THE UI'S DISAGREEMENT WARNING IS CORRECT TO KEEP SHOWING, AND THAT IS NOT A CONCESSION.** Two true
+statements about different quantities still read as a contradiction to anybody who did not derive
+the above, and the sentence is the unit that gets quoted. The band names the disagreement in the
+reader's own terms; nothing in this section makes it safe to remove. **Removing it is one of the
+three human decisions, and this investigation does not settle any of them** — it settles only that
+there is no code defect underneath the third one.
+
+**WHAT WAS NOT MEASURED, AND IT IS CONFIRMATORY RATHER THAN DECISIVE.** The check that would put a
+number on the mechanism — the distribution of `days_below_p10` across the sweep's 616 weekly
+observations, and the sub-correlation among the low-counter weeks alone — **was not run.** An SSM
+port-forwarding session to the instance was established and **the database answered the auth
+handshake**, so the DB is up; **the API and Caddy are not running**, and querying Postgres directly
+needs a credential this agent does not handle (`CLAUDE.md § 1`). The queries are owed, listed in
+`§ Up Next`. **They would characterize the slope; they cannot change the verdict**, because the
+verdict rests on a property of the event definition rather than on a property of the data.
+
+### 5. THE 348 FIGURE IS CORRECT, AND 271 WAS NEVER AN ESTIMATE OF IT
+
+`6,966 × 0.05 = 348.3`, so **"roughly 348 significant results on pure noise" is the right arithmetic
+for this grid at α = 0.05**, and the Signals view states it correctly.
+
+**The 271 in the Phase 6 block is not a competing estimate for a different grid size — it is a
+measurement, on this same 6,966-pair grid.** 348 is what chance *predicts*; 271 is what the sweep
+*observed* clearing the unadjusted threshold, before Benjamini-Hochberg took it to 1. The two sit in
+the same table in that block, three lines apart, and it already says so: "a grid of 6,966 independent
+tests yields ~348 significant results on pure noise; this grid yielded 271." **There is no
+discrepancy and no stale number. Expected versus observed, both for the same grid.** Recorded here
+so nobody re-flags it.
+
+**One thing about how 348 is rendered, flagged and not fixed.** In `src/views/Signals.tsx` the grid
+size is interpolated from the response (`count(run.grid_size)`) while **348 is a hardcoded literal
+beside it**. They agree today. They stop agreeing the first time the grid changes size, and the
+sentence would then read "a grid of 7,500 tests yields roughly 348" — a number that no longer traces
+to the grid named in the same breath, which is `CLAUDE.md § 7`'s reproducibility rule failing at the
+last inch. **Not fixed here:** the honest fix is either an API field or wording that states α and
+lets the reader do the multiplication, and computing it in the component is a derived statistic
+(`CLAUDE.md § 21`). It is in `§ Up Next`.
+
+### What is measured, and what is not
+
+**Measured in this session:** four views against real responses, the two suites unchanged
+(**314 passed / 130 skipped** offline for the repo, **37 passed** for the frontend — both re-run
+during this writeback and both identical to the Phase 9 build record), and the Part 2 investigation
+above.
+
+**NOT measured, and not claimed:** the confirmatory sweep-distribution queries in section 4; step 5
+of the live procedure (keyboard focus on every interactive element, layout at 375px) was walked but
+is not recorded here as a per-element result; and `python -m verify.preflight` is **still owed, now
+from four phases.** The Phase 9 procedure's `as_of=2022-09-06` no-current-event case and the Twin
+Cities winter-nulls chart **were not reported back from this session**, so they are carried as
+unconfirmed against real data rather than assumed to have passed alongside the views that were. All
+of it is in `§ Up Next`.
+
+---
+
+## Phase 9 — the React frontend. **WRITTEN OFFLINE 2026-08-16. THE BUILD RECORD; THE OUTCOME IS ABOVE.**
 
 Twenty-two files under `frontend/`, four views, eighteen numbered guards across six test files, and
 **all twelve mutation rows watched red for the named test and restored.** `CLAUDE.md § 21` is the
@@ -2699,6 +2918,61 @@ several Phase 3 decisions are what they are because of them.
 
 ## § Up Next
 
+**PHASE 10 IS NEXT. Phase 9 is verified in browser — its outcomes are at the top of this file.**
+
+### Standing items, carried until somebody closes them
+
+1. **Should Node be a pinned, provisioned dependency the way Docker is?** *(Opened 2026-08-16 by the
+   Phase 9 browser verification.)* The instance ran Node 18.19.1; Vite 8, Vitest 4 and rolldown 1.2
+   need ≥ 20 and several want ≥ 22. `npm ci` warned `EBADENGINE` on every package and **exited
+   zero**; the build failed one command later on `styleText` from `node:util`. **Nothing in this
+   project pins Node** — not `CLAUDE.md § 5`, not a provisioning script, not `engines` in
+   `package.json`, not an `.nvmrc`. The decision is whether it gets an entry in `CLAUDE.md § 5` and
+   a provisioning step, so the next clean instance does not rediscover this. **A human decision
+   about infrastructure scope, not a defect to fix quietly.**
+2. **The 348 literal in `src/views/Signals.tsx`.** The grid size is interpolated from the response;
+   `348` beside it is hardcoded. They agree today and stop agreeing the first time the grid changes
+   size. The fix is an API field or wording that states α — **not a component computing
+   `grid_size × 0.05`**, which is a derived statistic (`CLAUDE.md § 21`). Section 5 of the Phase 9
+   verification block.
+3. **The confirmatory queries behind the sign-disagreement verdict.** The verdict is settled
+   (**expected, different quantities** — section 4 of the Phase 9 block, and it rests on the event
+   definition rather than on the data), but the numbers that would *characterize* the slope were
+   never pulled. On the instance, against `signals` run 1's own sample:
+
+   ```sql
+   -- The counter's distribution across the weeks the surviving row was measured over.
+   select width_bucket(f.value, 0, 60, 12) as bucket,
+          count(*), min(f.value), max(f.value), avg(t.value) as mean_fwd_return
+     from features f
+     join targets  t on t.week_ending = f.date
+    where f.feature_name = 'days_below_p10' and f.site_id = '07032000'
+      and t.target_name  = 'cairo_memphis_nearby_log_return' and t.horizon_days = 7
+      and f.value is not null and t.value is not null
+    group by 1 order by 1;
+
+   -- The low-counter weeks alone, which is the population the engine's anchors sit in.
+   select count(*), corr(f.value, t.value)
+     from features f
+     join targets  t on t.week_ending = f.date
+    where f.feature_name = 'days_below_p10' and f.site_id = '07032000'
+      and t.target_name  = 'cairo_memphis_nearby_log_return' and t.horizon_days = 7
+      and f.value between 1 and 7;
+   ```
+
+   **These join on an exact date and the sweep does not** — `sweep.align_lagged` takes the last
+   feature date on or before the anchor — so they characterize the sample without reproducing
+   `−0.137` exactly, and a small difference between the first query's full-sample correlation and
+   the stored statistic is expected rather than a discrepancy to chase.
+
+   **A positive or near-zero correlation in the second query beside the full sample's −0.137 is the
+   measured form of the whole argument.** It is not needed to reach the verdict and must not be run
+   as a search for one — if it comes out otherwise, that is a finding to record, not a result to
+   re-cut. `python -m app.signals.sweep` is not re-run for this.
+4. **The three human decisions are still open and Phase 9's verification did not touch them.** They
+   are what removes `ProvisionalBand.tsx`. Section 4 of the Phase 9 block settles only that there is
+   no code defect underneath the third of them.
+
 **Phase 1 is done — the block that used to live here is retired.** It listed the provisioning-3
 firewall run, `terraform apply`, and the budget alert as outstanding. All of it has been completed
 and reboot-verified on the instance; see `§ Current state`. Nothing from Phase 1 is pending.
@@ -2750,18 +3024,22 @@ Bring the stack up with `docker compose -f docker-compose.yml -f /root/dws-local
 Delete it once the `worker` service is containerized; at that point `DATABASE_URL` becomes
 `timescaledb:5432` and nothing needs a published port.
 
-## PHASE 9 IS BUILT AND NOT VERIFIED. **THE LIVE PROCEDURE BELOW IS THE NEXT THING TO RUN.**
+## PHASE 9 IS VERIFIED. **PHASE 10 IS NEXT.**
 
-Nothing in the Phase 9 commit has touched the instance and **no view has ever rendered a real API
-response** — every test runs against fixtures hand-built from the values recorded at the top of this
-file. Until the steps below are run **and their outcomes written back into this file in the same
-session**, Phase 9 is code that passes its own tests.
+**The live procedure below has been run and its outcomes are recorded at the top of this file**, in
+the same session, which is the process note above being followed rather than deferred — the second
+phase running to close it. The steps are kept because they are rerunnable, not because the phase is
+outstanding. **Three of them are: step 4's `as_of=2022-09-06` case, step 4's Twin Cities winter-nulls
+chart, and step 6's `preflight` run.** Everything else in the list was walked and reported.
 
-### Phase 9 live verification — NOT YET RUN
+**Step 4 was the one that could not be inferred, and it paid twice** — once for the frontend, which
+rendered every honesty property correctly against real responses, and once for the toolchain, since
+nothing in steps 1–3 runs at all on the Node the instance had.
 
-**Step 4 is the one that cannot be inferred**, and it is the whole point: the offline suite proves
-these components render fixtures correctly. It says nothing about what the real API returns on a
-real date, and every honesty property in this phase is about that.
+### Phase 9 live verification — RUN 2026-08-16, OUTCOMES AT THE TOP OF THIS FILE
+
+**Before step 1 on a clean machine: check `node --version`.** The build needs ≥ 20 and prefers ≥ 22;
+`npm ci` will warn `EBADENGINE` on every package and still exit zero. See standing item 1.
 
 1. `cd frontend && npm ci && npm run build` — report bundle size and any warnings. Expect a chunk
    over 500 kB (Recharts).
@@ -2782,12 +3060,19 @@ real date, and every honesty property in this phase is about that.
 5. Keyboard focus visible on every interactive element; layout holds at 375px.
 6. `python -m verify.preflight` — six gates green. **Owed from Phase 7 and Phase 8 as well; now owed
    from three.**
-7. Write the outcome back in the same session; set `§ Up Next` to Phase 10.
+7. Write the outcome back in the same session; set `§ Up Next` to Phase 10. **Done, 2026-08-16.**
 
-**Also still owed, and none of it blocks Phase 9:** Phase 8's step 9 second half (`/api/gauges`,
-which this phase's `/river` view now depends on and which has still never been called live), step 10
-second half (`limit=50000` → 422), Phase 7's step 1 (`migrate` showing twenty-five applied), the
-sweep's `run_id` and wall time, and **DEBT 1a — the four CSVs**.
+**Also still owed, and none of it blocked Phase 9:** Phase 8's step 9 second half (`/api/gauges` —
+this phase's `/river` view depends on it and **it has now been called live**, since `/river` rendered
+four gauges with their declared and observed coverage, so what remains owed there is the recorded
+response rather than the call), step 10 second half (`limit=50000` → 422), Phase 7's step 1
+(`migrate` showing twenty-five applied), the sweep's `run_id` and wall time, and **DEBT 1a — the four
+CSVs**.
+
+**The state of the instance as this session left it, because it is not what the procedure assumes:**
+the **database is up** — an SSM port-forwarding session reached it and it answered the auth
+handshake — and **the API and Caddy are not running.** Anything rerunning step 4, or the standing
+item 3 queries, starts by bringing the stack up.
 
 **The three human decisions are still open and Phase 9 did not touch them.** They are what removes
 `ProvisionalBand.tsx`, and they are still the only thing standing between a passing gate and a
