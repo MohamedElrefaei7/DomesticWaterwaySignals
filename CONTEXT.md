@@ -3,16 +3,195 @@
 This is the **log**: current state, decisions as they are made, and `§ Up Next`. Stable contracts
 live in `CLAUDE.md`. If something here hardens into an invariant, move it there and note the move.
 
-**Last updated:** 2026-08-16 (**PHASE 7 HAS RUN ON THE INSTANCE AND THE GATE PASSED ON BOTH LABELLED
-EVENTS — WHICH IS NOT THE GOOD NEWS IT LOOKS LIKE.** 2022: 4 analogs, 3 of 4 consistent, **median
-+7%**, range −48%→+18%. 2023: 5 analogs, 4 of 5, **median +10%**, range −48%→**+270%**, where the
-`+270%` is `2022-09-16` — the immediately preceding drought year, and the rank-1 analog. **Every
-analog behind both passes falls inside 2015–2022**, both ranges span zero, and both sentences say the
-rate *rose* while the sweep's one surviving row carries a **negative** statistic. Three things to
-settle before either sentence is quoted: the 3-of-4 consistency granularity, the analog clustering,
-and that sign disagreement. Phase 6 stands: 1 of **6,966** pairs, contemporaneous at `lag_days = 0`,
-no lead at any lag in either direction. **Debt 1a is still open:** the four CSVs exist and are not
-pasted in.)
+**Last updated:** 2026-08-16 (**PHASE 8 BUILT OFFLINE — THE READ API. NOT YET RUN ON THE
+INSTANCE.** Eight GET endpoints under `app/api/`, `fastapi==0.141.1` and `uvicorn==0.52.3` pinned,
+444 passed with `DATABASE_URL` set and 314 passed / 130 skipped without, **all sixteen mutation rows
+watched red and restored** — two of them needing a second form, and both of those are recorded below
+because the second forms are findings rather than bookkeeping. **The live procedure at the bottom of
+this file has not been run and nothing in this commit has touched the instance.**
+**Phase 7 still stands and its three open questions are still open** — the gate passed on both
+labelled events (2022: 4 analogs, 3 of 4, median **+7%**; 2023: 5 analogs, 4 of 5, median **+10%**,
+range up to **+270%** from `2022-09-16`, the immediately preceding year), every analog inside
+2015–2022, both ranges spanning zero, and both sentences saying the rate *rose* while the sweep's
+one surviving row is **negative**. Phase 6 stands: 1 of **6,966** pairs, contemporaneous at
+`lag_days = 0`. **Debt 1a is still open:** the four CSVs exist and are not pasted in.)
+
+---
+
+## Phase 8 — the FastAPI read layer. **WRITTEN OFFLINE 2026-08-16. NOT YET RUN ON THE INSTANCE.**
+
+Twelve modules under `app/api/`, six test files under `tests/api/`, two lines added to
+`requirements.txt` and one to `requirements-dev.txt`. **No migration, no cadence entry, no
+freshness registration, and nothing beneath `app/api/` was touched** — this commit adds a read
+layer and changes nothing under it.
+
+**THIS IS THE FIRST COMMIT WHERE THE PROJECT'S HONESTY GUARANTEES HAVE TO SURVIVE A JSON ENCODER.**
+Seven phases of guards live in Python objects and database constraints. Every one of them can be
+undone here by a line that looks like tidying — a nullable field with a default, a q-value emitted
+without its grid size, a refusal serialized with `median_pct: null`. `CLAUDE.md § 20` is the
+contract that came out of it.
+
+### The endpoints
+
+```
+GET /api/health                              per-job + per-table, 200 while degraded, never cached
+GET /api/conclusion?site_id=&as_of=          three shapes, discriminated on `gate`
+GET /api/gauges                              declared record starts AND observed coverage
+GET /api/gauges/{site_id}/series?start=&end=&source=
+GET /api/rates?segment=&horizon=&start=&end=
+GET /api/movements?lock=&commodity=&start=&end=
+GET /api/signals?run_id=&passing_only=       defaults to ALL scanned rows
+GET /api/signals/runs
+```
+
+**It runs from the host venv under uvicorn on loopback, pending Phase 10.**
+`uvicorn app.api.main:app --host 127.0.0.1 --port 8000`. Not containerized here, deliberately:
+containerizing it in this commit would mean the live verification runs against a different
+execution path than the tests, and the Compose wiring has its own failure modes worth isolating.
+**Loopback and not `0.0.0.0`** — the security group and `DOCKER-USER` cover published container
+ports and neither covers a host process, and there is no TLS in front of this until Phase 10.
+
+**Versions pinned, resolved on this machine 2026-08-16:** `fastapi==0.141.1`, `uvicorn==0.52.3`
+(plain, not `[standard]` — the extras are uvloop/httptools/watchfiles and this is a read API in
+front of Postgres, where the time is in the database), and `httpx2==2.10.0` in
+`requirements-dev.txt`. pydantic 2 and starlette arrive through fastapi's own metadata and are
+**deliberately not re-pinned**: a transitive version written down twice is a second copy that
+drifts.
+
+### READ-ONLY IS TWO PROPERTIES, AND THE SECOND ONE IS INVISIBLE FROM THE ROUTE TABLE
+
+No non-GET route is declared, and a test walks the route tree to say so. **That test cannot see the
+one that mattered.** `app/analogs/engine.query` defaults to `persist=True`: it INSERTs an
+`analog_queries` row and COMMITS. Left at its default, every request to `/api/conclusion` would
+write — on an endpoint declared GET, through a role the live procedure grants SELECT only.
+
+So the route passes `persist=False`, and `test_the_conclusion_route_never_persists_a_query_row`
+asserts it at the call site. **The consequence is stated rather than hidden, and it is worth the
+human's attention:**
+
+> **`analog_queries` is the CLI's research log and does NOT record questions asked through the
+> API.** Phase 7 built that table specifically so an engine that refuses ninety-nine times in a
+> hundred could not look like an engine that answers — the disappearing denominator, one layer up.
+> A read-only API cannot contribute to it. **If the API becomes the main way queries are asked,
+> that denominator stops being complete**, and the fix is a decision (a write path with its own
+> role, or an accepted gap recorded here), not something this commit should have picked.
+
+### Decisions worth reading before changing anything here
+
+- **A refusal is a different SHAPE, not the same shape with nulls in it.** `RefusedConclusion` does
+  not declare `median_pct`, `range_pct` or `matches` — the keys are absent from the body, and a
+  client cannot default a key that does not exist. `no_current_event` is a third shape, distinct
+  from `refused`, because a quiet river is not a coverage problem.
+- **The sweep's verdict rides on all three shapes**, with `scanned_pairs` beside `passing_pairs`.
+  `run_summary` is shared between the conclusion route and the signals route so the two cannot
+  disagree about a run's denominator, and a test asserts they report the same numbers.
+- **Response models declare no defaults at all**, not even `= None`. A nullable field is REQUIRED
+  and nullable, so a route that failed to read the column fails loudly rather than emitting a
+  plausible zero.
+- **`/api/signals` defaults to every scanned row.** The scanned rows are the multiple-comparisons
+  record; a default of `passing_only=true` would hand a client 1 row in a table of 1 rather than
+  1 in 6,966, at read time, leaving no trace of itself.
+- **The cache key is built FROM THE REQUEST**, not assembled by hand from named parameters. A
+  hand-assembled key is one somebody forgets to extend, and the symptom is one date's conclusion
+  served for another's — real, well-formed, identically shaped, detectable only by already knowing
+  the answer. `/api/health` is never cached.
+- **`computed_at` comes from the cache, not from the route's own clock.** Otherwise there would be
+  two answers to "when was this computed" that agree on a miss and diverge on every hit, in the
+  flattering direction — the body would always say "just now".
+- **Error bodies carry a code and a correlation id and nothing else.** No exception text, no type
+  name: `UndefinedTable` beside `InsufficientPrivilege` tells an unauthorized reader what schema
+  they are probing and how far they have got.
+- **`segment` and `location` are both accepted on `/api/rates`; the response always says
+  `location`.** The column was renamed to `location` in migration 0016 after measuring what USDA
+  calls it, and `segment` is the name the brief and the live procedure use. Both map to one column;
+  passing both with different values is a 422 rather than a silent preference.
+
+### THE ROUTE-TABLE TEST WAS VACUOUS WHEN FIRST WRITTEN, AND THAT IS THE FINDING OF THIS COMMIT
+
+`for route in app.routes: route.methods` is the obvious way to assert "no non-GET route". On
+Starlette 1.6 **it returns only `{GET, HEAD}` from `/docs` and `/openapi.json`**: `include_router`
+inserts one `_IncludedRouter` object per router and the real endpoints live one level down behind
+`original_router`. So the test would have asserted a property of a set containing **none of this
+project's routes**, passed, and **stayed green after somebody added a POST**.
+
+Caught by printing the walk's output rather than trusting its result. `CLAUDE.md § 2`'s theme 2, and
+the same shape as the ingress test that passed because the set it constrained was empty. The walk
+now recurses, returns paths as well as methods, and **the test asserts it reached all eight
+documented endpoints before it asserts anything about their methods** — a walk that stops early
+fails on the paths, not silently on an empty set.
+
+### Deviations from the brief, and why
+
+- **Tests 11, 12 and 25 are integration though the brief marked only 13 and 26.** Tests 11
+  (`last_success` ignores a more recent failure) and 12 (data freshness, not process liveness) are
+  about a `WHERE status = 'success'` predicate and about a table being quiet while its job is
+  healthy. The unit tier's `FakeConn` **deliberately does not implement that predicate** — a fake
+  that did would make those tests assert what the test set up, which is the config-test-standing-
+  where-a-behavioural-one-belongs failure this project has shipped ten of. Test 25 (every list
+  response carries `limit`/`offset`/`total`) has both halves: a structural one over the response
+  models, and an integration one over the four real endpoints.
+- **`lock_movements` has no `direction` and no `barges`.** The brief's response shape implied both;
+  migration 0016 dropped them after measuring that the source publishes neither, on the rule that a
+  column which would always be NULL is not created. The API does not re-create them.
+- **`barge_rates.rate_month` is exposed.** It is a published field on the two forward horizons and
+  NULL on `nearby`; omitting it would have made a real published value unreachable.
+- **`/api/gauges` reports declared record starts AND observed coverage.** `CLAUDE.md § 15`: a
+  catalog's date range is an envelope, not what an endpoint serves, and where they disagree what is
+  served is what is true. Reporting only the seeded value would restate an assumption as a
+  measurement; reporting only the observed bounds would hide that a seeded assumption exists.
+- **Nine tests beyond the brief's thirty.** The ones worth naming: the `persist=False` assertion
+  above; a null and a zero tonnage in ONE response, because tests 19 and 20 each seed a single row
+  and can each be passed by an implementation that emits one value for everything; that the cache
+  actually hits, without which the cache-key test could pass over a cache that never fires; and
+  that `app/api/` issues no writing SQL.
+
+### Mutation confirmation — 18 runs for 16 rows, and the two extra runs are the interesting part
+
+All sixteen rows watched **red and restored**, `__pycache__` cleared between the restore and the
+re-run and `PYTHONDONTWRITEBYTECODE=1` set. Two rows needed a second form, and in both cases the
+pair says something the single form would have hidden.
+
+**Row 2 — "make the refusal shape include `median_pct: null`" — is TWO different failures:**
+
+| Form | Test 2 (key absent) | Test 3 (numeric walk) |
+|---|---|---|
+| `median_pct: float \| None = None` | **RED** | green |
+| `median_pct: float = 0.0` | **RED** | **RED** |
+
+A `null` is not a numeric leaf, so the recursive walk cannot see it. **Neither test subsumes the
+other**: test 2 catches the key arriving empty, test 3 catches it arriving with a number in it — and
+the second is the one that catches a field added three levels down that nobody thought to look at.
+The brief's table lists row 2 against both; it reaches both only in the second form.
+
+**Row 16 — "reimplement the gate threshold inside a route" — is also two failures:**
+
+| Form | Test 8 (structural) | Test 17 (behavioural) |
+|---|---|---|
+| `if result.gate.n_analogs >= 4 and ... >= 0.70 * ...` | **RED** | green |
+| route hardcodes the refusal `reason`, ignoring the engine | green | **RED** |
+
+The first form is a reimplementation that happens to be **behaviourally identical** on the fixtures
+— which is exactly why the structural test exists, and exactly why a behavioural test alone would
+not have caught it. The second changes the answer without writing a threshold down, which is why
+the grep alone would not have caught it either. **The pair is the guard; neither half is.**
+
+**And one procedural finding, from a harness bug rather than the code:** the first mutation run
+crashed mid-cycle (it tried `git checkout --` on files not yet tracked), leaving row 1's appended
+POST route in place. The second run then snapshotted the **already-mutated** file as its baseline
+and "restored" to it — reporting red after the restore, which reads exactly like a test that is
+broken. `CLAUDE.md § 0` names the stale-bytecode version of this; **a stale BASELINE produces the
+identical symptom**, and the harness now snapshots file contents rather than relying on git.
+
+### What is measured so far, and what is not
+
+**Offline: 444 passed with `DATABASE_URL` set; 314 passed / 130 skipped without it.** The API suite
+contributes 70 tests, 24 of them integration.
+
+**NOTHING IN THIS COMMIT HAS TOUCHED THE INSTANCE.** The integration tier runs against a local
+throwaway Postgres with this project's real migrations and hand-seeded rows. It proves that a NULL
+in a real nullable column arrives as `null`, that a reported zero arrives as `0`, and that `total`
+counts the unpaginated set — **it says nothing about what the real data will do**, and the live
+procedure below is what closes that.
 
 ---
 
@@ -2232,7 +2411,76 @@ Bring the stack up with `docker compose -f docker-compose.yml -f /root/dws-local
 Delete it once the `worker` service is containerized; at that point `DATABASE_URL` becomes
 `timescaledb:5432` and nothing needs a published port.
 
-## PHASE 7 HAS RUN. **THREE QUESTIONS COME BEFORE PHASE 8, AND THEY ARE ALL HUMAN DECISIONS.**
+## PHASE 8 IS BUILT AND NOT VERIFIED. **THE LIVE PROCEDURE BELOW IS THE NEXT THING TO RUN.**
+
+Nothing in the Phase 8 commit has touched the instance. Until the steps below are run **and their
+outcomes written back into this file in the same session** (see the process note above — this is
+the rule this file most needs and has historically not followed), Phase 8 is code that passes its
+own tests and nothing more.
+
+### Phase 8 live verification — NOT YET RUN
+
+**Step 3 is the one that cannot be inferred.** A read-only role that has never been observed
+refusing a write is not known to be read-only, and every other step passes identically whether the
+role is `waterway_api` or the owner.
+
+1. `pip install -r requirements.txt` — confirm **`fastapi==0.141.1`** and **`uvicorn==0.52.3`**
+   install at those versions. Also `pip install -r requirements-dev.txt` for `httpx2==2.10.0` if
+   the suite is to be run there.
+2. **Create the read-only role.** `<PASSWORD>` is generated with `openssl rand -hex 32`, **never
+   `base64`** — `/` and `+` break `DATABASE_URL` parsing and surface as confusing host and port
+   errors rather than as auth failures (`CLAUDE.md § 5`). **This agent neither generates nor sees
+   it.**
+   ```sql
+   CREATE ROLE waterway_api LOGIN PASSWORD '<openssl rand -hex 32>';
+   GRANT CONNECT ON DATABASE waterway TO waterway_api;
+   GRANT USAGE ON SCHEMA public TO waterway_api;
+   GRANT SELECT ON ALL TABLES IN SCHEMA public TO waterway_api;
+   ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO waterway_api;
+   ```
+   Add `API_DATABASE_URL` to `.env` using that role. **If it is absent the API falls back to
+   `DATABASE_URL` and logs a WARNING saying so** — check the startup log for that line, because its
+   presence means step 3 is testing the owner.
+3. **PROVE THE ROLE IS READ-ONLY, by watching a write fail:**
+   `psql "$API_DATABASE_URL" -c "delete from job_runs where 1=0"`
+   **must fail with a permission error.** `where 1=0` so the statement is harmless even if the
+   grant is wrong, which is the point: the check must be safe to run *before* you know the answer.
+4. `uvicorn app.api.main:app --host 127.0.0.1 --port 8000`. **Loopback, not `0.0.0.0`** — the
+   security group and `DOCKER-USER` do not cover a host process and TLS is Phase 10.
+5. `curl -s localhost:8000/api/health | python -m json.tool` — confirm **one row per cadence job**
+   (six), the `data` block with the five registered tables, and the `degraded` field. Record which
+   jobs and tables are degraded; that is a measurement of the instance, not a pass/fail.
+6. `curl -s "localhost:8000/api/conclusion?site_id=07032000&as_of=2022-10-11" | python -m json.tool`
+   — expect the **passing** shape: `analogs 4`, `consistent 3`, `median_pct` about **+7**, and the
+   `sweep` block with `best_q 0.0446`. **Report `scanned_pairs` and `passing_pairs` verbatim** —
+   Phase 6 recorded 1 of 6,966 and this is the first time the API states it.
+7. `curl -s "localhost:8000/api/conclusion?site_id=07032000&as_of=2022-09-06" | python -m json.tool`
+   — expect `"gate": "no_current_event"`, **and read the whole body by eye for any estimate-shaped
+   number.** The recursive-walk test asserts this offline; step 7 is a human confirming it against
+   real data, which is a different check.
+8. `curl -s "localhost:8000/api/rates?segment=Twin%20Cities&horizon=nearby&start=2022-01-01&end=2022-03-31"`
+   — a winter window on the segment with the most closures (426 of Twin Cities' records have no
+   rate). **Confirm `"pct_of_tariff": null` appears and `0` does not.**
+9. `curl -s "localhost:8000/api/gauges/07032000/series?start=2022-09-01&end=2022-11-01"` — confirm
+   `total`, `limit` and `offset`, and **whether `total` exceeds `limit`** (62 days should not, but
+   record the number). Also `curl -s localhost:8000/api/gauges` — Memphis's `observed_start` against
+   its declared `2014-10-01` is the § 15 envelope-versus-served comparison, measured.
+10. `curl -s -o /dev/null -w "%{http_code}\n" "localhost:8000/api/rates?start=2000-01-01&end=2026-01-01"`
+    — expect **422**. And `...&limit=50000` on a valid window — also **422**, not a clamped 200.
+11. `python -m verify.preflight` — six gates green. **Still owed from Phase 7's run as well.**
+12. **Write the outcomes back into this file in the same session**, and set `§ Up Next` to Phase 9.
+
+**Also still owed, and neither blocks Phase 8:** Phase 7's steps 1 and 7 (`migrate` showing
+twenty-five applied, and `preflight`), the sweep's `run_id` and wall time, and **DEBT 1a — the four
+CSVs**.
+
+---
+
+## PHASE 7 HAS RUN. **THREE QUESTIONS COME BEFORE PHASE 9, AND THEY ARE ALL HUMAN DECISIONS.**
+
+**These were written as "before Phase 8" and Phase 8 did not need them** — the API serializes
+whatever the engine returns and takes no position on any of the three. They are unchanged and
+unanswered, and they are still what stands between a passing gate and a quotable sentence.
 
 The engine ran on the instance on 2026-08-16 and the outcome is recorded at the top of this file, in
 the same session — the second time this project has managed that. **The gate passed on both labelled

@@ -917,3 +917,97 @@ refuse, and the whole of this section exists so that the honest answer is the ea
 - **An engine that finds confident analogs where the sweep found no relationship has a bug, not a
   discovery.** This is the last bullet because it is the one to check first when the output looks
   good.
+
+---
+
+## 20. API conventions
+
+Learned building the read API (Phase 8). §§ 14–16 govern data a source published, § 17 data this
+project computed, § 18 claims about relationships between them, § 19 claims about what happened the
+last few times conditions looked like this. **This governs what happens to all of it on the way out
+through a JSON encoder** — the first boundary where every guard above has to hold in a different
+language, on the far side of a serializer, in a layer whose numbers get screenshotted.
+
+The difference is that nothing downstream can check. A refusal that arrives as `{"median_pct":
+null}` is one frontend default from rendering `0%`; a q-value that arrives without its grid size is
+a significant-looking number with no experiment attached; a `null` rate that arrives as `0` is a
+week when barge freight was free. **In every case the body is well formed, the endpoint is healthy,
+and the client renders something plausible.**
+
+- **The API is read-only. No route mutates state, and the API connects as a role that cannot
+  write.** Read-only is TWO properties and the second one is the one the route table cannot show:
+  no non-GET route is declared, AND every call into a module beneath is made in its non-writing
+  form. `app/analogs/engine.query` defaults to `persist=True` and commits an `analog_queries` row,
+  so the API passes `persist=False` — a GET that writes on every request, through a role granted
+  SELECT only. **The consequence is stated rather than hidden: `analog_queries` is the CLI's
+  research log and does not record questions asked through the API.**
+- **A read-only role that has never been observed refusing a write is not known to be read-only.**
+  The GRANTs are a live step a human runs, and the step after it issues a `DELETE` that must fail.
+- **Health is per-job, cadence-aware, reports data freshness rather than process liveness, returns
+  200 with a `degraded` field rather than a 5xx, and is never cached.** Never a bare
+  `{"status": "ok"}` — that is what let the prior project record "Completed" while the whole stack
+  had been down for two and a half months (§ 2). The 200 is deliberate: an uptime monitor that goes
+  red on a stale ingest job is indistinguishable from one that goes red because the API is down,
+  and the two need different responses at different hours. A cached health check reports the state
+  of the world before the incident somebody is reading it about.
+- **A refused or unavailable result is a distinct response shape whose estimate keys are ABSENT,
+  not null. A client cannot default a key that does not exist.** `median_pct ?? 0`,
+  `Number(x) || 0`, a chart library's `defaultValue` — each is a reasonable line of client code and
+  each converts a refusal into a confident claim that nothing changed. This is the serialization
+  form of § 19's stronger property: on a refusal the estimate is never COMPUTED, and these shapes
+  make sure there is no KEY to fill in either.
+- **The absence is asserted twice, because the two assertions catch different failures.** A test
+  naming the keys catches a key added with a `null` value; a recursive walk over every numeric leaf
+  catches a key added with a NUMBER, including one three levels down that nobody thought to look
+  at. Measured: a `median_pct: float | None = None` turns only the first red, and a
+  `median_pct: float = 0.0` turns both. Neither test subsumes the other.
+- **Every number surviving in a refusal is a count, a stated threshold, or a sweep statistic**, and
+  the allow-list is by key name so that a new numeric field fails until somebody writes down which
+  of the three it is.
+- **Every analog response embeds the sweep's verdict, including its denominator.** On the passing
+  shape and on every refusal. `passing_pairs` never appears without `scanned_pairs`: 1 reads as a
+  finding and 1 of 6,966 reads as the top of a distribution. A NULL verdict means the pair was
+  never scanned — which is "not measured", not "no relationship" — and the block is present saying
+  so rather than absent.
+- **Response models declare no defaults at all beyond a discriminator's own literal; `null` from
+  the database reaches the client as `null`.** A nullable field is REQUIRED and nullable, so a
+  route that failed to read the column fails loudly instead of emitting a plausible zero. `= None`
+  is as forbidden as `= 0`: it is a field a route can forget to fill in, and the symptom is a
+  `null` indistinguishable from a faithfully preserved one.
+- **A zero and a NULL are preserved in both directions, and each direction has its own test.** One
+  test can be satisfied by an implementation that is wrong the other way. Nothing in a read layer
+  aggregates a sparse series with a nullable measure: a sum silently decides that a NULL
+  contributes zero, which is the coalesce the models refuse, performed one layer up.
+- **Every list response carries `limit`, `offset` and `total`; an over-maximum limit is rejected,
+  not clamped.** `total` matters beyond pagination: a client receiving 500 of 8,260 rows without
+  knowing there are 8,260 draws a truncated series **that looks like a real one**. A clamp is a lie
+  the client cannot detect — it asked for 50,000 and received 5,000, which is indistinguishable
+  from a filter that matched 5,000.
+- **A filtered view still reports the unfiltered denominator.** An endpoint over `signals` defaults
+  to every scanned row, because the scanned rows ARE the multiple-comparisons record (§ 18) and a
+  read-time filter leaves no trace of itself.
+- **Series endpoints require an explicit date range with a stated maximum span.** Unbounded
+  defaults invite a client to fetch the whole record through a JSON serializer and make that cost
+  invisible to whoever writes the client. The rejection names the limit, so the number does not get
+  hardcoded on the client side from reading the source.
+- **Caches are keyed on the FULL parameter set, built from the request rather than assembled by
+  hand, and every cached response carries `computed_at`.** A key assembled by hand is a key
+  somebody forgets to extend, and the symptom is one date's conclusion served for another's — real,
+  well-formed, identically shaped, and detectable only by already knowing the answer. `computed_at`
+  is the time the value was COMPUTED, not served: a timestamp that always says "just now" is a
+  field that looks like provenance and carries none.
+- **Error bodies never contain exception text, SQL, or connection details; detail is logged against
+  a correlation id returned to the client.** `DATABASE_URL` carries the password and it is the
+  string psycopg puts in an `OperationalError`. Not the message, not the type name, not a truncated
+  prefix — `UndefinedTable` beside `InsufficientPrivilege` tells an unauthorized reader what schema
+  they are probing and how far they have got.
+- **The API reimplements no logic that exists beneath it**, and that is guarded structurally AND
+  behaviourally because neither alone is enough. A grep passes over a route that reimplements the
+  gate with the number spelled differently; a behavioural test passes over a route that calls the
+  engine and then overrides its verdict. Measured: those are two different mutations and each turns
+  exactly one of the two tests red.
+- **A route-table assertion must prove its own walk reached something.** On Starlette 1.6 a flat
+  pass over `app.routes` returns only `/docs` and `/openapi.json` — included routers sit one level
+  down — so "every declared method is a GET" would be green over a set containing none of this
+  project's routes, and would stay green after somebody added a POST. That is § 2's theme 2, and it
+  is the same shape as the ingress test that passed because the set it constrained was empty.

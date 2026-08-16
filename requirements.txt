@@ -17,3 +17,22 @@ APScheduler==3.11.3
 # Required by APScheduler's SQLAlchemyJobStore. The scheduler's persistent store is the only
 # thing in this project that uses SQLAlchemy; application queries use psycopg directly.
 SQLAlchemy==2.0.51
+
+# The read API (Phase 8). FastAPI brings pydantic 2 and starlette; both are pinned by fastapi's own
+# metadata and are deliberately NOT re-pinned here — a transitive version written down in two
+# places is a second copy that drifts, which is this file's own argument one level down.
+#
+# The response models are the honesty boundary, not decoration: a nullable field declared with no
+# default is what makes a NULL from the database reach a client as `null`, and a discriminated
+# union is what makes a refusal a shape with no estimate KEYS rather than one with null values.
+fastapi==0.141.1
+
+# The ASGI server. Plain rather than `uvicorn[standard]`: the extras are uvloop, httptools and
+# watchfiles, none of which this workload needs — it is a read API in front of Postgres, where the
+# time is spent in the database, and each extra is another pinned wheel to resolve on the machine
+# that runs it (CLAUDE.md § 5).
+#
+# NOT CONTAINERIZED IN THIS PHASE. It runs from the host venv on loopback, like the scheduler:
+#     uvicorn app.api.main:app --host 127.0.0.1 --port 8000
+# The `api` and `caddy` Compose services, TLS and the domain are Phase 10.
+uvicorn==0.52.3

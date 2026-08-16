@@ -1,6 +1,16 @@
 pytest==8.3.4
 python-hcl2==8.1.2
 
+# The transport `fastapi.testclient.TestClient` drives the app through. TEST-ONLY: nothing under
+# app/ imports it, and the API does not make outbound HTTP calls.
+#
+# httpx2 RATHER THAN httpx, and the difference is not cosmetic. Starlette 1.6 emits
+# `StarletteDeprecationWarning: Using httpx with starlette.testclient is deprecated; install httpx2
+# instead` on every TestClient import. pytest.ini's own header says why that matters here: a warning
+# nobody can fix is a warning everybody learns to scroll past, and the next warning - the one that
+# matters - scrolls past with it.
+httpx2==2.10.0
+
 # Runtime dependencies are in requirements.txt and are also needed to run the test suite: the
 # orchestration tests import app/, and the integration tier talks to a real Postgres. Install both:
 #
