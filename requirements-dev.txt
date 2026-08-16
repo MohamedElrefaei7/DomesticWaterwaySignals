@@ -1,6 +1,12 @@
 pytest==8.3.4
 python-hcl2==8.1.2
 
+# docker-compose.yml, parsed rather than grepped (tests/deploy/). A grep cannot tell a service's
+# `ports:` key from the word inside the long header comment that explains why the key is absent,
+# and the published-port set has to be compared as a SET — the same allowlist-by-equality
+# discipline the security group and the ufw rules are asserted with — which needs a parse.
+PyYAML==6.0.3
+
 # The transport `fastapi.testclient.TestClient` drives the app through. TEST-ONLY: nothing under
 # app/ imports it, and the API does not make outbound HTTP calls.
 #

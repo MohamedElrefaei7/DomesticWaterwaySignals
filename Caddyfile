@@ -1,0 +1,156 @@
+# Caddy — TLS termination, the built React bundle, and a reverse proxy for /api.
+#
+# ===============================================================================================
+# THE DOMAIN IS A LITERAL, NOT A PLACEHOLDER. bargeanalysis.com is purchased and is the site.
+# ===============================================================================================
+#
+# TLS IS AUTOMATIC AND ITS FAILURE MODE IS A WAIT, NOT A FIX. Caddy obtains and renews Let's
+# Encrypt certificates on its own, given (a) a domain that resolves to this instance and (b) ports
+# 80 and 443 reachable from the internet. If DNS has not propagated when Caddy first starts,
+# issuance FAILS, Caddy retries with backoff, and the site serves nothing in the meantime. That is
+# not a misconfiguration and there is nothing in this file to change when it happens.
+#
+#     DO NOT RESTART THE STACK IN A LOOP TRYING TO FORCE IT.
+#
+# Let's Encrypt rate-limits failed issuance per domain per week, so a restart loop converts a wait
+# of minutes into a lockout of days. `dig +short bargeanalysis.com` must return 52.21.107.8 BEFORE
+# this container starts for the first time (live procedure step 3).
+#
+# The certificates and the ACME ACCOUNT KEY live in /data, which docker-compose.yml mounts from
+# /mnt/data/caddy on the separate EBS volume. Losing the account key means re-issuance against
+# that same rate-limited endpoint — which is why the store is not left inside the container where
+# a `docker compose down -v` or an image change would take it.
+#
+# (No blank line below: `caddy fmt` treats one before the global options block as unformatted.)
+{
+	# The admin API is a full control plane for this server — it can load a new config over HTTP.
+	# It binds 127.0.0.1:2019 inside the container and is not published, so nothing outside can
+	# reach it today; off is the state that does not depend on that staying true.
+	admin off
+
+	# No ACME contact email is configured. Caddy issues certificates without one; the cost is that
+	# Let's Encrypt cannot send expiry warnings. An email address is the human's to add here, and
+	# an invented one would be worse than none — expiry notices going to an address nobody reads
+	# is indistinguishable from having configured it.
+}
+
+bargeanalysis.com {
+	# --------------------------------------------------------------------------------------
+	# SECURITY HEADERS (decision 7) — set HERE, at the edge, and not in FastAPI.
+	# --------------------------------------------------------------------------------------
+	#
+	# At the edge because they must apply to everything served, and most of what is served —
+	# the entire frontend bundle — never passes through the application at all. A middleware in
+	# FastAPI would cover the /api responses and leave index.html, the JS, the CSS and the
+	# self-hosted fonts bare.
+	header {
+		# One year, and NOT `preload`. Preload submits the domain to a browser-baked list that
+		# is slow and awkward to leave; it is a decision with a long tail, and it is the
+		# human's to make once the site has been up long enough to be sure of it.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+
+		# CSP. NO FONT CDN, AND THAT IS THE PHASE 9 DECISION BEING CASHED IN: the frontend
+		# self-hosts Archivo Narrow and Zilla Slab through @fontsource, so they are emitted
+		# into the bundle's own asset directory and `font-src 'self'` covers them. A Google
+		# Fonts link in a component would have forced an exception here, and the exception
+		# would have been the thing anybody noticed — not the third-party request on every
+		# page load. tests/deploy/test_caddyfile.py fails if a CDN host appears in this file.
+		#
+		# `style-src` CARRIES 'unsafe-inline' AND IT IS NOT AN OVERSIGHT. Recharts writes
+		# inline `style` attributes on the elements it renders (the chart surface, the tooltip,
+		# the legend), and a CSP without 'unsafe-inline' drops them — the chart still draws and
+		# is laid out wrongly, which is a broken picture rather than a blocked request. It is
+		# scoped to styles only: `script-src` stays 'self', which is the directive that
+		# matters for injection.
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+
+		# Caddy advertises itself by default. Removing it is not security, but it is one less
+		# thing telling a scanner what to look up.
+		-Server
+	}
+
+	# --------------------------------------------------------------------------------------
+	# REQUEST SIZE CAP
+	# --------------------------------------------------------------------------------------
+	#
+	# The API is read-only and every route is a GET, so no legitimate request carries a body at
+	# all. 16KB is far above any query string and far below anything worth streaming into a
+	# process that will never read it.
+	request_body {
+		max_size 16KB
+	}
+
+	# --------------------------------------------------------------------------------------
+	# /api — reverse proxy to the api container over the Compose network
+	# --------------------------------------------------------------------------------------
+	#
+	# SAME ORIGIN, SO NO CORS ANYWHERE (decision 5). The bundle is served from this hostname and
+	# calls `/api/...` relative (frontend/src/api/client.ts), so the browser never makes a
+	# cross-origin request and there is nothing for CORS to permit. CORS middleware appearing in
+	# app/ later is a misdiagnosis of some other problem, and CLAUDE.md § 22 says so.
+	#
+	# THE PATH IS NOT STRIPPED. FastAPI's routers all declare `prefix="/api"`
+	# (app/api/routes/*.py), so `/api/health` must arrive at the application as `/api/health`. A
+	# `uri strip_prefix /api` here would produce a 404 from a healthy application.
+	handle /api/* {
+		reverse_proxy api:8000 {
+			# ------------------------------------------------------------------------
+			# NO PER-IP RATE LIMIT SHIPPED IN THIS COMMIT. STATED, NOT IMPLIED.
+			# ------------------------------------------------------------------------
+			#
+			# Caddy has no rate limiter in core. The one everybody reaches for
+			# (github.com/mholt/caddy-ratelimit) is a third-party plugin that requires a
+			# custom binary built with xcaddy, which means a Go module fetch at image
+			# build time and a plugin version this agent cannot resolve — inventing one
+			# is the same class of mistake as inventing an AMI id (CLAUDE.md § 16).
+			# Coupling first-ever TLS issuance to a supply-chain step was judged the
+			# worse trade. Phase 11 owns it; CONTEXT.md records the exposure.
+			#
+			# WHAT SHIPPED INSTEAD is these three timeouts and the body cap above. They
+			# are not a rate limit and do not pretend to be one: they bound what a single
+			# slow or hung request can hold open, so a stranger cannot accumulate
+			# connections against the API by opening them and not reading. They do
+			# nothing about volume.
+			#
+			# The expensive endpoint is /api/conclusion, which runs an analog query.
+			# app/api/cache.py keys a cache on the full parameter set, so repeat requests
+			# for one (site_id, as_of) are cheap; DISTINCT pairs are what bypass it, and
+			# there is currently nothing limiting how fast a stranger can ask for them.
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 30s
+				read_timeout 60s
+			}
+		}
+	}
+
+	# --------------------------------------------------------------------------------------
+	# Everything else — the built React bundle
+	# --------------------------------------------------------------------------------------
+	#
+	# /srv/frontend is the `frontend_dist` volume, written by the frontend-build container from
+	# an artifact inside a pinned image. It is NOT a bind mount of the git checkout: a checkout
+	# mount means the served site changes the moment somebody runs `git pull`, before any
+	# deliberate deploy, and a half-finished `npm run build` gets served mid-write (decision 6).
+	#
+	# `try_files {path} /index.html` IS WHAT MAKES CLIENT-SIDE ROUTING WORK. The app's routes
+	# (/, /signals, /river, /health) exist only in the browser's router — there is no file at
+	# any of those paths. Without this line a reload on /health is a 404 from a working site,
+	# and it is a 404 nobody sees during development because the dev server does this for you.
+	handle {
+		root * /srv/frontend
+		try_files {path} /index.html
+		file_server
+	}
+
+	encode zstd gzip
+
+	log {
+		output stdout
+		format json
+	}
+}

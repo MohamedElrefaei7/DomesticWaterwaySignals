@@ -1,0 +1,45 @@
+[Unit]
+Description=Inland Waterway Signals - Docker Compose stack (timescaledb, api, frontend-build, caddy)
+
+# RequiresMountsFor IS THE CONTRACT THIS UNIT EXISTS TO HONOR (CLAUDE.md § 9).
+#
+# The fstab entry for the data volume carries `nofail`, chosen deliberately in provisioning 1 so a
+# missing or slow-attaching EBS volume cannot leave the instance unbootable and unreachable. The
+# cost of that choice is that BOOT PROCEEDS WITHOUT THE VOLUME, and /mnt/data then exists as an
+# empty directory on the root disk — which every layer above reads as a healthy, empty world:
+# Postgres would initialise a brand-new cluster into it, and Caddy would find no ACME account key
+# and request fresh certificates against a rate-limited endpoint.
+#
+# This line is what makes the mount's absence STOP THE APPLICATION instead of being discovered in
+# the data weeks later (CLAUDE.md § 2, theme 1). Until this commit there was no application unit
+# to put it on; provisioning 1 recorded the requirement and left it owed. This is where it is paid.
+RequiresMountsFor=/mnt/data
+
+# Requires, not just After: if the daemon fails, this unit fails rather than running `docker
+# compose` against nothing and reporting a start that did not happen.
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+# oneshot + RemainAfterExit: `docker compose up -d` returns as soon as the containers are started,
+# so there is no long-lived process for systemd to supervise. The containers' own
+# `restart: unless-stopped` policies are what keep them running; this unit exists to bring them up
+# at boot and to take them down cleanly on shutdown.
+Type=oneshot
+RemainAfterExit=yes
+
+# The fixed absolute path (CLAUDE.md § 5). Compose reads .env from its working directory, which is
+# why this is WorkingDirectory rather than a --project-directory flag: one place for the path.
+WorkingDirectory=/opt/inland-waterway-signals
+
+# No timeout. A first boot pulls images and a cold `docker compose up` can exceed systemd's
+# default 90 seconds, at which point systemd kills a start that was working and reports a failure
+# that is not one.
+TimeoutStartSec=0
+
+ExecStart=/usr/bin/docker compose up -d
+ExecStop=/usr/bin/docker compose down
+
+[Install]
+WantedBy=multi-user.target

@@ -1108,3 +1108,78 @@ wrong with the picture.**
   A mutation that breaks the build turns everything red and proves only that the harness runs.
   Measured: a removed reporter flag made twelve rows report red with no test names at all, which is
   indistinguishable from twelve confirmed guards unless the harness is checking which test failed.
+
+---
+
+## 22. Deployment conventions
+
+Learned putting the stack on the public internet (Phase 10). §§ 14–16 govern data a source
+published, § 17 data this project computed, § 18 claims about relationships between them, § 19
+claims about what happened the last few times conditions looked like this, § 20 what happens to all
+of it through a JSON encoder, § 21 what a human sees. **This governs who can reach any of it.**
+
+The difference from every section above is that the previous twenty-one describe ways to be wrong.
+This one describes ways to be *reachable*, and the two are independent: every honesty property in
+this project can hold perfectly while a published port, a root container, or a bind-mounted
+checkout hands the whole thing to a stranger. Nothing downstream catches it, because from the
+inside the system is behaving exactly as designed.
+
+- **Only the reverse proxy publishes ports. Application and database containers publish nothing,
+  and the published set is asserted by exact equality across the whole stack**, never as a denylist
+  — same discipline as the security-group ingress allowlist (§ 8) and the ufw port set (§ 11). A
+  published container port is DNAT'd and traverses `FORWARD`, so it is reachable through
+  `DOCKER-USER`'s published-port path and bypasses TLS, the security headers, and everything else
+  that lives at the edge. Publishing the application's port "for debugging" is one short line that
+  reads like a convenience.
+- **Every image in the stack is pinned by digest, resolved on the machine that runs it — and half
+  the answer is in the Dockerfiles.** A service that builds carries its pin in a `FROM` line, so a
+  check that reads only Compose `image:` keys reports a fully pinned stack while the built services
+  float. **A multi-stage build's stages are asserted to agree on one digest**: two resolutions of
+  the same tag produce a runtime that is not the interpreter the wheels were installed against, and
+  it surfaces as an ImportError in a C extension that reads like a broken dependency.
+- **Application containers run as a non-root user, declared in the final stage.** Nothing this
+  project runs needs root, and a container reachable from the internet running as root is strictly
+  worse for no benefit. The numeric spellings of root count: `USER 0` reads as configured.
+- **No container entrypoint runs migrations, and the application image does not contain the
+  migration directory at all.** § 3 already forbids the behaviour; not shipping the files is what
+  makes the tempting one-line fix have nothing to invoke. The `CMD` is exec-form with the server as
+  argv[0], because shell form is what makes `something && server` possible in the first place.
+- **The served frontend is a built artifact, never a bind-mounted git checkout.** A checkout mount
+  changes the live site the moment somebody runs `git pull`, before any deliberate deploy, and
+  serves a half-written bundle mid-build. **The build toolchain is pinned and containerized, so the
+  host's version of it is never invoked** — Phase 9 found the instance on Node 18 with `npm ci`
+  warning `EBADENGINE` on every package and exiting zero.
+- **TLS certificate storage lives on the persistent data volume.** `/data` holds the issued
+  certificates *and* the ACME account key; losing the account key means re-issuance against an
+  endpoint that rate-limits per domain per week. **Failed issuance is waited out, never retried in
+  a loop** — a restart loop converts a wait of minutes into a lockout of days — and DNS is verified
+  to resolve to the instance *before* the proxy starts for the first time.
+- **Security headers and rate limiting live at the edge, not in the application.** Most of what is
+  served never reaches the application at all, so an application middleware covers the JSON and
+  leaves the bundle, the CSS and the fonts bare while looking, in the code, exactly like the
+  headers were configured. **Where an edge control is wanted and unavailable, its absence is stated
+  in the config file itself and in a test named for what actually shipped** — an unmarked absence
+  reads as a control somebody forgot to look for, and a test named for a rate limit that asserts
+  timeouts is a green check for a thing that does not exist.
+- **Same-origin serving means no CORS configuration anywhere. CORS middleware appearing in the
+  application is a misdiagnosis of some other problem**, and the reverse proxy does not strip the
+  API's path prefix — the routers declare it, so stripping it produces a 404 from a healthy
+  application.
+- **The application's systemd unit carries `RequiresMountsFor` for the data volume.** The fstab
+  entry is `nofail` by design (§ 9), so boot proceeds without the volume and the mount point exists
+  as an empty directory on the root disk — which every layer above reads as a healthy, empty world.
+  The mount's absence must stop the application rather than be discovered in the data.
+- **The deploy script operates on the checkout at the fixed absolute path and REQUIRES a `.git`
+  directory there, which inverts § 5's refusal clause.** The two halves of that bullet describe two
+  different scripts: the refusal guards a staging target something `rsync --delete`s into, where a
+  checkout underneath would be destroyed, while the deploy path in the same section is `git pull`
+  on the server, which needs one. What carries over is the property, asserted directly: **the
+  deploy script contains no `rsync`, no `--delete`, and no recursive removal.**
+- **The build step comes before the stack comes up, and the order is asserted by position.** Both
+  orders "work" — the orchestrator would build on the way up anyway. What the order buys is that a
+  build failure stops the deploy with the previous artifact still being served.
+- **What is publicly reachable is recorded explicitly, with the reasoning for any decision to leave
+  it unauthenticated.** "No authentication" is a defensible decision when the API is read-only, the
+  database role is `SELECT`-only and has been observed refusing a write, and no response carries a
+  secret. It is not defensible as an inheritance: a future session adding a write endpoint has to
+  be able to find the sentence saying that no-auth was predicated on no-writes.

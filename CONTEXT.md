@@ -3,8 +3,19 @@
 This is the **log**: current state, decisions as they are made, and `§ Up Next`. Stable contracts
 live in `CLAUDE.md`. If something here hardens into an invariant, move it there and note the move.
 
-**Last updated:** 2026-08-16 (**PHASE 9 IS VERIFIED IN BROWSER — THE FOUR VIEWS HAVE RENDERED REAL
-API RESPONSES.** `1 of 6,966 pairs passed correction` visible without interaction beside the median;
+**Last updated:** 2026-08-16 (**PHASE 10 IS WRITTEN AND IS NOT LIVE. NOTHING IS ON THE PUBLIC
+INTERNET YET.** The stack is now four services — `timescaledb`, `api`, `frontend-build`, `caddy` —
+with `caddy` the only one that publishes anything, and the published set across the whole stack is
+asserted by exact equality as `{80, 443}`. **27 new structural tests, 341 unit / 471 with a
+database, and all seventeen mutation rows watched red for the named test and restored** — two of
+them needed a second form and both are recorded below, because the first forms reached the wrong
+assertion. **Three things could not be built as written and one claim in the brief was checked and
+is true.** No per-IP rate limit shipped: Caddy has none in core and the plugin needs a custom
+binary built with a version this agent cannot resolve, so what shipped is a body cap and three
+proxy timeouts, stated as such in the Caddyfile and in the test's own name. **Every digest in the
+new files is the all-zero placeholder and cannot resolve** — five of them, resolved on the instance
+by a human. `CLAUDE.md § 22` is the new contract. **PHASE 9 IS VERIFIED IN BROWSER — THE FOUR VIEWS
+HAVE RENDERED REAL API RESPONSES.** `1 of 6,966 pairs passed correction` visible without interaction beside the median;
 the range drawn dominant over the median tick; the provisional band naming three open questions;
 `degraded: true` with six jobs overdue and two tables fresh, in two separate tables. **The sign
 disagreement is INVESTIGATED AND EXPECTED, NOT A BUG** — the sweep measures a slope across the whole
@@ -37,6 +48,220 @@ range up to **+270%** from `2022-09-16`, the immediately preceding year), every 
 2015–2022, both ranges spanning zero, and both sentences saying the rate *rose* while the sweep's
 one surviving row is **negative**. Phase 6 stands: 1 of **6,966** pairs, contemporaneous at
 `lag_days = 0`. **Debt 1a is still open:** the four CSVs exist and are not pasted in.)
+
+---
+
+## Phase 10 — domain, TLS, and hardening. **WRITTEN OFFLINE 2026-08-16. NOT LIVE. NOTHING IS ON THE PUBLIC INTERNET YET.**
+
+Everything in this block is a decision recorded or a file written. **No DNS record was created, no
+digest was resolved, no certificate was issued, no container was built, and nothing was rebooted.**
+The live procedure is in `§ Up Next` and every step of it is the human's.
+
+### 1. THE THREAT MODEL CHANGED, AND THIS IS THE DECISION ON THE RECORD
+
+Through Phase 9 this system was reachable only by the human, through an SSM tunnel, from one IP.
+**When the live procedure runs, it becomes reachable by anyone.**
+
+**What becomes publicly reachable, exactly:**
+
+| Reachable | What it serves |
+|---|---|
+| `https://bargeanalysis.com/` | The built React bundle — all four views, and `try_files` makes every client-side route return the shell |
+| `https://bargeanalysis.com/api/*` | All eight Phase 8 GET endpoints: health, conclusion, series, gauges, rates, movements, signals, signal runs |
+| `http://bargeanalysis.com/` | Nothing but a redirect to https — Caddy enables the redirect automatically (confirmed in the adapted config) |
+
+**What does not:** Postgres on 5432 (the dev override that publishes it is out-of-repo and nothing
+committed requires it), the scheduler (still a host venv process), the API's own port 8000, any
+`.env` value, the schema runner, and every sweep and backfill CLI. `caddy` is the only service with
+a `ports:` key.
+
+**THE DECISION: everything stays read-only and public, with no authentication.** That is the
+human's call and it is defensible on three grounds that are each independently checkable — the API
+declares no non-GET route, the database role is `SELECT`-only and **has been observed refusing a
+`DELETE` with `permission denied for table job_runs`** (Phase 8), and no response body carries a
+secret.
+
+**IT IS DEFENSIBLE AS A DECISION AND NOT AS AN INHERITANCE.** No-auth is predicated on no-writes.
+A future session that adds a write endpoint, a triggerable backfill, or an admin route is not
+extending this decision — it is voiding its premise, and the sentence it needs to find is this one.
+`CLAUDE.md § 22`'s last bullet is the contract form.
+
+**The exposure that is real and unmitigated: request volume.** `/api/conclusion` runs an analog
+query. `app/api/cache.py` keys a cache on the full parameter set, so repeat requests for one
+`(site_id, as_of)` are cheap — but **distinct pairs bypass the cache, and nothing limits how fast a
+stranger can ask for them.** See section 3.
+
+### 2. THE STACK — FOUR SERVICES, AND WHAT EACH ONE PUBLISHES
+
+| Service | Image | Publishes | Notes |
+|---|---|---|---|
+| `timescaledb` | `timescale/timescaledb:2.26.2-pg16@sha256:332b99…` | **nothing** | unchanged; still the only resolved digest in the file |
+| `api` | built from `Dockerfile.api`, base `python:3.12-slim@sha256:0000…` | **nothing** | non-root uid 10001, `CMD` is uvicorn in exec form, no `migrations/` in the image |
+| `frontend-build` | built from `Dockerfile.frontend`, base `node:22-bookworm-slim@sha256:0000…` | **nothing** | runs to completion, writes the bundle into the `frontend_dist` volume, exits |
+| `caddy` | `caddy:2-alpine@sha256:0000…` | **80, 443** | the only public face; `/data` bind-mounted from `/mnt/data/caddy/data` |
+
+`worker` is still absent — the scheduler runs from a host venv and containerizing it is Phase 12,
+where it needs its own restart-recovery verification.
+
+**`restart: unless-stopped` on three of four, and `restart: "no"` on `frontend-build`.** The brief
+asked for a test that every service carries `unless-stopped`; **that rule applied literally would
+have made the frontend rebuild in a loop forever** — the policy restarts a container whenever it is
+not running, regardless of exit code, and this one exits 0 on purpose. The test asserts the
+partition instead, and is renamed to say so.
+
+**`API_DATABASE_URL` changes host from `localhost` to `timescaledb` and that is a live step.**
+Inside the Compose network, loopback is the api container's own namespace. Getting it wrong is a
+connection-refused at container start — loud, immediate, in `docker compose logs api`. **The api
+container is deliberately NOT given `DATABASE_URL`**: `app/api/dependencies.py` falls back to it
+with a warning, and inside that container there must be nothing to fall back to, or the public API
+can silently connect as the database owner.
+
+### 3. NO RATE LIMIT SHIPPED. STATED PLAINLY, BECAUSE THE ALTERNATIVE IS AN UNMARKED ABSENCE
+
+**Caddy has no rate limiter in core.** The one everybody reaches for
+(`github.com/mholt/caddy-ratelimit`) is a third-party plugin requiring a custom binary built with
+`xcaddy`, which means a Go module fetch at image-build time and a plugin version pinned from
+memory — the same class of mistake as inventing an AMI id (`CLAUDE.md § 16`). **Coupling the
+first-ever TLS issuance to a supply-chain step was judged the worse trade**, and the brief
+explicitly permitted stating an alternative rather than shipping one silently.
+
+**What shipped instead:** `request_body max_size 16KB` — every route is a GET, so no legitimate
+request carries a body at all — and three proxy timeouts (`dial_timeout 5s`,
+`response_header_timeout 30s`, `read_timeout 60s`). **They bound what one slow or hung request can
+hold open. They do nothing about volume.**
+
+Two places say so where somebody will actually find it: a `NO PER-IP RATE LIMIT SHIPPED` block in
+the Caddyfile at the point of use, and the test's own name —
+`test_the_api_path_carries_the_documented_edge_limits`, renamed from the brief's
+`test_a_rate_limit_applies_to_the_api_path`, **because a green test named for a rate limit is worse
+than no test at all.** Phase 11 owns the limit.
+
+### 4. THE CLAIM THE BRIEF ASKED TO CHECK — BOTH HALVES TRUE, NOTHING CHANGED
+
+Read and confirmed; no file under `infra/terraform/` or the firewall scripts was modified.
+
+- **`infra/terraform/security.tf` already allows exactly what is needed.** Three ingress rules and
+  no more: 22 from `var.ssh_admin_cidr`, 80 from `0.0.0.0/0`, 443 from `0.0.0.0/0`, plus the
+  explicit all-outbound egress rule. `tests/terraform/test_security_group.py` asserts the port set
+  by equality and asserts no range covers 5432. **No security-group change is required by this
+  commit.**
+- **`infra/provision/configure_firewall.py` already carries the `DOCKER-USER` rules a published
+  port needs**, in the right order: conntrack `RELATED,ESTABLISHED` `RETURN` on `-i` first, then
+  `-o $EXT_IFACE` `RETURN`, then `-i $EXT_IFACE --dports 80,443` `RETURN`, then the terminal
+  `-i $EXT_IFACE` `DROP`. Interface read from `/etc/dws/external-interface`, never hardcoded.
+  **This is the commit that gives those rules something to protect** — until now the security group
+  was tighter than the chain, which is why CONTEXT already records that the terminal `DROP` has
+  never been observed from outside.
+
+### 5. DEVIATIONS FROM THE BRIEF — FOUR, ALL RECORDED RATHER THAN SILENT
+
+1. **Three tests renamed, because the brief's names would have been lies.**
+   `test_every_service_has_restart_unless_stopped` →
+   `test_every_long_lived_service_has_restart_unless_stopped` (plus the one-shot's own assertion in
+   the same test); `test_the_frontend_build_pins_its_node_version` →
+   `…_and_serves_no_bind_mounted_checkout`, because the brief's own mutation table points two
+   different mutations at it and a test named for one would have been silent about the other;
+   `test_a_rate_limit_applies_to_the_api_path` → `test_the_api_path_carries_the_documented_edge_limits`.
+2. **The deploy script REQUIRES a `.git` directory, inverting `CLAUDE.md § 5`'s refusal clause.**
+   The two halves of that bullet describe two different scripts — the refusal guards an
+   `rsync --delete` staging target, and the deploy path in the same section is `git pull` on the
+   server, which needs a checkout. **The property is held directly instead:** the script contains no
+   `rsync`, no `--delete`, and no recursive removal, and a test asserts all four. `CLAUDE.md § 22`
+   states the resolution.
+3. **`PyYAML==6.0.3` added to `requirements-dev.txt`.** `docker-compose.yml` is parsed, not
+   grepped: a grep cannot tell a service's `ports:` key from the word inside the header comment
+   explaining why the key is absent, and the published-port set has to be compared as a *set*.
+4. **Two extra tests beyond the brief's twenty-five**, both in `test_compose_shape.py` and both
+   about something the brief's list would have left unguarded:
+   `test_the_one_shot_build_is_gated_before_the_proxy_starts` (caddy waits on
+   `service_completed_successfully`, or it serves 404s from a working site) and
+   `test_the_compose_file_still_names_timescaledb_first` — see section 6.
+
+### 6. A REAL GAP FOUND IN `verify/preflight.py`, NOT FIXED, BECAUSE `verify/` WAS OUT OF SCOPE
+
+**`verify/preflight.py` gate 1 checks the FIRST `image:` line in `docker-compose.yml` and nothing
+else.** `read_image_reference()` is a deliberate regex rather than a YAML parse, so that
+`--write-digest` can rewrite the line without a round-trip discarding every comment. That was
+unambiguous when the file had one service.
+
+**It now gates one image reference out of three**, and which one is decided by file order.
+`timescaledb` is still first, so the gate still checks the database — but nothing in `verify/`
+notices the caddy image, and nothing in `verify/` looks at a Dockerfile `FROM` line at all.
+`--write-digest` will not write the caddy line either; **that digest is hand-edited, which is the
+exact thing that has already failed twice on the line it does write.**
+
+Stopgaps in place, and they are stopgaps: `tests/deploy/test_compose_shape.py` asserts every image
+across all four services is digest-pinned and tagged, `test_dockerfiles.py` asserts the same for
+every `FROM` and that a multi-stage build's stages agree on one digest, and
+`test_the_compose_file_still_names_timescaledb_first` is the tripwire for a reorder silently
+re-pointing gate 1. **These are offline structural checks; gate 1 is the one that asks Docker. The
+right fix is a preflight that walks every image reference in the stack, and it belongs to whichever
+commit is allowed to touch `verify/`.**
+
+### 7. WHAT WAS RUN, AND WHAT IT PROVED
+
+- **471 passed with a database, 341 passed / 130 skipped without.** 27 of those are new; the
+  pre-existing 444 are unchanged, including
+  `test_compose_file_does_not_invoke_the_migration_runner`, which still passes over a file that
+  grew from one service to four. That test is why the frontend's copy step lives in
+  `Dockerfile.frontend`'s `CMD` and not in a Compose `command:`.
+- **`docker compose config -q` parses the file.**
+- **`caddy validate` on the real Caddyfile: `Valid configuration`**, and `caddy fmt` clean. The
+  adapted config confirms two things that would otherwise be assumed: `enabling automatic
+  HTTP->HTTPS redirects`, and a TLS connection policy added for `srv0`. This ran in a throwaway
+  `caddy:2-alpine` container on the laptop, **which is a syntax check and not a pin** — no digest
+  from that pull was written anywhere.
+- **All seventeen mutation rows watched red for the named test and restored**, with
+  `__pycache__` cleared between the restore and the re-run, under `PYTHONDONTWRITEBYTECODE=1`. The
+  harness records which test failed and the assertion text, and fails the row if the named test is
+  not among them — Phase 9's finding, applied.
+
+**TWO ROWS NEEDED A SECOND FORM, AND BOTH ARE FINDINGS RATHER THAN BOOKKEEPING:**
+
+- **"Build the frontend after `compose up`"** first ran as a *deletion* of the build line, and the
+  test went red on `never builds the frontend image` — the presence assertion, not the ordering
+  one. The guard is about order, so the second form keeps both lines and swaps them; it then failed
+  with `` `docker compose up -d` (line 56) comes before the frontend build (line 57) ``, which is
+  the assertion the row is about.
+- **"Derive the deploy path from the script's location"** first ran as a replacement of the
+  constant and went red on the constant's absence. The realistic version of that mistake keeps the
+  constant and overrides it afterwards; the second form does that and reaches the derivation scan:
+  `` 'DEPLOY_DIR="$(cd "$(dirname "$0")/../.." && pwd)"' contains '$0' ``.
+
+### 8. NOTES THAT WILL BE REDISCOVERED OTHERWISE
+
+- **Five placeholder digests, all `sha256:` + 64 zeros, all of which CANNOT RESOLVE.** Two in
+  `Dockerfile.api`, two in `Dockerfile.frontend`, one on the caddy image. That is the point
+  (`CLAUDE.md § 12`): a missed resolution step fails at `docker build` with a manifest error rather
+  than falling back to a floating tag. The tests deliberately do **not** reject them — a suite that
+  is red on every clean checkout is a suite everybody learns to ignore.
+- **`caddy:2-alpine` is the major-2 rolling tag.** A specific `2.x.y` tag would be more re-derivable
+  and this agent cannot confirm which ones exist without inventing one. **Record the exact
+  `caddy version` output in this file when the digest is resolved**, so the pin traces to a release
+  rather than to a moving tag. Same shape for `python:3.12-slim` and `node:22-bookworm-slim`.
+- **The CSP carries `'unsafe-inline'` on `style-src` and it is deliberate.** Recharts writes inline
+  `style` attributes on the elements it renders; without it the chart still draws and is laid out
+  wrongly, which is a broken picture rather than a blocked request. `script-src` stays `'self'`,
+  and a test asserts that specifically.
+- **`www.bargeanalysis.com` is deliberately NOT in the Caddyfile.** Adding a name before its A
+  record exists means Caddy tries to issue a certificate for something that does not resolve, and
+  failed issuance is what Let's Encrypt rate-limits. The record comes first, then the Caddyfile.
+- **No ACME contact email is configured.** Caddy issues without one; the cost is no expiry
+  warnings. An invented address would be worse than none — notices going somewhere nobody reads is
+  indistinguishable from having configured it. The human's to add.
+- **The api container has a healthcheck that queries the database, and it reports HEALTHY on a
+  degraded stack.** Correct: `/api/health` returns 200 with `degraded: true` by design
+  (`CLAUDE.md § 20`), and a container health signal that goes red on a stale ingest job is
+  indistinguishable from one that goes red because the API is down.
+- **The `frontend_dist` volume is a named volume, i.e. on the ROOT disk.** Deliberate: it is a
+  rebuildable artifact, and losing it costs one `docker compose run`. The certificate store, which
+  is *not* rebuildable without a rate-limited round trip, is on `/mnt/data`.
+- **`ExecStop=/usr/bin/docker compose down` means every boot recreates the containers**, including
+  a re-run of `frontend-build`. That is cheap and deterministic, and the certificates survive it
+  because they are on `/mnt/data` rather than in the container.
+- **Nothing in this commit touched `app/`, `migrations/`, `frontend/src/`, `infra/terraform/`,
+  `verify/`, `tests/terraform/`, or `tests/provision/`.** This commit changed how things run, not
+  what they do.
 
 ---
 
@@ -2918,9 +3143,56 @@ several Phase 3 decisions are what they are because of them.
 
 ## § Up Next
 
-**PHASE 10 IS NEXT. Phase 9 is verified in browser — its outcomes are at the top of this file.**
+**PHASE 10 IS WRITTEN AND NOT LIVE. Its live procedure is below and every step is the human's.
+PHASE 11 IS NEXT AFTER IT** — backups, restore tests, S3, external uptime monitoring, and the
+per-IP rate limit Phase 10 did not ship.
+
+### Phase 10 live verification — NOT RUN. ORDER MATTERS; DO NOT START CADDY BEFORE STEP 3 PASSES
+
+1. **Point DNS.** At the registrar, an A record: `bargeanalysis.com` → `52.21.107.8`. **Do not add
+   `www` to the Caddyfile until a `www` A record exists** — a name that does not resolve blocks
+   issuance for the one that does.
+2. **Resolve five digests, on the instance, never from a laptop and never from memory.** For each
+   of `python:3.12-slim`, `node:22-bookworm-slim`, `caddy:2-alpine`:
+   `docker pull <tag> && docker image inspect <tag> --format '{{index .RepoDigests 0}}'`. Paste
+   into **both** `FROM` lines of `Dockerfile.api`, **both** of `Dockerfile.frontend`, and the
+   `image:` line of the caddy service. All five currently read `sha256:` + 64 zeros and **cannot
+   resolve** — a missed step fails at `docker build`, not silently. **Record the exact
+   `caddy version`, `python --version` and `node --version` in this file** so the pins trace to
+   releases rather than to rolling tags.
+3. **Verify DNS BEFORE touching Caddy:** `dig +short bargeanalysis.com` must return `52.21.107.8`.
+   If it does not, **wait.** Let's Encrypt rate-limits failed issuance per domain per week.
+4. **Create the read-only role if it does not exist, and PROVE it** (`CLAUDE.md § 20`): the GRANTs,
+   then a `DELETE` that must fail. Phase 8 watched `waterway_api` refuse one with
+   `permission denied for table job_runs`; confirm it still does.
+5. **Update `.env`:** add `API_DATABASE_URL` with host **`timescaledb`**, not `localhost` — see
+   `.env.example`, which now documents the shape. Confirm both passwords are 64-hex by eye.
+6. **Build and start:** `docker compose build && docker compose up -d`, or
+   `infra/provision/deploy.sh` once the checkout is at `/opt/inland-waterway-signals`. Then
+   `docker compose ps` — **four services, and `PORTS` populated only on `caddy`.**
+7. **Watch issuance:** `docker compose logs -f caddy`. Expect a successful ACME exchange. **If it
+   fails, read the error and WAIT. Do not restart in a loop.**
+8. **From a laptop, not the instance:** `curl -sI https://bargeanalysis.com | head -5` (200 plus
+   the headers); `curl -s https://bargeanalysis.com/api/health | python -m json.tool` (the Phase 8
+   body, over TLS); `curl -sI http://bargeanalysis.com` (301/308 to https); then open the site and
+   walk all four views. **This is the first time this project is reachable without an SSM tunnel.**
+9. **Confirm what is NOT exposed:** `nc -zv bargeanalysis.com 5432` must fail; `nc -zv
+   bargeanalysis.com 8000` must fail; `/api/health` over https must succeed while both do.
+10. **There is no rate limit to prove.** Section 3 of the Phase 10 block. If a burst of requests to
+    `/api/health` is issued anyway, **expect no 429** — record that, do not record it as untested.
+11. **Install and enable `infra/provision/dws-stack.service`, then `sudo reboot`.** Reconnect and
+    confirm the whole stack came back on its own and the site still serves. **Only a reboot proves
+    the unit works**, and it is also the only proof `RequiresMountsFor` is doing anything.
+12. `python -m verify.preflight` — six gates green. **Owed from Phases 7, 8 and 9 as well; now
+    owed from four.** Note that gate 1 checks the timescaledb image only — see section 6.
+13. Write the outcome back in the same session and set `§ Up Next` to Phase 11.
 
 ### Standing items, carried until somebody closes them
+
+0. **`verify/preflight.py` gate 1 now covers one image reference out of three, and no Dockerfile
+   `FROM` at all.** *(Opened 2026-08-16 by Phase 10, which was not allowed to touch `verify/`.)*
+   Section 6 of the Phase 10 block has the detail and the stopgaps. The caddy digest is
+   hand-edited, which is the failure mode `--write-digest` was written to remove.
 
 1. **Should Node be a pinned, provisioned dependency the way Docker is?** *(Opened 2026-08-16 by the
    Phase 9 browser verification.)* The instance ran Node 18.19.1; Vite 8, Vitest 4 and rolldown 1.2
@@ -3791,7 +4063,10 @@ The freshness-registry requirement in `CLAUDE.md § 12` binds for every ingest c
   recorded here as blocking `terraform apply`, and `terraform apply` has since run. Whether the
   alert was configured first was not recorded. Confirm it exists now: there is a running instance,
   an EIP, and an EBS volume billing continuously.
-- Domain not purchased. Blocks Phase 10 only.
+- ~~Domain not purchased. Blocks Phase 10 only.~~ **Closed:** `bargeanalysis.com` is purchased and
+  is a literal throughout `Caddyfile`, `tests/deploy/`, and the Phase 10 block. **The A record does
+  not exist yet** — that is step 1 of the Phase 10 live procedure, and nothing else in that
+  procedure may start before `dig` returns `52.21.107.8`.
 - **State is local, and there is now applied infrastructure behind it.** This was written when
   nothing had been applied, which made it theoretical; it is not any more. If
   `infra/terraform/terraform.tfstate` is lost, `prevent_destroy` protects nothing, because

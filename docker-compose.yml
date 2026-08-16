@@ -1,17 +1,37 @@
-# Inland Waterway Signals — the database, and only the database.
+# Inland Waterway Signals — the database, the read API, the frontend build, and the reverse proxy.
 #
-# CLAUDE.md § 6 fixes the final stack at five containers; `worker`, `api`, and `caddy` are later
-# commits and are deliberately absent here. This file defines exactly one service.
+# CLAUDE.md § 6 fixes the final stack; `worker` is still a host venv process and is deliberately
+# absent (Phase 12). This file defines four services.
 #
-# Three things in here are load-bearing and easy to "tidy" into being wrong:
+# ===============================================================================================
+# PHASE 10 CHANGED WHO CAN REACH THIS STACK. IT IS NOW THE PUBLIC INTERNET.
+# ===============================================================================================
 #
-#   1. NO `ports:` KEY. CLAUDE.md § 6 marks this service internal-only. Publishing 5432 — even
-#      bound to 127.0.0.1 — puts the database on the host's network namespace, which is a
-#      different security posture from "reachable only over the compose network". Phase 2's
-#      scheduler runs from a host venv and therefore does need host reachability while it is being
-#      verified; that is handled by an override file kept OUTSIDE this repo (see the live
-#      verification steps in the commit report), not by adding a port here where it would outlive
-#      the reason for it.
+# Through Phase 9 the only route in was an SSM tunnel from one IP. From this commit, `caddy`
+# publishes 80 and 443 to the world. Two properties carry the whole weight of that being safe, and
+# both are asserted in tests/deploy/test_compose_shape.py rather than trusted:
+#
+#   ONLY CADDY PUBLISHES PORTS. The published-port set across the entire stack is exactly
+#   {80, 443}. `api` publishes nothing and `timescaledb` publishes nothing — Caddy reaches the API
+#   over the Compose network by service name. Publishing 8000 "for debugging" is the tempting
+#   version of this mistake: a published container port is DNAT'd and traverses FORWARD, so it is
+#   reachable through the DOCKER-USER chain's published-port path, bypassing Caddy, TLS, and
+#   anything else that lives at the edge. It would look harmless in this file.
+#
+#   THE API CONTAINER IS NEVER GIVEN `DATABASE_URL`. It gets `API_DATABASE_URL` and nothing else.
+#   app/api/dependencies.py falls back to `DATABASE_URL` with a warning when the read-only role's
+#   URL is absent; inside this container there is nothing to fall back TO, so the fallback cannot
+#   quietly connect the public API as the database owner.
+#
+# Four things in here are load-bearing and easy to "tidy" into being wrong:
+#
+#   1. NO `ports:` KEY ON ANYTHING BUT CADDY. CLAUDE.md § 6 marks the database internal-only.
+#      Publishing 5432 — even bound to 127.0.0.1 — puts the database on the host's network
+#      namespace, which is a different security posture from "reachable only over the compose
+#      network". Phase 2's scheduler runs from a host venv and therefore does need host
+#      reachability while it is being verified; that is handled by an override file kept OUTSIDE
+#      this repo, not by adding a port here where it would outlive the reason for it. NOTHING IN
+#      THIS FILE DEPENDS ON THAT OVERRIDE — the api container talks to `timescaledb:5432`.
 #
 #   2. NO `user:` KEY. The official Postgres entrypoint starts as root, chowns PGDATA to the
 #      postgres user, and only then drops privileges. Setting `user:` skips the chown, and initdb
@@ -22,7 +42,15 @@
 #      runner. CLAUDE.md § 3: schema changes never run on container start, because `restart:
 #      unless-stopped` would turn a crash loop into a schema-change loop. The runner is a CLI a
 #      human invokes. tests/orchestration/test_migration_ordering.py asserts this file's
-#      non-comment text never names it.
+#      non-comment text never names it. That test is why the frontend build's copy step lives in
+#      Dockerfile.frontend's CMD and not in a `command:` here.
+#
+#   4. `timescaledb` STAYS THE FIRST SERVICE IN THIS FILE. `verify/preflight.py` gate 1 reads the
+#      FIRST `image:` line in this file and checks that one reference — deliberately, so it can
+#      rewrite the line with --write-digest without a YAML round-trip discarding every comment.
+#      With four services it now gates one of three image references. Reordering would silently
+#      re-point the gate at a different image; the other two are covered by
+#      tests/deploy/test_compose_shape.py instead. Recorded as a real gap in the Phase 10 report.
 
 services:
   timescaledb:
@@ -82,3 +110,159 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  # ---------------------------------------------------------------------------------------------
+  # api — FastAPI under uvicorn. Internal only; Caddy is the only thing that can reach it.
+  # ---------------------------------------------------------------------------------------------
+  api:
+    # Built, not pulled. The base image inside Dockerfile.api is pinned by digest and the digest is
+    # a placeholder that CANNOT RESOLVE until a human replaces it on the instance — a build against
+    # it fails with a manifest error rather than falling back to a floating tag (CLAUDE.md § 12).
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+
+    restart: unless-stopped
+
+    # NO `ports:`. Deliberate, and the single most important absence in this file. Caddy reaches
+    # this container at `api:8000` over the Compose network; the port is not on the host at all, so
+    # it is not on the internet, so the only route to the API is through TLS and the edge headers.
+    #
+    # `EXPOSE 8000` in the Dockerfile is documentation and does not publish anything.
+
+    environment:
+      # THE ONE VARIABLE THIS CONTAINER GETS. `:?` makes an unset value a hard startup failure
+      # rather than a container that comes up connected to nothing, or — worse — one that falls
+      # back to the owner role (see the header). Set it in .env; see .env.example for the shape.
+      #
+      # THE HOST IS `timescaledb`, NOT `localhost`. Inside the Compose network, loopback is this
+      # container's own namespace, where nothing is listening on 5432. The loopback form worked
+      # through Phase 9 only because uvicorn ran on the host beside the published-port override.
+      # Getting this wrong is a connection-refused at container start, which is loud.
+      API_DATABASE_URL: ${API_DATABASE_URL:?API_DATABASE_URL is unset - see .env.example; the host must be timescaledb, not localhost}
+
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+
+    # The health check crosses the boundary where the failure would live: it asks the application
+    # to serve a response that requires the database, so a container that is up while the database
+    # is unreachable shows as unhealthy in `docker compose ps` instead of as running.
+    #
+    # It reports HEALTHY on a degraded stack, and that is correct. /api/health returns 200 with
+    # `degraded: true` by design (CLAUDE.md § 20) — a stale ingest job is not the API being down,
+    # and collapsing the two is what makes an uptime signal useless at three in the morning.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------------------------
+  # frontend-build — runs to completion, writes the bundle into a volume, exits.
+  # ---------------------------------------------------------------------------------------------
+  #
+  # NOT A SERVER. It copies a bundle built inside a pinned Node image into `frontend_dist` and
+  # exits 0. `caddy` waits on `service_completed_successfully`, so the proxy never starts in front
+  # of an empty directory.
+  #
+  # `restart: "no"` AND IT IS THE ONLY SERVICE HERE WITHOUT `unless-stopped`. That is not an
+  # oversight and tests/deploy/test_compose_shape.py asserts the partition explicitly: a container
+  # that exits on purpose, under a policy that restarts it whenever it is not running, is an
+  # infinite rebuild loop. The quoted "no" is required — unquoted `no` is YAML's boolean false.
+  frontend-build:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+
+    restart: "no"
+
+    volumes:
+      # The write side of the artifact handoff. Read side is caddy's, mounted read-only.
+      - frontend_dist:/out
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------------------------
+  # caddy — TLS termination, the static bundle, and the /api reverse proxy. THE ONLY PUBLIC FACE.
+  # ---------------------------------------------------------------------------------------------
+  caddy:
+    # Pinned by digest, tagged for re-derivability, and THE DIGEST IS A PLACEHOLDER THAT CANNOT
+    # RESOLVE (CLAUDE.md § 12). Resolve on the instance:
+    #
+    #     docker pull caddy:2-alpine
+    #     docker image inspect caddy:2-alpine --format '{{index .RepoDigests 0}}'
+    #
+    # `caddy:2-alpine` is the major-2 rolling tag, so it floats and the digest is what actually
+    # fixes the version. Record the exact `caddy version` output in CONTEXT.md when resolving, so
+    # the digest is re-derivable to a release rather than to a moving tag.
+    #
+    # NOTE: `verify/preflight.py --write-digest` will NOT write this line. It rewrites the first
+    # `image:` line in this file, which is timescaledb's. This one is edited by hand, which is the
+    # thing that has already failed twice on the other line — check it by eye against the pull.
+    image: caddy:2-alpine@sha256:0000000000000000000000000000000000000000000000000000000000000000
+
+    restart: unless-stopped
+
+    # THE ONLY PUBLISHED PORTS IN THE STACK. Exactly 80 and 443, unqualified by a host address, so
+    # they are reachable from the internet — which is the point of this commit and is also the
+    # entire change in threat model. The DOCKER-USER chain (provisioning 3) already accepts
+    # `-i $EXT_IFACE` on precisely these two ports and drops everything else inbound on that
+    # interface, and the security group (Phase 1) allows exactly {22 from the admin CIDR, 80, 443}.
+    # Both were read and confirmed in this commit; neither was changed.
+    ports:
+      - "80:80"
+      - "443:443"
+
+    volumes:
+      # Config, read-only, from the checkout. This is a bind mount of the git tree and is fine:
+      # decision 6's prohibition is on serving a bind-mounted BUILD OUTPUT, where a `git pull`
+      # would change the served site mid-deploy and a half-written bundle would be served
+      # mid-write. A config file is read once at start and a reload is deliberate.
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+
+      # THE BUNDLE, READ-ONLY, FROM A VOLUME — never from ./frontend/dist.
+      - frontend_dist:/srv/frontend:ro
+
+      # THE CERTIFICATE STORE ON THE DATA VOLUME (decision 9). /data holds the issued certificates
+      # AND the ACME account key. A container recreate that loses the account key means re-issuance
+      # against an endpoint that rate-limits per domain per week, which is how a site ends up
+      # unable to get a certificate for days. /mnt/data is the separate EBS volume from Phase 1;
+      # a named Docker volume would put this on the root disk instead.
+      - /mnt/data/caddy/data:/data
+      - /mnt/data/caddy/config:/config
+
+    depends_on:
+      # Not `service_healthy`: Caddy does not need the API up in order to start, and making TLS
+      # issuance wait on a database would couple the two failures. A 502 from a running proxy is a
+      # legible failure; no certificate is not.
+      api:
+        condition: service_started
+      # This one IS a completion gate. Starting the file server before the bundle exists serves
+      # 404s from a correctly-running site.
+      frontend-build:
+        condition: service_completed_successfully
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  # The built React bundle. A named volume — i.e. on the ROOT disk under /var/lib/docker, not on
+  # the data volume — and that is deliberate: this is a rebuildable artifact, not data. Losing it
+  # costs one `docker compose run` of the build container. The certificate store, which is NOT
+  # rebuildable without a rate-limited round trip to Let's Encrypt, is on /mnt/data above.
+  frontend_dist:

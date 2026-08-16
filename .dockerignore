@@ -1,0 +1,67 @@
+# Build context exclusions. CLAUDE.md § 5: `.env` is excluded from the image build context.
+#
+# THE FIRST BLOCK IS THE LOAD-BEARING ONE. Everything below it is about image size; this one is
+# about a credential ending up in a layer. A file copied into a layer is in that layer forever —
+# deleting it in a later instruction does not remove it from the image, and `docker history` on a
+# built image is enough to read it back. `.env` is gitignored, which keeps it out of the repo and
+# does nothing whatsoever about the build context: `docker build .` sends the working directory,
+# not the git index.
+#
+# `COPY . .` appears nowhere in either Dockerfile — both copy named paths — so this file is the
+# second of two independent reasons the secret is not in the image, not the only one.
+
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# Terraform state carries secrets in plaintext (CONTEXT.md records this about the local state file
+# sitting in the working tree). It has no business in a build context at all.
+infra/terraform/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+
+# ---------------------------------------------------------------------------------------------
+# Everything below is size and reproducibility, not secrecy.
+# ---------------------------------------------------------------------------------------------
+
+# A host-built node_modules is the wrong architecture and the wrong Node version — Phase 9 found
+# the instance on Node 18 while the toolchain needs 22 (CONTEXT.md). Dockerfile.frontend runs
+# `npm ci` inside the pinned Node image; a host tree copied over it would silently win.
+node_modules/
+frontend/node_modules/
+
+# A host-built bundle is exactly what decision 6 forbids serving. Excluded so it cannot be copied
+# into the frontend image by accident and shadow the one the image builds.
+frontend/dist/
+frontend/.vite/
+
+.git/
+.gitignore
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage*
+htmlcov/
+
+# Documentation and verification apparatus. `verify/` is deliberately excluded: CLAUDE.md § 13
+# keeps verification out of `app/`, and shipping it inside the running image would put it back.
+CLAUDE.md
+CONTEXT.md
+tests/
+verify/
+scripts/
+infra/
+docker-compose.override.yml
+
+*.dump
+*.sql.gz
+*.log
+.DS_Store

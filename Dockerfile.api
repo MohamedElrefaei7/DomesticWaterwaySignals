@@ -1,0 +1,109 @@
+# The read API (Phase 8) as a container. Two stages, a pinned base, and a non-root user.
+#
+# ---------------------------------------------------------------------------------------------
+# THE DIGESTS BELOW ARE PLACEHOLDERS AND THEY CANNOT RESOLVE.
+# ---------------------------------------------------------------------------------------------
+#
+# `sha256:0000...0000` is 64 valid hex characters, so it passes every shape check there is and
+# fails by VALUE — which is the point (CLAUDE.md § 12: a placeholder digest in a committed file
+# must be one that cannot resolve, so a missed step fails loudly rather than falling back to a
+# floating tag). `docker build` against it stops with a manifest error.
+#
+# Resolve it ON THE INSTANCE, never from a laptop cache and never from an agent's recollection
+# (CLAUDE.md § 5):
+#
+#     docker pull python:3.12-slim
+#     docker image inspect python:3.12-slim --format '{{index .RepoDigests 0}}'
+#
+# and paste the digest into BOTH `FROM` lines below. They must be the same value —
+# tests/deploy/test_dockerfiles.py::test_the_base_image_is_pinned_by_digest asserts that, because
+# two stages on two different bases is a runtime that was never the thing the wheels were built
+# against, and it produces an import error that reads like a broken dependency.
+#
+# `verify/preflight.py --write-digest` does NOT touch this file. It rewrites the first `image:`
+# line in docker-compose.yml and nothing else; see the Phase 10 report.
+
+# ---------------------------------------------------------------------------------------------
+# Stage 1 — dependencies
+# ---------------------------------------------------------------------------------------------
+#
+# Dependencies are installed into a self-contained virtualenv that the runtime stage copies
+# wholesale. Nothing that participates in *building* a wheel survives into the final image: if a
+# dependency ever needs a compiler, the `apt-get install build-essential` that gives it one goes
+# HERE, where it is discarded, and tests/deploy/test_dockerfiles.py fails if it appears in the
+# final stage instead.
+#
+# Today nothing needs one — `psycopg[binary]` is the only extension module and it ships wheels —
+# so no toolchain is installed at all. The stage separation is not there because it is needed
+# today; it is there so that the day one is needed, the tempting one-line fix lands in the stage
+# where it is free.
+FROM python:3.12-slim@sha256:0000000000000000000000000000000000000000000000000000000000000000 AS build
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# requirements.txt only. requirements-dev.txt is test apparatus (pytest, hcl2, httpx2, PyYAML) and
+# has no business in a running image.
+COPY requirements.txt ./
+RUN pip install -r requirements.txt
+
+# ---------------------------------------------------------------------------------------------
+# Stage 2 — runtime
+# ---------------------------------------------------------------------------------------------
+FROM python:3.12-slim@sha256:0000000000000000000000000000000000000000000000000000000000000000 AS runtime
+
+# PYTHONDONTWRITEBYTECODE because the application directory is owned by root and read-only to the
+# process; a __pycache__ write would fail on every import in a way that costs a debugging session
+# for nothing. PYTHONUNBUFFERED because `docker compose logs` on a buffered stream shows nothing
+# during exactly the incident somebody is reading it about.
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:$PATH"
+
+COPY --from=build /opt/venv /opt/venv
+
+WORKDIR /srv
+
+# `app/` and nothing else. Not `COPY . .`:
+#
+#   - `migrations/` is deliberately absent. CLAUDE.md § 3 forbids migrations running on container
+#     start, and the cheapest way to make that impossible is for the image not to contain them.
+#     An entrypoint that wanted to run them would have nothing to run.
+#   - `verify/`, `tests/`, `scripts/` are absent for the same reason CLAUDE.md § 13 keeps
+#     verification out of `app/`.
+#   - `.env` is absent for the reason at the top of .dockerignore.
+COPY app/ ./app/
+
+# NON-ROOT (decision 3). A container reachable from the internet running as root is a strictly
+# worse position than one that is not, for no benefit — nothing this process does needs root, and
+# it does not even write to disk.
+#
+# A fixed high uid/gid rather than whatever `useradd` picks next, so the numbers are stable across
+# rebuilds and mean the same thing if anything is ever bind-mounted in.
+#
+# The application tree stays root-owned and is only readable by this user. A process that cannot
+# overwrite its own code is one fewer thing a remote code path can do.
+RUN groupadd --system --gid 10001 dws \
+ && useradd --system --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin dws
+USER dws
+
+EXPOSE 8000
+
+# THE COMMAND RUNS UVICORN AND NOTHING ELSE (decision 4). No entrypoint script, no `migrate &&`,
+# no shell form that could grow one. This is the first commit in which an application container
+# exists at all, so it is the first commit in which somebody could add a migration step here —
+# and `restart: unless-stopped` would turn a crash loop into a migration loop.
+# tests/deploy/test_dockerfiles.py greps this whole file for the runner's module path.
+#
+# --host 0.0.0.0 is correct HERE and would be wrong on the host. The container publishes no ports
+# (docker-compose.yml), so the only thing that can reach this socket is the Compose network;
+# binding loopback inside the container would make it unreachable from Caddy as well.
+#
+# NO --proxy-headers / --forwarded-allow-ips. Uvicorn ignores forwarded headers from an untrusted
+# peer by default, and Caddy's address is a container IP that would have to be allow-listed with a
+# wildcard to change that. Nothing in app/ reads the client address, so trusting a header a
+# stranger can set would be a spoofable input added for no reader.
+CMD ["uvicorn", "app.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
