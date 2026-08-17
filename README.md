@@ -65,8 +65,22 @@ they are written down.**
   `pg_dump --snapshot`), so the counts describe the state the archive actually contains.
 - **Verification is a full `pg_restore -f /dev/null`, requiring exit 0 *and empty stderr*.**
   `pg_restore --list` is not verification: it reads only the archive's table of contents. Measured
-  in this repo's own test suite — a real archive truncated to 95%, 98% or 99% of its size is
-  **accepted by `--list` and rejected by a full restore**.
+  in this repo's own test suite (`test_backup_integration_list_would_not_have_caught_it`), by
+  truncating a real archive and running both checks:
+
+  | cut | `--list` | full restore |
+  |---|---|---|
+  | 33% — the 2024 incident's own proportions | **rejects** | rejects |
+  | 95%, 98%, 99% | **accepts** | rejects |
+
+  **The incident's own proportions are the least diagnostic case available.** At one third of this
+  database's size the truncation destroys the table of contents as well, so `--list` catches it
+  too — which means a test built from a fixture resembling the incident **stays green even if
+  verification is downgraded to `--list`**. The cut that can tell the two apart is the one where
+  the TOC survives and the data does not, and it is *further* from the original event, not closer.
+  Generally: **a fixture that resembles the original incident is not automatically a good test of
+  the guard against it.** Pick the fixture that distinguishes the implementations, and confirm by
+  mutation that it does.
 - **Monthly** (`restore_test_monthly`): the most recent verified archive is downloaded **from S3**,
   restored into a throwaway container, `ANALYZE`d, and compared against the recorded snapshot with
   **no tolerance** and key sets checked in both directions. The restored read-only role is made to
@@ -145,6 +159,26 @@ pytest                                  # unit tier
 DATABASE_URL=postgresql://... pytest    # adds the integration tier
 python -m verify.preflight              # the gates, on the instance
 ```
+
+### Running one job by hand
+
+```
+python3 -m app.orchestration.run_once --list             # the runnable job names
+python3 -m app.orchestration.run_once backup_nightly
+python3 -m app.orchestration.run_once restore_test_monthly
+```
+
+Exit codes: `0` succeeded, `1` the job failed (recorded in `job_runs`; nothing is retried), `2`
+usage — an unknown name prints the valid ones rather than a traceback.
+
+It runs the job through the same `@job` decorator and the same registry the scheduler uses, so the
+run appears in `job_runs` like any other. **It does not start the scheduler**, which is what keeps
+a one-off backup from also firing every other job that happens to be due.
+
+**On a freshly rebuilt instance, start the scheduler once before the first backup.** The backup
+asserts that `apscheduler_jobs` exists before dumping (it excludes that table's data), and that
+table is created by APScheduler's own DDL on the scheduler's first start — not by a migration. The
+error otherwise names an excluded table and says nothing about startup ordering.
 
 The integration tier needs a **throwaway** database — it drops this project's tables between tests.
 Without `DATABASE_URL` those tests skip with a stated reason rather than passing silently. Some of

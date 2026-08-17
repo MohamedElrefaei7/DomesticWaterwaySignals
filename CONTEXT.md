@@ -97,8 +97,12 @@ no longer matches the data:
 
 ## § Up Next
 
-**PHASE 11 IS CODE-COMPLETE AND UNAPPLIED.** Eight commits, beginning `f29d734` (this documentation commit is the eighth). Every part is
-written, tested and mutation-confirmed; **nothing has been applied to AWS or run on the instance.**
+**PHASE 11 AND STAGE B ARE BOTH CODE-COMPLETE AND UNAPPLIED.** Phase 11 is eight commits beginning
+`f29d734`; Stage B is seven more beginning `6607ba7`, which audited the commit boundaries and made
+four corrections rather than adding capability. Every part is written, tested and
+mutation-confirmed; **nothing has been applied to AWS or run on the instance.** 633 tests pass with
+`DATABASE_URL` and Docker.
+
 The pending human steps are listed under each part below and gathered here:
 
 1. `cd infra/terraform/bootstrap && terraform init && terraform apply` — create the state bucket.
@@ -111,30 +115,53 @@ The pending human steps are listed under each part below and gathered here:
 6. Force a degraded health response, wait ~3 minutes, confirm the Route53 check fails and an email
    arrives. **This step is the whole point of the monitoring part.**
 7. `python -m migrations.run` — one pending file, `0026`.
-8. `python -m jobs.run_once`-equivalent for `backup_nightly` and `restore_test_monthly`. **Confirm
-   the runner's real entry point first** — see "Corrections" below.
-9. Burst `/api/conclusion` from a laptop, not the instance.
+8. **Start the scheduler once**, if this instance has never run it, *before* step 9. `apscheduler_jobs`
+   is created by APScheduler's own DDL on first start, not by a migration, and the backup asserts
+   it exists before dumping — so on a fresh instance the first backup otherwise refuses with an
+   error about an excluded table that says nothing about ordering.
+9. The two jobs, one at a time, through the real runner Stage B added:
+   ```
+   cd /opt/inland-waterway-signals && set -a; . ./.env; set +a
+   python3 -m app.orchestration.run_once backup_nightly
+   python3 -m app.orchestration.run_once restore_test_monthly
+   ```
+   Exit `0` succeeded, `1` the job failed (recorded in `job_runs`), `2` usage.
+10. Burst `/api/conclusion` from a laptop, not the instance.
+11. `docker compose down && docker compose up -d`, then `docker compose ps` — **three times**. The
+    API must not report started before `timescaledb` reports healthy. Stage B replaced the
+    `pg_isready` probe that made this ordering decorative; the race was load-dependent, which is
+    why this is repeated rather than observed once.
 
 **Phase 12 — containerize the `worker` service.** It closes `degraded: true`, and it **needs its
 own restart-recovery verification**: being inside a container with `restart: unless-stopped`
 changes the process lifetime this whole design is about, and this project has already demonstrated
 that the settings can all be correct while the behaviour is not.
 
-**Three dependencies Phase 11 created, recorded now because rediscovering them costs more:**
+**Two dependencies Phase 11 created, recorded now because rediscovering them costs more:**
 
 1. **Containerizing the scheduler moves the backup job into a container**, so Part 6's `docker run`
    becomes docker-in-docker or a mounted Docker socket. **Mounting the socket into the scheduler
    container is root-equivalent on the host.** That is a design decision, not an implementation
    detail, and it interacts directly with `§ 22`'s "application containers run as a non-root user".
    Part 6's container-in-container invocation needs re-verification then.
-2. **boto3 behind IMDS from inside a container.** If the instance's IMDS hop limit were 1, the
-   instance role would be unreachable from a container and every S3 call would fail with a
-   credentials error that reads like an IAM problem. **Checked now, while it is cheap:
-   `infra/terraform/compute.tf:25` sets `http_put_response_hop_limit = 2`, so this is already
-   handled.** Do not lower it.
-3. **Part 1's tag-plus-digest requirement applies to any self-built image**, which is what an
+2. **Part 1's tag-plus-digest requirement applies to any self-built image**, which is what an
    `xcaddy` Caddy would be if `§ 22`'s rate-limiting exception is ever revisited. A locally built
    image has no registry digest to resolve, so it would need a different pinning story.
+
+**Struck from this list, resolved rather than pending: boto3 behind IMDS from inside a container.**
+The concern was that a hop limit of 1 would make the instance role unreachable from a container,
+failing every S3 call with a credentials error that reads like an IAM problem. **Measured:
+`infra/terraform/compute.tf:25` already sets `http_put_response_hop_limit = 2`, which is what a
+container needs.** It is not a Phase 12 blocker and is recorded here so nobody re-opens it. **Do not
+lower it.**
+
+**A third dependency, added by Stage B:** `apscheduler_jobs` is created by `SQLAlchemyJobStore`'s
+own DDL on the scheduler's first start, so it sits outside the numbered migrations and the checksum
+regime entirely — a library upgrade can change its shape with nothing here noticing. The backup job
+depends on that table existing (it asserts the `--exclude-table-data` target is present before
+dumping), so **on a rebuilt instance the scheduler must start once before the first backup.**
+Containerizing the worker changes when that first start happens, which is why it belongs beside
+dependency 1 rather than in Housekeeping.
 
 ---
 
@@ -437,7 +464,7 @@ rate-limiting residual exposure, so the decision is findable by someone reading 
 | Cadence rows land in Part 5 | They **cannot**: `scheduler.py` raises when `CADENCES` and `JOB_FUNCTIONS` disagree, so each row lands with its job (Parts 6 and 7) |
 | `--write-digest` should raise on any differing pin | The all-zero **placeholder** must stay writable — it is the committed "not resolved yet" marker and writing it is the command's purpose |
 | A settings module for limiter config | None exists; module constants match `app/api/dependencies.py`'s existing pattern |
-| `python -m jobs.run_once <name>` | **Unverified.** No such module exists. The jobs are callable as `app.orchestration.backup.backup_nightly_job` / `restore_test.restore_test_monthly_job`; there is no one-shot CLI runner in this repo, and writing one was out of scope. **Tell me if you want one and it is a small commit.** |
+| `python -m jobs.run_once <name>` | **Unverified.** No such module exists. The jobs are callable as `app.orchestration.backup.backup_nightly_job` / `restore_test.restore_test_monthly_job`; there is no one-shot CLI runner in this repo, and writing one was out of scope. **Tell me if you want one and it is a small commit.** — *Resolved in Stage B: it is now `python3 -m app.orchestration.run_once <name>`.* |
 | Heartbeat entry point | `app.orchestration.heartbeat.heartbeat_job`; `heartbeat.check()` takes a `cadences` parameter and defaults to the table, so both new jobs appear with no heartbeat-side change — verified by the cadence/registry agreement test |
 
 **Measured across the phase:** 592 tests pass with `DATABASE_URL` and Docker (437 pass / 155 skip
@@ -456,6 +483,90 @@ it, and only an integration test against a real database could see it.
 friends, the Cairo site number, `gauge_series` UTC bucketing, `lock_movements` being unused, the IV
 chunk interval, and Node not being pinned in provisioning. None of them were closed, narrowed, or
 quietly dropped.
+
+---
+
+## Stage B — the commit-boundary audit and four corrections, before deployment
+
+Seven commits on `main`, `6607ba7`…, all **still unapplied to AWS**. Stage B closed the gaps the
+Phase 11 report surfaced rather than adding capability.
+
+### The audit that started it (`6607ba7`)
+
+The Phase 11 rollback bug was treated as a class, not an instance, and the second question — *could
+the existing tests have told?* — was answered by measurement: delete each write path's
+`conn.commit()`, run the tests covering it, restore.
+
+**Eight of ten write paths' commits were deletable with the suite green.** Two structural causes:
+five of the eight job entrypoints were never invoked by any test at all (`usda_rates.ingest` and
+`usda_movements.ingest` were never called at *any* level, so those commit lines never executed under
+test), and where a path was tested it was called as `build(migrated_db, …)` and asserted through
+`migrated_db.execute(…)` — the writing session, which cannot distinguish committed from
+uncommitted. Several of those tests also called `migrated_db.commit()` themselves, so they would
+have committed the data even with the production commit deleted.
+
+**No further rollback defects were found.** Every writing path did commit. What was missing was any
+test able to notice if one stopped.
+
+Two corrections to the audit's own starting point, both worth keeping:
+
+- **`grep 'db.connection()'` finds 6 call sites and misses every scheduled job.** It matches only
+  the no-argument form; jobs call `db.connection(url)`. The real count was 29.
+- **`app/orchestration/` contained zero bare calls**, so a guard scoped there — as originally
+  specified — would have constrained the empty set: green forever, watching nothing.
+
+### What the seven commits changed
+
+| | |
+|---|---|
+| `6607ba7` | 14 read-back tests, one per write path, each reading on a connection opened after the writer closed |
+| *(the commit-helper commit)* | `session.writing()` — commit on clean exit, roll back on `BaseException`, always re-raise; 14 write paths migrated; an AST guard over all of `app/` with an exact-set allow-list. `CLAUDE.md § 23`. |
+| *(exact sets)* | `test_iam.py` and the Caddyfile proxy block assert exact sets again, updated to the new truth |
+| *(placeholder digest)* | Both sides of the all-zero digest now have a test; **no behaviour changed — both were already correct** |
+| *(healthcheck)* | `pg_isready` → a real query over TCP; see below |
+| *(roles)* | `create_roles` discovers from the **archive**, not the live source database |
+| *(runner)* | `python3 -m app.orchestration.run_once <name>`, and `check_cadence_agreement()` extracted so the scheduler and the runner share one |
+
+### Two things measured rather than reasoned about
+
+**The healthcheck race is real.** With an init script holding `initdb`'s temporary server open the
+way a slow start under load would, `pg_isready` (no `-h`) reported UP for **18 consecutive samples**
+while a TCP query correctly reported not-ready. `api` gates on `condition: service_healthy`, so the
+API's startup ordering has been decorative since Phase 2 — it releases the API against a server
+still initialising, and only when `initdb` is slow. `CLAUDE.md § 13` already stated this rule for
+the restore test's throwaway container; production was not held to it.
+
+**The `--list` truncation table**, which changes how fixtures get chosen here:
+
+| cut | `--list` | full restore |
+|---|---|---|
+| 33% (the incident's own proportions) | **rejects** | rejects |
+| 95%, 98%, 99% | **accepts** | rejects |
+
+**A fixture that resembles the original incident is not automatically a good test of the guard
+against it.** The one-third cut destroys the table of contents too, so a test built only from it
+stays green when verification is downgraded to `--list`.
+
+### Three findings from Stage B's own mutations
+
+Each of these was a test this session wrote, believed, and then watched fail to catch its mutation:
+
+1. **A single assertion over final state cannot isolate an early commit.** The sweep's `open_run`
+   commit was claimed by a test asserting the run row after a *successful* run — but `run`'s final
+   commit writes that row too, so deleting the early one only delays it. The docstring already named
+   both commits and was wrong about which line it covered. Fixed by killing the scan partway.
+2. **A set comparison collapses duplicates.** The exact-set IAM test passed when a policy already in
+   the set was attached a second time. The count is now asserted before the set.
+3. **`from … import` defeats attribute monkeypatching.** The "does not start the scheduler" test
+   patched `scheduler.build_scheduler`, which a call through `run_once`'s own namespace never
+   touches — so the mutation reached the real function and failed on *cadence agreement*, a red test
+   pointing at the wrong layer. The source scan runs first now, and it is what names the failure.
+
+### Still open, untouched by Stage B
+
+The three analog-engine questions, `SIMILARITY_CUTOFF` and friends, the Cairo site number,
+`gauge_series` UTC bucketing, `lock_movements` being unused, the IV chunk interval, and Node not
+being pinned in provisioning. None closed, narrowed, or quietly dropped.
 
 ---
 

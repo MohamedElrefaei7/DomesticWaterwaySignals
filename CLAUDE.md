@@ -120,6 +120,22 @@ describes does not hold has already happened here.
   `pg_restore --list` is *not* verification — it reads only the archive's table of contents. A dump
   that was one-third its correct size once passed `--list` cleanly, matched its own SHA-256 across
   three machines, and failed on restore. This binds every backup job and every restore test.
+  **Measured against this project's own archive (2026-08-17), truncating to a fraction of the file
+  and running both checks:**
+
+  | cut | `--list` | full restore |
+  |---|---|---|
+  | 33% (the incident's own proportions) | **rejects** | rejects |
+  | 95%, 98%, 99% | **accepts** | rejects |
+
+  **The generalisation is what matters, not the numbers: a fixture that resembles the original
+  incident is not automatically a good test of the guard against it.** At one third of this
+  database's size the table of contents is destroyed too, so `--list` catches it — which means a
+  test built only from the incident's own proportions **stays green when verification is swapped to
+  `--list`**, and the contract it exists to defend can be deleted underneath it. The diagnostic cut
+  is the one where the TOC survives and the data does not, and that is *further* from the incident
+  than the obvious choice. Choose the fixture that can distinguish the implementations, then check
+  it can, by mutation; resemblance to the original event is not evidence of either.
 - A restored database has **no planner statistics**. `ANALYZE` follows every `pg_restore`, as part of
   restoring — not as a migration and not as a scheduled job.
 - **`backups` is insert-once**, with exactly three columns updatable after insert —
@@ -484,6 +500,19 @@ not the user-facing output.
   overwrites the persisted past-due value, so a restart after an outage silently discards the
   missed run while every setting still reads correctly. Restart recovery is verified by stopping
   a real process, not by a test.
+- **`apscheduler_jobs` is created by `SQLAlchemyJobStore`'s own DDL on the scheduler's first
+  start. It is NOT a migration, and it therefore sits outside the numbered sequence, the checksum
+  regime, and everything § 3 guarantees about schema change.** A library upgrade can change its
+  shape with nothing in this project noticing — no migration to review, no checksum to mismatch,
+  no version row. That is a consequence of using the library's persistence rather than writing our
+  own, and it is accepted; what is not acceptable is discovering it during an incident.
+  **The operational consequence, which is the part that bites: the backup job depends on that
+  table already existing**, because it asserts the `--exclude-table-data` pattern's target is
+  present before dumping (and § 3 requires that assertion). **On a rebuilt instance where the
+  backup runs before the scheduler has ever started, the table does not exist and the backup
+  refuses** — correctly, and with an error about an excluded table that says nothing about
+  scheduler startup ordering. Start the scheduler once before the first backup on any fresh
+  instance.
 
 **Monitoring**
 
