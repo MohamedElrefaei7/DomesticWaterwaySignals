@@ -304,6 +304,42 @@ not send `Accept-Encoding`, so the body should reach them uncompressed — but t
 Theme 1 shape where every app-side test is green and the monitor is blind, which is why Part 3's
 step 7 curls with `-H 'Accept-Encoding:'`.
 
+### Part 5 — migration 0026: the `backups` table (`<sha-part-5>`)
+
+**`0026_backups_table.sql`.** 25 migrations were applied, so 0026 is next. Insert-once via a
+`BEFORE UPDATE` trigger comparing column by column, unconditional `BEFORE DELETE` trigger,
+`CHECK (verified = false OR verified_at IS NOT NULL)`, and `row_counts` / `restore_verified_counts`
+constrained to JSON objects so nobody can write a scalar total.
+
+**VERIFIED AGAINST A REAL TIMESCALEDB, NOT JUST WRITTEN.** A `timescale/timescaledb:latest-pg16`
+container was already running locally on port 55432, so the migration was actually applied and all
+eight integration tests ran green — and all four mutations were confirmed against real Postgres
+rather than against a parser. **The full suite is 531 passed / 0 skipped with `DATABASE_URL` set**,
+against 393 passed / 138 skipped without it.
+
+**THE CADENCE ENTRIES ARE NOT IN THIS COMMIT.** `app/orchestration/scheduler.py` raises when
+`CADENCES` and `JOB_FUNCTIONS` disagree, and `test_cadence_and_function_registry_must_agree`
+asserts set equality — correctly, since a cadence entry with no function never fires and the
+heartbeat reports it overdue forever. Adding both rows here turned one test red and errored four
+others. So `backup_nightly` lands with its job in Part 6 and `restore_test_monthly` with its job in
+Part 7, each with its own cadence test. The alternative was leaving the suite red across two
+commits to satisfy a file-layout preference.
+
+**Chosen `overdue_after` values**, both confirmed against `Cadence.__post_init__`:
+
+- `backup_nightly`: interval 24h, **`overdue_after` 30h** — deliberately tighter than the
+  three-interval convention the other daily jobs use. Those can be caught up from their sources; a
+  day nobody backed up is a day that is in no archive.
+- `restore_test_monthly`: interval 30d, **`overdue_after` 45d**. Its derived
+  `misfire_grace_time` is **~15 days** and that is accepted, not worked around: a restore test has
+  no time-of-day semantics, so running on the tenth after an outage is the desired behaviour, and
+  with `coalesce=True` it runs once, promptly. Changing a derivation every existing job depends on,
+  for one new job, in a phase about backups, is blast radius for nothing.
+
+**Note for live verification:** the trigger's `RAISE EXCEPTION` surfaces as
+`psycopg.errors.RaiseException`, not a constraint violation, and the message names the column —
+`refusing to update column byte_size on backup_id=N`.
+
 ---
 
 ## Standing items, carried until somebody closes them

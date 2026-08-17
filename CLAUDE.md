@@ -122,6 +122,19 @@ describes does not hold has already happened here.
   three machines, and failed on restore. This binds every backup job and every restore test.
 - A restored database has **no planner statistics**. `ANALYZE` follows every `pg_restore`, as part of
   restoring — not as a migration and not as a scheduled job.
+- **`backups` is insert-once**, with exactly three columns updatable after insert —
+  `restore_verified_at`, `restore_verified_counts`, `restore_notes` — enforced by a `BEFORE UPDATE`
+  trigger that compares **column by column** and names the offending one. A whole-row
+  `OLD IS DISTINCT FROM NEW` is one line and cannot say which column changed, so the error it
+  raises sends the reader to diff two rows by hand at the moment they are already confused. A
+  `BEFORE DELETE` trigger raises unconditionally; a human making a genuine correction disables it
+  explicitly, which is a visible act.
+- **`backups.row_counts` is a per-table mapping, never a total**, constrained to a JSON object by
+  the schema. A total cannot distinguish "one table lost its rows and another gained some" from
+  "identical", and per-table exactness is the whole value of the restore test.
+- **A failed backup writes no `backups` row.** The failure lives in `job_runs`, where failures
+  belong. Never a `verified = false` placeholder: a later query for "the most recent backup" would
+  find it and report one that does not exist.
 - **Migrations never run on container start.** A restart loop would become a migration loop.
 
 ---
