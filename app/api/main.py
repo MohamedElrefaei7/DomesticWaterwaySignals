@@ -38,6 +38,7 @@ from fastapi.exceptions import RequestValidationError
 
 from app import db
 from app.api import errors
+from app.api.middleware.ratelimit import RateLimitMiddleware
 from app.api.routes import conclusion, health, series, signals
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,14 @@ app.add_exception_handler(psycopg.OperationalError, errors.database_error_handle
 app.add_exception_handler(db.ConfigurationError, errors.database_error_handler)
 
 app.add_exception_handler(Exception, errors.unhandled_error_handler)
+
+
+# THE RATE LIMITER (CLAUDE.md § 22's Phase 11 cost-based exception). Keys on the proxy-set
+# X-Real-IP; see app/api/middleware/ratelimit.py for why nothing else works behind Caddy.
+#
+# /api/health is exempt by exact path match, so the external monitor is never throttled into a
+# false alarm.
+app.add_middleware(RateLimitMiddleware)
 
 
 app.include_router(health.router)

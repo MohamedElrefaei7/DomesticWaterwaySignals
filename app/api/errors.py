@@ -40,6 +40,9 @@ SPAN_TOO_LONG = "span_too_long"
 NOT_FOUND = "not_found"
 DATABASE_UNAVAILABLE = "database_unavailable"
 INTERNAL_ERROR = "internal_error"
+# Phase 11. The application-side rate limiter (CLAUDE.md § 22's cost-based exception) refuses
+# through this code, so a client branches on it rather than on the status line alone.
+RATE_LIMITED = "rate_limited"
 
 CODES: tuple[str, ...] = (
     INVALID_REQUEST,
@@ -47,6 +50,7 @@ CODES: tuple[str, ...] = (
     NOT_FOUND,
     DATABASE_UNAVAILABLE,
     INTERNAL_ERROR,
+    RATE_LIMITED,
 )
 
 

@@ -1194,6 +1194,29 @@ inside the system is behaving exactly as designed.
   in the config file itself and in a test named for what actually shipped** — an unmarked absence
   reads as a control somebody forgot to look for, and a test named for a rate limit that asserts
   timeouts is a green check for a thing that does not exist.
+  - **Exception, Phase 11: cost-based limits on endpoints whose cost is not cacheable live in the
+    application, because the edge cannot see the cost.** `/api/conclusion` accepts distinct
+    `(site_id, as_of)` pairs; each distinct pair misses the conclusion cache and runs an analog
+    query, so the expensive request and the cheap one are the same shape, the same size and the
+    same path, and differ only in a query parameter whose cost only the application knows. An edge
+    limiter tuned for static assets is the wrong instrument for that.
+  - **Residual exposure, accepted and not mitigated: the bundle, the CSS and the fonts remain
+    unlimited at the edge.** The paragraph above is still true about them, and this exception does
+    not pretend otherwise. Revisiting means an `xcaddy` build of `caddy-ratelimit`, which brings a
+    self-built image inside the digest-pinning contract (§ 13) and couples the edge to a Go module
+    fetch at image build time. That trade was declined in Phase 11 and is recorded here **so it is
+    a decision rather than an omission** — the distinction § 22 already insists on for the Caddyfile.
+  - **An application limiter behind a proxy keys on the proxy-set `X-Real-IP`**, never
+    `request.client.host` (which is the proxy's own container address, bucketing the entire
+    internet into one client) and never `X-Forwarded-For[0]` (which is client-supplied and
+    forgeable, so an attacker rotates it and the limiter does nothing). The header is set with
+    `header_up`, which **overwrites** rather than appends. Middleware tests that fabricate the
+    header pass identically whether or not the proxy sets it, so the Caddyfile directive carries
+    its own test — that test is the only thing connecting the configuration to the behaviour.
+  - **The API runs exactly one uvicorn worker, asserted structurally.** In-process limiter state is
+    per worker, so `--workers 4` silently quadruples every limit while every number in the code
+    still reads correctly. Shared state would mean a database write path, which § 20's read-only
+    contract forbids.
 - **Same-origin serving means no CORS configuration anywhere. CORS middleware appearing in the
   application is a misdiagnosis of some other problem**, and the reverse proxy does not strip the
   API's path prefix — the routers declare it, so stripping it produces a 404 from a healthy

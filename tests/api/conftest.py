@@ -47,6 +47,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from app import db  # noqa: E402
 from app.api import cache as cache_module  # noqa: E402
+from app.api.middleware import ratelimit  # noqa: E402
 from app.api.dependencies import get_connection, now as now_dependency  # noqa: E402
 from app.api.main import app  # noqa: E402
 from app.orchestration import migrate  # noqa: E402
@@ -77,6 +78,13 @@ def _clean_caches():
     """
     cache_module.CONCLUSION_CACHE.clear()
     cache_module.SIGNALS_CACHE.clear()
+    # THE RATE LIMITER IS THE SAME KIND OF SINGLETON AND NEEDS THE SAME TREATMENT (Phase 11).
+    # Its buckets are module-level and per-process, so a test that makes a hundred requests drains
+    # the general bucket for every test after it - and the victim fails with a 429 where it
+    # expected a 500, having done nothing wrong. Measured: adding the limiter turned
+    # test_no_error_body_contains_sql_or_a_connection_string red in the suite while it passed
+    # alone, which is the least debuggable failure available.
+    ratelimit.LIMITER.reset()
     yield
     cache_module.CONCLUSION_CACHE.clear()
     cache_module.SIGNALS_CACHE.clear()

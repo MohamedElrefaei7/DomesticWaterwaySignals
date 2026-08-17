@@ -12,6 +12,7 @@ import re
 
 from . import (
     DIGEST_RE,
+    REPO_ROOT,
     ENV_EXAMPLE_PATH,
     EXPECTED_SERVICES,
     ONE_SHOT_SERVICES,
@@ -291,3 +292,35 @@ def test_the_caddy_data_directory_is_on_the_data_volume():
 # system no longer depends on is a green check that teaches the next reader a rule that is not
 # true. See verify/preflight.py::enumerate_image_sites and
 # tests/verify/test_preflight_checks.py::test_gate_one_enumerates_every_image_reference_in_the_stack.
+
+
+def test_api_service_runs_single_uvicorn_worker():
+    """EXACTLY ONE uvicorn worker, asserted structurally (CLAUDE.md § 22).
+
+    The rate limiter's bucket state is IN-PROCESS, so `--workers 4` silently quadruples every
+    limit: four processes, four independent stores, four full quotas per client. Nothing in the
+    code changes, every number still reads correctly, and the only symptom is that the limit is
+    four times what it says.
+
+    Shared state would mean a database write path, which § 20's read-only contract forbids. So the
+    constraint is one worker, and the guard is this test.
+
+    Checked in BOTH places a worker count can appear - the Dockerfile CMD and a Compose `command:`
+    override - because the override wins and a check that read only the image would miss it.
+    """
+    sources = {
+        "Dockerfile.api": (REPO_ROOT / "Dockerfile.api").read_text(encoding="utf-8"),
+        "docker-compose.yml": (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8"),
+    }
+    assert any("uvicorn" in text for text in sources.values()), (
+        "neither Dockerfile.api nor docker-compose.yml mentions uvicorn - this test is reading "
+        "the wrong files and would pass over anything"
+    )
+
+    for name, text in sources.items():
+        for match in re.finditer(r"--workers[\"'\s,=]+(\d+)", text):
+            count = int(match.group(1))
+            assert count == 1, (
+                f"{name} runs uvicorn with --workers {count}. The rate limiter's buckets are "
+                f"per-process, so every limit is silently multiplied by {count}."
+            )

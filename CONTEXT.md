@@ -98,7 +98,9 @@ no longer matches the data:
 **PHASE 11.** Backups, restore tests, S3 for Terraform state, external uptime monitoring, and the
 per-IP rate limit Phase 10 did not ship.
 
-1. **THE PER-IP RATE LIMIT. First, because the exposure is live.** Caddy has none in core; the
+1. ~~**THE PER-IP RATE LIMIT.**~~ **CLOSED in Part 4 below**, in the application rather than at
+   the edge, under a stated `CLAUDE.md § 22` amendment. Static assets remain unlimited at the
+   edge — recorded as an accepted residual exposure, not an omission. Original entry: Caddy has none in core; the
    plugin needs a custom `xcaddy` build with a version pinned from a catalog somebody has actually
    read, never from recollection (`CLAUDE.md § 16`). What shipped instead is a 16KB body cap and
    three proxy timeouts, which bound one slow request and do nothing about volume. A CDN in front
@@ -247,6 +249,60 @@ survive somebody moving the default region.
 `PendingConfirmation` check, `get-health-check-status`, the forced-degradation test, and the
 `Accept-Encoding:` curl that confirms what Route53 actually receives rather than what the app
 returns.
+
+### Part 4 — rate limiting, with an explicit § 22 amendment (`<sha-part-4>`)
+
+**The § 22 amendment is in the same commit as the middleware it permits**, per § 0. It does not
+overturn "rate limiting lives at the edge" — it carves out cost-based limits on endpoints whose
+cost is not cacheable, because the edge cannot see the cost, and it **names the residual exposure:
+the bundle, CSS and fonts stay unlimited at the edge, accepted and not mitigated.**
+
+**Limits.** General `/api`: 120 burst, 2/s sustained. `/api/conclusion`: **20 burst, 1 per 5s
+sustained**. Token buckets, not fixed windows — a fixed window lets a client spend a full quota in
+the last instant of one window and again in the first instant of the next. A conclusion request
+spends from both buckets, so the tighter one trips first and the general one still backstops a
+client spreading load across every endpoint.
+
+**Configuration is module constants**, matching `app/api/dependencies.py`'s `DEFAULT_LIMIT` /
+`MAX_LIMIT` / `MAX_SPAN_YEARS`. There is no settings module in this project and this commit does
+not introduce one. Nothing reads `os.environ` at request time.
+
+**The endpoint is `/api/conclusion`, singular.** Store bound: 10,000 buckets, LRU eviction plus
+lazy idle expiry, with an eviction counter — an unbounded dict keyed by client IP *is* the denial
+of service.
+
+**Two of my own tests were bypassing the middleware and had to be rewritten.**
+`test_ratelimit_ignores_x_forwarded_for` and `test_ratelimit_exempts_health_exact_path_only`
+called `RateLimiter.check` directly, but header selection and the health exemption both live in
+`dispatch`. Both mutations passed against the first versions. `client_key` does not even take an
+XFF argument, so a test written against it passes whatever `dispatch` reads. Both now drive the
+real app.
+
+**Adding the limiter broke a passing test by pollution, which is the § 20 singleton lesson again.**
+`test_no_error_body_contains_sql_or_a_connection_string` went red *in the suite* while passing
+alone: an earlier test drained the general bucket and it got a 429 where it expected a 500. Fixed
+by resetting `LIMITER` in the autouse fixture in `tests/api/conftest.py`, beside the caches.
+
+**`math` could not be imported.** `tests/api/test_contract.py` forbids `app/api/` from importing a
+computation module — a guard against this layer reimplementing the analog gate. Rounding a wait up
+is not worth an exception to it, so `Retry-After` uses `int(wait) + 1`. Over-waiting by up to a
+second is harmless; under-waiting invites an immediate retry.
+
+**A pre-existing Caddyfile test asserted the literal `NO PER-IP RATE LIMIT SHIPPED`.** That was
+true and is now false. Updated to assert `STILL NO EDGE RATE LIMIT` and `RESIDUAL EXPOSURE` —
+keeping the old string would have forced the Caddyfile to keep claiming an exposure that had been
+closed, which is the same failure as claiming a control that does not exist, pointing the other
+way.
+
+**`Dockerfile.api` already ran a single uvicorn worker** (`CMD ["uvicorn", ..., "--port", "8000"]`,
+no `--workers`), and no Compose `command:` overrides it. `test_api_service_runs_single_uvicorn_worker`
+now scans both files, because the Compose override wins and a check reading only the image would
+miss it.
+
+**Watch in live verification: `Caddyfile` carries `encode zstd gzip`.** Route53 health checkers do
+not send `Accept-Encoding`, so the body should reach them uncompressed — but that is the exact
+Theme 1 shape where every app-side test is green and the monitor is blind, which is why Part 3's
+step 7 curls with `-H 'Accept-Encoding:'`.
 
 ---
 

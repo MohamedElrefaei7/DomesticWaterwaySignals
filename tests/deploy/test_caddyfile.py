@@ -185,10 +185,25 @@ def test_the_api_path_carries_the_documented_edge_limits():
     # The absence must be legible in the file itself, not only in a commit report nobody reads
     # next year. A reader who finds timeouts and no limiter should find the sentence saying which
     # of the two they are looking at.
+    #
+    # UPDATED IN PHASE 11, AND THE UPDATE IS THE HONEST PART. This asserted the literal string
+    # "NO PER-IP RATE LIMIT SHIPPED", which was true and is now false: a per-IP limiter ships in
+    # app/api/middleware/ratelimit.py under CLAUDE.md § 22's cost-based exception. Leaving the old
+    # assertion would have forced the Caddyfile to keep claiming an exposure that had been closed,
+    # which is the same failure as claiming a control that does not exist - just pointing the other
+    # way.
+    #
+    # What is still true, and is what this now asserts: THE EDGE has no rate limiter, so the
+    # bundle, the CSS and the fonts are unlimited. That residual exposure has to stay findable by
+    # someone reading only this file.
     prose = read_artifact(CADDYFILE_PATH)
-    assert "NO PER-IP RATE LIMIT SHIPPED" in prose, (
-        "the Caddyfile does not state that no rate limit shipped. An unmarked absence reads as a "
-        "limit somebody forgot to look for."
+    assert "STILL NO EDGE RATE LIMIT" in prose, (
+        "the Caddyfile does not state that no EDGE rate limit shipped. The application limiter "
+        "covers /api only; an unmarked absence at the edge reads as coverage nobody checked."
+    )
+    assert "RESIDUAL EXPOSURE" in prose, (
+        "the Caddyfile does not name what the application limiter leaves uncovered - the static "
+        "bundle, which never reaches the application at all"
     )
 
 

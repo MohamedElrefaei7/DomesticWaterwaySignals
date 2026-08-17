@@ -99,27 +99,45 @@ bargeanalysis.com {
 	handle /api/* {
 		reverse_proxy api:8000 {
 			# ------------------------------------------------------------------------
-			# NO PER-IP RATE LIMIT SHIPPED IN THIS COMMIT. STATED, NOT IMPLIED.
+			# THE RATE LIMIT IS IN THE APPLICATION, AND THIS LINE IS WHAT MAKES IT WORK.
 			# ------------------------------------------------------------------------
 			#
-			# Caddy has no rate limiter in core. The one everybody reaches for
-			# (github.com/mholt/caddy-ratelimit) is a third-party plugin that requires a
-			# custom binary built with xcaddy, which means a Go module fetch at image
-			# build time and a plugin version this agent cannot resolve — inventing one
-			# is the same class of mistake as inventing an AMI id (CLAUDE.md § 16).
-			# Coupling first-ever TLS issuance to a supply-chain step was judged the
-			# worse trade. Phase 11 owns it; CONTEXT.md records the exposure.
+			# Phase 11 shipped a per-IP limiter in app/api/middleware/ratelimit.py, under
+			# CLAUDE.md § 22's cost-based exception: /api/conclusion accepts distinct
+			# (site_id, as_of) pairs that miss the conclusion cache and each run an
+			# analog query, and the expensive request and the cheap one differ only in a
+			# query parameter whose cost only the application knows.
 			#
-			# WHAT SHIPPED INSTEAD is these three timeouts and the body cap above. They
-			# are not a rate limit and do not pretend to be one: they bound what a single
-			# slow or hung request can hold open, so a stranger cannot accumulate
-			# connections against the API by opening them and not reading. They do
-			# nothing about volume.
+			# header_up OVERWRITES X-Real-IP with the true remote host. That matters
+			# three ways, and the limiter is worthless without it:
 			#
-			# The expensive endpoint is /api/conclusion, which runs an analog query.
-			# app/api/cache.py keys a cache on the full parameter set, so repeat requests
-			# for one (site_id, as_of) are cheap; DISTINCT pairs are what bypass it, and
-			# there is currently nothing limiting how fast a stranger can ask for them.
+			#   - Without this line the application sees request.client.host, which is
+			#     THIS CONTAINER'S address. A per-IP limiter keyed on it buckets the
+			#     entire internet into one client and reads as working the whole time.
+			#   - X-Forwarded-For's first element is written by the CLIENT. Keying on it
+			#     means an attacker rotates a header and the limiter does nothing.
+			#   - Overwrite, not append: a client sending its own X-Real-IP cannot
+			#     influence what the application reads.
+			#
+			# Every middleware unit test fabricates this header, so all of them pass
+			# whether or not this line exists. tests/deploy/test_caddyfile_sets_real_ip.py
+			# is the only test connecting this configuration to that behaviour.
+			header_up X-Real-IP {http.request.remote.host}
+
+			# STILL NO EDGE RATE LIMIT, and that is still stated rather than implied.
+			# Caddy has none in core; the plugin everybody reaches for
+			# (github.com/mholt/caddy-ratelimit) needs a custom binary built with
+			# xcaddy, which brings a self-built image inside the digest-pinning contract
+			# and couples the edge to a Go module fetch at image build time. Declined in
+			# Phase 11 as a decision, not an omission (CLAUDE.md § 22).
+			#
+			# THE RESIDUAL EXPOSURE THAT LEAVES: the built bundle, the CSS and the fonts
+			# are served from here and never reach the application, so nothing limits how
+			# fast a stranger can pull them. The application limiter covers /api only.
+			#
+			# The three timeouts below and the body cap above are not a rate limit and do
+			# not pretend to be one: they bound what a single slow or hung request can
+			# hold open. They do nothing about volume.
 			transport http {
 				dial_timeout 5s
 				response_header_timeout 30s
