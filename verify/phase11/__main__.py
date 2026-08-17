@@ -21,12 +21,17 @@ import argparse
 import sys
 from typing import Callable, Sequence
 
+from verify.phase11 import stage_c, stage_d
 from verify.phase11.result import EXIT_PRECONDITION, Check, Precondition, report
 
 # stage identifier -> builder taking the stage's positional arguments and returning its checks.
-# Empty until Part 2. `report()` refuses to exit 0 over an empty check list, so a stage registered
-# with no checks fails rather than reporting a clean run.
-STAGES: dict[str, Callable[..., Sequence[Check]]] = {}
+# `report()` refuses to exit 0 over an empty check list, so a stage registered with no checks fails
+# rather than reporting a clean run.
+STAGES: dict[str, Callable[..., Sequence[Check]]] = {
+    "c-pre": stage_c.checks_c_pre,
+    "c-post": stage_c.checks_c_post,
+    "d-pre": stage_d.checks,
+}
 
 
 def main(argv: list[str] | None = None) -> int:
