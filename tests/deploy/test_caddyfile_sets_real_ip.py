@@ -91,3 +91,64 @@ def test_caddyfile_states_the_absent_edge_rate_limit():
     assert re.search(r"rate.limit", body, flags=re.IGNORECASE), (
         "nothing in the block names the rate limit at all"
     )
+
+
+# EVERY directive the /api reverse_proxy block may contain, in order. Compared BY EQUALITY.
+EXPECTED_API_PROXY_DIRECTIVES = [
+    "header_up X-Real-IP {http.request.remote.host}",
+    "transport http {",
+    "dial_timeout 5s",
+    "response_header_timeout 30s",
+    "read_timeout 60s",
+    "}",
+]
+
+
+def test_caddyfile_api_proxy_directive_set_is_exact():
+    """The /api proxy carries exactly these directives and nothing else.
+
+    NOT a substring check for `X-Real-IP`. The test above proves the header is set and that it is
+    set correctly; it says nothing about what ELSE the block has acquired. A substring check passes
+    for a proxy block that has also grown a directive nobody reviewed - another `header_up`
+    forwarding something the application then trusts, a second `reverse_proxy` upstream, a
+    `flush_interval` somebody pasted from an unrelated answer. This is the edge, and the edge is
+    where CLAUDE.md § 22's whole argument lives: the previous twenty-one sections describe ways to
+    be WRONG, and this one describes ways to be REACHABLE.
+
+    WHAT THE SET USED TO BE, so the widening reads as a change of fact rather than of strictness:
+
+        Phase 10   transport http { dial_timeout 5s, response_header_timeout 30s, read_timeout 60s }
+        Phase 11   the same, PLUS `header_up X-Real-IP {http.request.remote.host}`
+
+    The addition is the one line that makes the application's per-IP limiter work at all. Every
+    test in tests/api/test_ratelimit.py fabricates that header, so all of them pass whether or not
+    Caddy sets it - which is why this file exists and why the set is pinned rather than searched.
+
+    ORDER IS ASSERTED TOO, and that is not pedantry about formatting: `header_up` before
+    `transport` is how the file reads top to bottom, and a list comparison reports an insertion at
+    the position it happened rather than as two set differences a reader has to reconstruct.
+    """
+    body = _api_proxy_block()
+
+    directives = [
+        line.strip()
+        for line in body.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+    assert directives, (
+        "the /api reverse_proxy block contains no directives at all - this test would then be "
+        "asserting an exact set over an empty collection, which is green forever and watching "
+        "nothing"
+    )
+
+    assert directives == EXPECTED_API_PROXY_DIRECTIVES, (
+        f"the /api reverse_proxy block is not what this repo says it is.\n"
+        f"  found   : {directives}\n"
+        f"  expected: {EXPECTED_API_PROXY_DIRECTIVES}\n"
+        f"  unexpected: {[d for d in directives if d not in EXPECTED_API_PROXY_DIRECTIVES]}\n"
+        f"  missing   : {[d for d in EXPECTED_API_PROXY_DIRECTIVES if d not in directives]}\n"
+        f"Everything in this block is on the path between the public internet and the "
+        f"application. If a directive was added deliberately, add it to "
+        f"EXPECTED_API_PROXY_DIRECTIVES with the reason it is safe."
+    )
