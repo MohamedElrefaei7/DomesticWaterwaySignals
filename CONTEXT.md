@@ -3,7 +3,7 @@
 This is the **log**: where the project is now, what is open, and `§ Up Next`. Stable contracts live
 in `CLAUDE.md`, which outranks this file.
 
-**Last updated:** 2026-08-17.
+**Last updated:** 2026-08-17. Phase 11 is code-complete and unapplied.
 
 ## Where everything lives
 
@@ -37,9 +37,11 @@ externally-visible proof of the `DOCKER-USER` terminal `DROP` rule. Full block i
 **Five containers' worth of pins, all resolved on the instance.** Four placeholder digests were
 replaced (`python:3.12-slim`, `node:22-bookworm-slim` ×2 stages each, `caddy:2-alpine`); the
 TimescaleDB digest is unchanged. All four were **hand-edited**, because `verify/preflight.py`
-gate 1 wrote only the first compose `image:` line at the time. **That gap is closed in this
-commit** — gate 1 now enumerates every `image:` line and every Dockerfile `FROM`, **six references
-across three files**, and `--write-digest` rewrites all of them.
+gate 1 wrote only the first compose `image:` line at the time. **That gap was closed in
+`d9acd96`** — gate 1 enumerates every `image:` line and every Dockerfile `FROM`, **six references
+across three files**, and `--write-digest` rewrites all of them. Phase 11 (`f29d734`) added the
+four conditions the enumeration did not cover: interpolated references, `FROM scratch`,
+digest-only references, and a pin whose tag has moved.
 
 **What is publicly reachable:** the built React bundle (four views) and all eight Phase 8 GET
 endpoints. **Unauthenticated, deliberately, and defensible on three independently checkable
@@ -48,9 +50,9 @@ refusing a `DELETE`*, and no response body carries a secret. **It is defensible 
 not as an inheritance**: a future session adding a write endpoint is voiding its premise, not
 extending it (`CLAUDE.md § 22`, and `docs/decisions.md § Phase 10`).
 
-**The one live, unmitigated exposure is request volume.** No per-IP rate limit shipped. Distinct
-`(site_id, as_of)` pairs bypass the conclusion cache and each one runs an analog query. Phase 11
-owns it and it is the first item below.
+**The request-volume exposure is closed in code** (`587d6e2`), in the application rather than at
+the edge, under a stated `CLAUDE.md § 22` amendment. **Static assets remain unlimited at the edge**
+— an accepted residual exposure, recorded as a decision. Not yet deployed.
 
 **Still degraded, still honestly.** `/api/health` reports `degraded: true` because no scheduler has
 run continuously across sessions. Phase 12 containerizes the worker and owns it.
@@ -95,34 +97,44 @@ no longer matches the data:
 
 ## § Up Next
 
-**PHASE 11.** Backups, restore tests, S3 for Terraform state, external uptime monitoring, and the
-per-IP rate limit Phase 10 did not ship.
+**PHASE 11 IS CODE-COMPLETE AND UNAPPLIED.** Eight commits, beginning `f29d734` (this documentation commit is the eighth). Every part is
+written, tested and mutation-confirmed; **nothing has been applied to AWS or run on the instance.**
+The pending human steps are listed under each part below and gathered here:
 
-1. ~~**THE PER-IP RATE LIMIT.**~~ **CLOSED in Part 4 below**, in the application rather than at
-   the edge, under a stated `CLAUDE.md § 22` amendment. Static assets remain unlimited at the
-   edge — recorded as an accepted residual exposure, not an omission. Original entry: Caddy has none in core; the
-   plugin needs a custom `xcaddy` build with a version pinned from a catalog somebody has actually
-   read, never from recollection (`CLAUDE.md § 16`). What shipped instead is a 16KB body cap and
-   three proxy timeouts, which bound one slow request and do nothing about volume. A CDN in front
-   (Cloudflare proxying, currently DNS-only) is the alternative and carries its own issuance
-   change — see `docs/decisions.md § Phase 10 live run`.
-2. **Backups, and `pg_restore -f /dev/null` as the verification.** `pg_dump --list` is not
-   verification (`CLAUDE.md § 3`). **`apscheduler_jobs` must be excluded from every dump** —
-   restoring stale `next_run_time` values is worse than restoring none.
-3. **A restore test that actually restores**, followed by `ANALYZE`, which is part of restoring and
-   is neither a migration nor a scheduled job.
-4. ~~**S3 backend with locking for Terraform state.**~~ **WRITTEN, PENDING MIGRATION.** HCL landed
-   in Part 2 below; `terraform init -migrate-state` is a human step and has not been run yet.
-   Until it is, state is still local and this item is not closed.
-5. **External uptime monitoring**, alerting on the `degraded` field rather than on the status code —
-   `/api/health` returns 200 while degraded by design.
-6. **Confirm the AWS budget alert exists.** Status unknown. There is a running instance, an EIP and
-   an EBS volume billing continuously.
+1. `cd infra/terraform/bootstrap && terraform init && terraform apply` — create the state bucket.
+2. `cd infra/terraform && terraform init -migrate-state`, then `terraform plan` — **expect "No
+   changes."** A plan that wants to create anything means the migration did not carry the state.
+3. Two concurrent `terraform plan`s — the second must block or report a held lock. If both proceed,
+   locking is decorative.
+4. `terraform apply` for the backup bucket, IAM, health check, alarm, SNS and budget.
+5. Confirm the SNS subscription and check the ARN is **not** `PendingConfirmation`.
+6. Force a degraded health response, wait ~3 minutes, confirm the Route53 check fails and an email
+   arrives. **This step is the whole point of the monitoring part.**
+7. `python -m migrations.run` — one pending file, `0026`.
+8. `python -m jobs.run_once`-equivalent for `backup_nightly` and `restore_test_monthly`. **Confirm
+   the runner's real entry point first** — see "Corrections" below.
+9. Burst `/api/conclusion` from a laptop, not the instance.
 
-**Phase 12** containerizes the `worker` service. It closes `degraded: true`, and it **needs its own
-restart-recovery verification** — being inside a container with `restart: unless-stopped` changes
-the process lifetime this whole design is about, and this project has already demonstrated that the
-settings can all be correct while the behaviour is not.
+**Phase 12 — containerize the `worker` service.** It closes `degraded: true`, and it **needs its
+own restart-recovery verification**: being inside a container with `restart: unless-stopped`
+changes the process lifetime this whole design is about, and this project has already demonstrated
+that the settings can all be correct while the behaviour is not.
+
+**Three dependencies Phase 11 created, recorded now because rediscovering them costs more:**
+
+1. **Containerizing the scheduler moves the backup job into a container**, so Part 6's `docker run`
+   becomes docker-in-docker or a mounted Docker socket. **Mounting the socket into the scheduler
+   container is root-equivalent on the host.** That is a design decision, not an implementation
+   detail, and it interacts directly with `§ 22`'s "application containers run as a non-root user".
+   Part 6's container-in-container invocation needs re-verification then.
+2. **boto3 behind IMDS from inside a container.** If the instance's IMDS hop limit were 1, the
+   instance role would be unreachable from a container and every S3 call would fail with a
+   credentials error that reads like an IAM problem. **Checked now, while it is cheap:
+   `infra/terraform/compute.tf:25` sets `http_put_response_hop_limit = 2`, so this is already
+   handled.** Do not lower it.
+3. **Part 1's tag-plus-digest requirement applies to any self-built image**, which is what an
+   `xcaddy` Caddy would be if `§ 22`'s rate-limiting exception is ever revisited. A locally built
+   image has no registry digest to resolve, so it would need a different pinning story.
 
 ---
 
@@ -130,7 +142,7 @@ settings can all be correct while the behaviour is not.
 
 In progress. One entry per part, with the commit SHA and what was measured rather than intended.
 
-### Part 1 — gate 1's four remaining conditions (`<sha-part-1>`)
+### Part 1 — gate 1's four remaining conditions (`f29d734`)
 
 Gate 1's enumeration was already general (closed in `d9acd96`, standing item 0 below). This part
 adds the four conditions the enumeration did not cover:
@@ -168,7 +180,7 @@ files exercise those branches.
 Every other gate-1 test is already in that file; a second home would split the gate's coverage for
 no reason.
 
-### Part 2 — Terraform remote state with locking (`<sha-part-2>`)
+### Part 2 — Terraform remote state with locking (`2c2a769`)
 
 **Stop-condition ran clean.** `git ls-files infra/terraform/ | grep tfstate` printed nothing, and
 `.gitignore:16-17` carries `*.tfstate` and `*.tfstate.*` — the second covering `.tfstate.backup`.
@@ -198,7 +210,7 @@ recovering from a bad apply.
 **Still pending (human steps):** `bootstrap` apply, `terraform init -migrate-state`, the clean-plan
 check, and the two-shell concurrent-lock test. `§ Up Next` item 4 stays open until they run.
 
-### Part 3 — backup bucket, scoped IAM, external health check, alarm, budget (`<sha-part-3>`)
+### Part 3 — backup bucket, scoped IAM, external health check, alarm, budget (`2394eb4`)
 
 **The health check string-matches `"degraded":false` on the field the API already has.** No
 `status` field was added and no ok token invented — `CLAUDE.md § 20` forbids a bare
@@ -250,7 +262,7 @@ survive somebody moving the default region.
 `Accept-Encoding:` curl that confirms what Route53 actually receives rather than what the app
 returns.
 
-### Part 4 — rate limiting, with an explicit § 22 amendment (`<sha-part-4>`)
+### Part 4 — rate limiting, with an explicit § 22 amendment (`587d6e2`)
 
 **The § 22 amendment is in the same commit as the middleware it permits**, per § 0. It does not
 overturn "rate limiting lives at the edge" — it carves out cost-based limits on endpoints whose
@@ -304,7 +316,7 @@ not send `Accept-Encoding`, so the body should reach them uncompressed — but t
 Theme 1 shape where every app-side test is green and the monitor is blind, which is why Part 3's
 step 7 curls with `-H 'Accept-Encoding:'`.
 
-### Part 5 — migration 0026: the `backups` table (`<sha-part-5>`)
+### Part 5 — migration 0026: the `backups` table (`3ce2764`)
 
 **`0026_backups_table.sql`.** 25 migrations were applied, so 0026 is next. Insert-once via a
 `BEFORE UPDATE` trigger comparing column by column, unconditional `BEFORE DELETE` trigger,
@@ -340,7 +352,7 @@ commits to satisfy a file-layout preference.
 `psycopg.errors.RaiseException`, not a constraint violation, and the message names the column —
 `refusing to update column byte_size on backup_id=N`.
 
-### Part 6 — nightly backup (`<sha-part-6>`)
+### Part 6 — nightly backup (`f54e915`)
 
 `app/orchestration/backup.py`, registered as `backup_nightly` with its cadence entry (24h interval,
 30h `overdue_after`). **`boto3==1.42.9` added to `requirements.txt`** — the phase's one runtime
@@ -376,7 +388,7 @@ words, explaining why it does not use them. Two called helpers directly (`upload
 rather than the job, so mutations to the job body never reached them. All four are now behavioural
 and all eleven mutations are confirmed.
 
-### Part 7 — monthly restore test (`<sha-part-7>`)
+### Part 7 — monthly restore test (`b9544e3`)
 
 `app/orchestration/restore_test.py`, registered as `restore_test_monthly` (30d interval, 45d
 `overdue_after`, derived grace ~15 days as accepted in Part 5). **592 passed / 0 skipped** with
@@ -406,6 +418,44 @@ smallest real loss there is and precisely what a tolerance swallows. The pre/pos
 test raised `ValueError` from `.index` rather than asserting, so it now asserts presence first.
 The S3 download test failed on "no bytes" rather than on "no S3 read", so it now plants a **stale
 local copy** — an implementation reading local staging finds it, succeeds, and is caught.
+
+### Part 8 — documentation writeback
+
+`CLAUDE.md` carries the new contract entries, folded in per part rather than in a lump.
+`README.md` **did not exist** and was created: it states the recovery posture and, more
+importantly, what that posture does **not** cover — RPO of up to 24 hours, no WAL archiving so no
+point-in-time recovery, a single-region bucket, and an untested RTO. It also records the
+rate-limiting residual exposure, so the decision is findable by someone reading only the README.
+
+**What this prompt got wrong about the repo, corrected rather than adapted around:**
+
+| Assumed | Actual |
+|---|---|
+| `tests/db/test_backups_table.py` | `tests/orchestration/test_backups_table.py` — every DB-constraint test lives there, beside `test_job_runs_constraints.py` |
+| `jobs/registry.py` | `app/orchestration/scheduler.py`'s `JOB_FUNCTIONS` |
+| `tests/deploy/test_preflight_gate1.py` | Added to `tests/verify/test_preflight_checks.py`, where every other gate-1 test already lives |
+| Cadence rows land in Part 5 | They **cannot**: `scheduler.py` raises when `CADENCES` and `JOB_FUNCTIONS` disagree, so each row lands with its job (Parts 6 and 7) |
+| `--write-digest` should raise on any differing pin | The all-zero **placeholder** must stay writable — it is the committed "not resolved yet" marker and writing it is the command's purpose |
+| A settings module for limiter config | None exists; module constants match `app/api/dependencies.py`'s existing pattern |
+| `python -m jobs.run_once <name>` | **Unverified.** No such module exists. The jobs are callable as `app.orchestration.backup.backup_nightly_job` / `restore_test.restore_test_monthly_job`; there is no one-shot CLI runner in this repo, and writing one was out of scope. **Tell me if you want one and it is a small commit.** |
+| Heartbeat entry point | `app.orchestration.heartbeat.heartbeat_job`; `heartbeat.check()` takes a `cadences` parameter and defaults to the table, so both new jobs appear with no heartbeat-side change — verified by the cadence/registry agreement test |
+
+**Measured across the phase:** 592 tests pass with `DATABASE_URL` and Docker (437 pass / 155 skip
+without). **50 mutations applied, all confirmed for the stated reason.** Nine of my own tests were
+proven weak by a mutation escaping them and were rewritten — three source-greps that matched their
+own module's docstrings, four that called helpers instead of the code path under test, one that
+raised `ValueError` instead of asserting, and one that deleted a whole table where a tolerance
+mutation needed a single row.
+
+**One real bug was found by a test rather than by review:** the nightly job's `backups` INSERT was
+silently rolled back, because `db.connection()` commits nothing implicitly, while the job reported
+success and S3 held a verified archive. That is `§ 2`'s theme 1 inside the code written to prevent
+it, and only an integration test against a real database could see it.
+
+**Still open, untouched by this phase:** the three analog-engine questions, `SIMILARITY_CUTOFF` and
+friends, the Cairo site number, `gauge_series` UTC bucketing, `lock_movements` being unused, the IV
+chunk interval, and Node not being pinned in provisioning. None of them were closed, narrowed, or
+quietly dropped.
 
 ---
 
