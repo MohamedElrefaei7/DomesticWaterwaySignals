@@ -233,12 +233,18 @@ def test_restore_test_does_not_pass_no_privileges(tmp_path):
 
 
 def test_restore_test_creates_roles_before_restore():
-    """Roles first, or the restore's GRANT statements have nothing to grant to."""
+    """Roles first, or the restore's GRANT statements have nothing to grant to.
+
+    The statement is a psycopg `Composed` rather than a string since role names started coming
+    from a parsed archive: composing the identifier is what keeps archive content out of executed
+    SQL, and what quotes a mixed-case name correctly. `as_string(None)` renders it for inspection
+    without needing a connection.
+    """
     statements = []
 
     class Conn:
         def execute(self, sql, params=None):
-            statements.append(" ".join(sql.split()))
+            statements.append(" ".join(sql.as_string(None).split()))
 
     restore_test.create_roles(Conn())
 
@@ -515,3 +521,209 @@ def test_restore_test_expected_empty_table_matches_the_backup_exclusion():
     assert restore_test.EXPECTED_EMPTY_TABLE == (
         f"{backup.COUNTED_SCHEMA}.{backup.EXCLUDED_DATA_TABLE}"
     )
+
+
+# ---------------------------------------------------------------------------------------------
+# Role discovery: from the ARCHIVE, not from the live source database.
+# ---------------------------------------------------------------------------------------------
+#
+# The first version read `pg_tables` and `pg_namespace` on the SOURCE. That worked, and it was
+# describing the wrong object. The source moves on after a dump is taken: a role dropped from it
+# would never be created in the throwaway, and one added to it would be created needlessly. Either
+# way the throwaway stops matching the artifact under test, and the artifact is the thing being
+# verified. It also gave a monthly restore test a hard dependency on production being reachable.
+
+
+class _RenderedArchive:
+    """A `run` stand-in returning prepared `pg_restore -f -` output.
+
+    Stands in at the subprocess boundary, so the regexes, the PUBLIC exclusion and the unquoting
+    are all real code under test - only the archive is fabricated.
+    """
+
+    def __init__(self, sql_text, returncode=0, stderr=""):
+        self.sql_text = sql_text
+        self.returncode = returncode
+        self.stderr = stderr
+        self.calls = []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append(argv)
+
+        class Completed:
+            pass
+
+        completed = Completed()
+        completed.returncode = self.returncode
+        completed.stdout = self.sql_text
+        completed.stderr = self.stderr
+        return completed
+
+
+# Taken verbatim from a real archive of this project's own database, rendered on 2026-08-17.
+REAL_RENDER = """
+ALTER SCHEMA public OWNER TO dwstest;
+ALTER FUNCTION public.backups_forbid_delete() OWNER TO dwstest;
+ALTER TABLE public.probe_tbl OWNER TO "Mixed-Case_Owner";
+REVOKE USAGE ON SCHEMA public FROM PUBLIC;
+GRANT SELECT ON TABLE public.probe_tbl TO waterway_api;
+GRANT SELECT ON TABLE public.probe_tbl TO PUBLIC;
+"""
+
+
+def test_create_roles_discovers_from_archive_not_live_db(tmp_path):
+    """Discovery opens no connection to the source database at all.
+
+    Asserted by SIGNATURE and by call, not by inspection: `roles_in_archive` takes a path and an
+    image and has nowhere to put a connection. A version that reached for the source would have to
+    grow a parameter, which is a visible change rather than a line inside a function body.
+    """
+    import inspect
+
+    parameters = inspect.signature(restore_test.roles_in_archive).parameters
+    assert "conn" not in parameters and "url" not in parameters, (
+        f"roles_in_archive accepts {sorted(parameters)}. It must not be able to reach the source "
+        f"database: the archive is the artifact under test and the source has moved on since the "
+        f"dump was taken."
+    )
+
+    archive = tmp_path / "backup.dump"
+    archive.write_bytes(b"not really an archive; the render is stubbed")
+    run = _RenderedArchive(REAL_RENDER)
+
+    roles = restore_test.roles_in_archive(archive, "timescale/timescaledb:test", run=run)
+
+    assert run.calls, "roles_in_archive issued no command at all"
+    argv = run.calls[0]
+    assert "pg_restore" in argv, f"the archive was not rendered with pg_restore: {argv}"
+    assert str(archive) in argv, f"the command does not name the archive: {argv}"
+    assert "-l" not in argv and "--list" not in argv, (
+        f"the roles were read from the TABLE OF CONTENTS: {argv}. The TOC carries each object's "
+        f"OWNER and no GRANTEES, so the read-only role - which owns nothing - would be missing; "
+        f"and it renders names unquoted, which silently lowercases a mixed-case role."
+    )
+    assert roles, "no roles were discovered"
+
+
+def test_create_roles_excludes_public_pseudo_role(tmp_path):
+    """PUBLIC is never created. `CREATE ROLE PUBLIC` is an error.
+
+    This bites on the FIRST `GRANT ... TO PUBLIC` in an archive, which is to say immediately: the
+    render above is real, and it contains both a GRANT to PUBLIC and a REVOKE from PUBLIC. Without
+    the exclusion the whole restore test aborts before the restore starts, with an error about
+    role syntax rather than about anything to do with backups.
+    """
+    archive = tmp_path / "backup.dump"
+    archive.write_bytes(b"stub")
+
+    roles = restore_test.roles_in_archive(
+        archive, "img", run=_RenderedArchive(REAL_RENDER)
+    )
+
+    assert not any(role.lower() == "public" for role in roles), (
+        f"PUBLIC was discovered as a role to create: {roles}. It is a pseudo-role and CREATE ROLE "
+        f"PUBLIC is rejected outright."
+    )
+    # And the exclusion is specific rather than a blanket filter on the GRANT path: the real
+    # grantee beside it survives.
+    assert restore_test.READ_ONLY_ROLE in roles, (
+        f"excluding PUBLIC also dropped the real grantee: {roles}"
+    )
+
+
+def test_create_roles_preserves_quoted_mixed_case_names(tmp_path):
+    """`"Mixed-Case_Owner"` survives as `Mixed-Case_Owner`, not `mixed-case_owner`.
+
+    MEASURED, and this is why rendered SQL is parsed rather than the TOC:
+
+        rendered SQL  ALTER TABLE public.probe_tbl OWNER TO "Mixed-Case_Owner";
+        TOC (-l)      300; 1259 1770508 TABLE public probe_tbl Mixed-Case_Owner
+
+    Creating the unquoted form makes a DIFFERENT role. The restore then fails on an owner that
+    exists under a name nobody created, and the error names a role that looks right.
+    """
+    archive = tmp_path / "backup.dump"
+    archive.write_bytes(b"stub")
+
+    roles = restore_test.roles_in_archive(
+        archive, "img", run=_RenderedArchive(REAL_RENDER)
+    )
+
+    assert "Mixed-Case_Owner" in roles, (
+        f"the mixed-case owner was not preserved: {roles}. A lowercased name creates a different "
+        f"role and the restore then fails on an owner that exists under a name nobody created."
+    )
+    assert "mixed-case_owner" not in roles, f"the name was folded to lower case: {roles}"
+
+    # And the identifier survives composition into the CREATE ROLE statement, quoted.
+    statements = []
+
+    class Conn:
+        def execute(self, sql, params=None):
+            statements.append(sql.as_string(None))
+
+    restore_test.create_roles(Conn(), ["Mixed-Case_Owner"])
+    assert any('"Mixed-Case_Owner"' in s for s in statements), (
+        f"CREATE ROLE did not quote the mixed-case identifier: {statements}"
+    )
+
+
+def test_create_roles_creates_nologin_roles():
+    """NOLOGIN, and no password anywhere in the statement.
+
+    The throwaway needs these roles as ownership and grant targets, never as connection
+    identities - the read-only assertion is made with SET ROLE from the superuser session.
+    Creating them with LOGIN and a password would put a credential in the test path for nothing.
+    """
+    statements = []
+
+    class Conn:
+        def execute(self, sql, params=None):
+            statements.append(sql.as_string(None))
+
+    restore_test.create_roles(Conn(), ["waterway_api", "some_owner"])
+
+    assert len(statements) == 2, f"expected one statement per role, got {statements}"
+    for statement in statements:
+        assert "NOLOGIN" in statement, f"role created without NOLOGIN: {statement}"
+        assert "PASSWORD" not in statement.upper(), (
+            f"a password appears in a role-creation statement: {statement}. The throwaway needs "
+            f"these roles as grant targets, not as connection identities."
+        )
+
+
+def test_create_roles_is_idempotent_for_existing_role():
+    """Guarded by IF NOT EXISTS - `postgres` and the object owner usually already exist."""
+    statements = []
+
+    class Conn:
+        def execute(self, sql, params=None):
+            statements.append(" ".join(sql.as_string(None).split()))
+
+    restore_test.create_roles(Conn(), ["postgres"])
+
+    (statement,) = statements
+    assert "IF NOT EXISTS" in statement.upper(), (
+        f"role creation is unguarded: {statement}. `postgres` already exists in the throwaway, so "
+        f"an unguarded CREATE ROLE fails the restore test before the restore begins."
+    )
+    assert "PG_ROLES" in statement.upper(), (
+        f"the guard does not check pg_roles: {statement}"
+    )
+
+
+def test_roles_in_archive_raises_when_the_render_is_empty(tmp_path):
+    """An empty render is a failure, never an empty role set.
+
+    NOT IN THE BRIEF'S LIST, and here because an empty set is the shape that fails quietly: the
+    restore would run with no roles created and fail on the first OWNER TO, reporting a missing
+    role rather than a discovery step that read nothing. CLAUDE.md § 13 - a check that quietly
+    becomes a no-op is theme 2 in its purest form.
+    """
+    archive = tmp_path / "backup.dump"
+    archive.write_bytes(b"stub")
+
+    with pytest.raises(restore_test.RestoreTestError) as raised:
+        restore_test.roles_in_archive(archive, "img", run=_RenderedArchive(""))
+
+    assert "no SQL" in str(raised.value), f"unhelpful message: {raised.value}"

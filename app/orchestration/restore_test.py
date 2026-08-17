@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import secrets
 import shutil
 import subprocess
@@ -35,6 +36,8 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+
+from psycopg import sql
 
 from app import db
 from app.orchestration import backup, session
@@ -268,41 +271,140 @@ def wait_until_ready(throwaway: Throwaway, run=subprocess.run, timeout: int = CO
 # ---------------------------------------------------------------------------------------------
 
 
-def roles_in_use(conn) -> list[str]:
-    """Every role the archive will reference: object owners, schema owners, and the read-only role.
+# A role name as pg_restore renders it: either a quoted identifier (with "" escaping an embedded
+# quote) or a bare one. BOTH FORMS MATTER - see roles_in_archive.
+_ROLE = r'"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*'
 
-    DISCOVERED FROM THE SOURCE, not listed here. A hardcoded list is a second copy of a fact the
-    database already holds, and the copy is what goes stale - measured, the first time this ran:
-    only `waterway_api` was created, and the restore failed on `ALTER SCHEMA public OWNER TO
-    <owner>` because the OWNER role had not been thought of. The archive references every owner of
-    every object in it, not just the interesting one.
+_OWNER_TO_RE = re.compile(rf"\bOWNER\s+TO\s+({_ROLE})", re.IGNORECASE)
+_GRANT_TO_RE = re.compile(rf"\bGRANT\b[^;]*?\bTO\s+((?:{_ROLE})(?:\s*,\s*(?:{_ROLE}))*)",
+                          re.IGNORECASE | re.DOTALL)
+_REVOKE_FROM_RE = re.compile(rf"\bREVOKE\b[^;]*?\bFROM\s+((?:{_ROLE})(?:\s*,\s*(?:{_ROLE}))*)",
+                             re.IGNORECASE | re.DOTALL)
+_ROLE_TOKEN_RE = re.compile(_ROLE)
+
+# Names that are not roles to create. PUBLIC is a PSEUDO-ROLE and `CREATE ROLE PUBLIC` is an error,
+# so the first `GRANT ... TO PUBLIC` in an archive would abort the whole restore test before the
+# restore began. Measured: this project's own archive contains both `GRANT SELECT ON TABLE
+# public.probe_tbl TO PUBLIC` and `REVOKE USAGE ON SCHEMA public FROM PUBLIC`.
+#
+# The session keywords are here for the same reason - they parse as role names and name no role.
+_NOT_A_ROLE = {"public", "current_user", "session_user", "current_role", "none"}
+
+
+def _unquote_role(token: str) -> str:
+    """`"Mixed-Case"` -> `Mixed-Case`, `waterway_api` -> `waterway_api`.
+
+    THE CASE IS PRESERVED EXACTLY, and that is the whole point of parsing rendered SQL rather than
+    the table of contents. Measured 2026-08-17 against a real archive:
+
+        rendered SQL  ALTER TABLE public.probe_tbl OWNER TO "Mixed-Case_Owner";
+        TOC (-l)      300; 1259 1770508 TABLE public probe_tbl Mixed-Case_Owner
+
+    The TOC gives the name UNQUOTED. Creating `Mixed-Case_Owner` from that without quoting produces
+    the role `mixed-case_owner` - a DIFFERENT role - after which the restore fails on an owner that
+    exists under a name nobody created, and the error names a role that looks correct.
     """
-    rows = conn.execute(
-        "SELECT DISTINCT tableowner FROM pg_tables WHERE schemaname = %s "
-        "UNION SELECT DISTINCT nspowner::regrole::text FROM pg_namespace "
-        "WHERE nspname = %s "
-        "UNION SELECT current_user",
-        (backup.COUNTED_SCHEMA, backup.COUNTED_SCHEMA),
-    ).fetchall()
+    if token.startswith('"'):
+        return token[1:-1].replace('""', '"')
+    return token
 
-    roles = {row[0] for row in rows if row[0]}
-    # The read-only role may own nothing at all - it holds GRANTs, not objects - so it would not
-    # appear above. It is the one role whose restoration this job actually asserts.
+
+def roles_in_archive(archive_path: Path, image: str, run=subprocess.run) -> list[str]:
+    """Every role THE ARCHIVE references, read from the archive's own rendered SQL.
+
+    FROM THE ARCHIVE, NOT FROM THE LIVE SOURCE DATABASE. Reading the source gives this job a
+    dependency on production being reachable, and - worse - it describes the wrong thing. A role
+    dropped from production after the dump would never be created, and one added after the dump
+    would be created needlessly. Either way the throwaway diverges from the artifact under test,
+    and the artifact is what is being verified. The archive is a fixed object; the database it came
+    from has moved on.
+
+    RENDERED SQL (`pg_restore -f -`) RATHER THAN THE TABLE OF CONTENTS (`pg_restore -l`), for two
+    measured reasons:
+
+      1. THE TOC HAS NO GRANTEES. Its ACL entries carry the object's OWNER, not who was granted
+         anything. `waterway_api` owns nothing at all - it holds GRANTs - so it does not appear in
+         the TOC under any object, and it is the one role whose restoration this job asserts.
+      2. THE TOC UNQUOTES NAMES, which silently changes mixed-case ones. See _unquote_role.
+
+    This is also the one place `pg_restore -l` would have been the cheaper call, and CLAUDE.md § 3
+    already says why cheap reads of the table of contents are not to be trusted for anything that
+    matters: the archive that was one third its correct size passed `--list` cleanly.
+    """
+    completed = run(
+        [
+            "docker", "run", "--rm",
+            "-v", f"{archive_path.parent}:{archive_path.parent}",
+            image,
+            "pg_restore", "--file", "-", str(archive_path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise RestoreTestError(
+            f"could not render {archive_path} in order to discover its roles: pg_restore exited "
+            f"{completed.returncode}: {(completed.stderr or '').strip() or '(no stderr)'}"
+        )
+
+    sql_text = completed.stdout or ""
+    if not sql_text.strip():
+        raise RestoreTestError(
+            f"rendering {archive_path} produced no SQL at all. An empty render means the roles "
+            f"below would be an empty set, and the restore would then run with nothing created - "
+            f"failing on the first OWNER TO with a message about a role rather than about this."
+        )
+
+    tokens = []
+    for match in _OWNER_TO_RE.finditer(sql_text):
+        tokens.append(match.group(1))
+    for pattern in (_GRANT_TO_RE, _REVOKE_FROM_RE):
+        for match in pattern.finditer(sql_text):
+            tokens.extend(_ROLE_TOKEN_RE.findall(match.group(1)))
+
+    roles = set()
+    for token in tokens:
+        name = _unquote_role(token)
+        # Bare or quoted, `public` is never a role to create. A quoted "public" cannot exist as a
+        # real role either, because CREATE ROLE public is rejected outright.
+        if name.lower() in _NOT_A_ROLE:
+            continue
+        roles.add(name)
+
+    # The read-only role, unconditionally. It may hold no grants in a given archive - an early
+    # archive predating the GRANTs, say - and its restoration is the assertion this whole job is
+    # built around, so it is never left to discovery.
     roles.add(READ_ONLY_ROLE)
     return sorted(roles)
 
 
 def create_roles(conn, roles=(READ_ONLY_ROLE,)) -> None:
-    """Create every role the archive references BEFORE restoring.
+    """Create every role the archive references BEFORE restoring. NOLOGIN, and no passwords.
 
     The alternative is `--no-owner --no-privileges`, which makes the restore succeed by discarding
     exactly the thing worth checking. A backup whose grants were never restored is a backup that
     cannot be used to rebuild this system's security posture, and nothing would say so.
+
+    NOLOGIN AND NO PASSWORD, DELIBERATELY. The throwaway needs these roles as targets for ownership
+    and grants, never as connection identities - the read-only assertion is made with SET ROLE from
+    the superuser session. Creating them LOGIN with a password would put a credential in the test
+    path for no benefit at all.
+
+    IDENTIFIERS ARE COMPOSED, NOT INTERPOLATED. These names now come from parsing an archive rather
+    than from a constant, so building the statement with an f-string would put archive content into
+    executed SQL. `sql.Identifier` also quotes correctly, which is what preserves a mixed-case name
+    through creation - the same property _unquote_role exists to protect on the way in.
+
+    Idempotent: `postgres` and the object owner frequently already exist in the throwaway.
     """
     for role in roles:
         conn.execute(
-            f'DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = \'{role}\') '
-            f'THEN CREATE ROLE "{role}" NOLOGIN; END IF; END $$'
+            sql.SQL(
+                "DO $do$ BEGIN "
+                "IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {name}) "
+                "THEN CREATE ROLE {ident} NOLOGIN; "
+                "END IF; END $do$"
+            ).format(name=sql.Literal(role), ident=sql.Identifier(role))
         )
 
 
@@ -532,14 +634,19 @@ def restore_test_monthly_job(
 
     with db.connection(url) as conn:
         record = most_recent_verified(conn)
-        # Read from the SOURCE, so the throwaway gets every role the archive names.
-        roles = roles_in_use(conn)
 
     scratch_dir.mkdir(parents=True, exist_ok=True)
     check_free_space(scratch_dir, record["byte_size"])
 
     archive_path = scratch_dir / Path(record["s3_key"]).name
     download_archive(s3, record["s3_bucket"], record["s3_key"], archive_path)
+
+    # ROLES COME FROM THE ARCHIVE, AFTER IT IS DOWNLOADED - never from the live source database.
+    # The source has moved on since the dump: a role dropped from it would never be created and one
+    # added to it would be created needlessly, and either way the throwaway stops matching the
+    # artifact under test. This is also why it is here rather than beside most_recent_verified -
+    # it needs the file, not the connection.
+    roles = roles_in_archive(archive_path, image, run=run)
 
     throwaway = None
     succeeded = False
