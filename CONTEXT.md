@@ -125,6 +125,50 @@ settings can all be correct while the behaviour is not.
 
 ---
 
+## Phase 11 — backups, restore verification, monitoring, rate limiting
+
+In progress. One entry per part, with the commit SHA and what was measured rather than intended.
+
+### Part 1 — gate 1's four remaining conditions (`<sha-part-1>`)
+
+Gate 1's enumeration was already general (closed in `d9acd96`, standing item 0 below). This part
+adds the four conditions the enumeration did not cover:
+
+1. **An interpolated reference is its own failure.** `FROM ${BASE}` and `FROM $BASE` previously fell
+   through to the digest check and failed with a message about a missing digest — a true failure
+   with a wrong diagnosis, and the fix it suggests (`${BASE}@${DIGEST}`) passes the gate while
+   pinning nothing. It now fails saying the base image must be written literally.
+2. **`FROM scratch` is skipped and reported**, by seeding the declared-stage set with the name
+   rather than by a special case at the check. It previously failed as an unpinned reference.
+3. **`--write-digest` raises on drift instead of rewriting.** Three cases are now distinguished:
+   unpinned *or placeholder* → write; pinned and identical → no-op with the file bytes untouched;
+   **pinned and resolving differently → `DigestDriftError`, naming file, line, and both digests.**
+   **The placeholder counts as unpinned, not as drift** — it is the committed "not resolved yet"
+   marker (`CLAUDE.md § 12`) and writing it is what the command is for; four were replaced in
+   Phase 10. Classifying it as drift would have made the placeholder the one thing
+   `--write-digest` refuses to write.
+4. **A digest with no tag is rejected** — this already worked; it now has a test through the full
+   enumerate-then-check path, because it is what makes condition 3 non-vacuous. A reference with no
+   tag offers nothing to resolve *from*, so the drift comparison would silently apply to zero
+   references.
+
+**Measured: 6 references across 3 files** — `docker-compose.yml` 2, `Dockerfile.api` 2,
+`Dockerfile.frontend` 2 — all PASS. **No Compose file or Dockerfile needed a tag added**; every
+reference already carried `name:tag@sha256:…`, so this part touched no image file and changed no
+digest.
+
+**Not exercised by the real files:** neither Dockerfile contains a `FROM` naming an earlier stage,
+and neither contains `FROM scratch`. Both build services declare two registry `FROM` lines apiece.
+The stage-accumulation and `scratch` paths are therefore covered by fixtures only. That is fine —
+it is what fixtures are for — but nobody should later read the green gate as evidence that the real
+files exercise those branches.
+
+**Tests live in `tests/verify/test_preflight_checks.py`, not `tests/deploy/test_preflight_gate1.py`.**
+Every other gate-1 test is already in that file; a second home would split the gate's coverage for
+no reason.
+
+---
+
 ## Standing items, carried until somebody closes them
 
 0. ~~**`verify/preflight.py` gate 1 covers one image reference out of three, and no Dockerfile

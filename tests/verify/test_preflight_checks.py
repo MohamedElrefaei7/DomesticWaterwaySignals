@@ -369,6 +369,267 @@ def test_write_digest_rewrites_every_reference_not_just_the_first(tmp_path):
 
 
 # ---------------------------------------------------------------------------------------------
+# 3b: gate 1's four remaining conditions - interpolation, scratch, digest-only, and drift
+# ---------------------------------------------------------------------------------------------
+#
+# Gate 1 already enumerates every reference (d9acd96). These cover what the enumeration did not:
+# a reference that cannot be resolved at all, one that is not a registry reference, one with no
+# tag left to resolve FROM, and a pin whose tag has moved underneath it.
+
+
+class _Completed:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _daemon(digest_by_tag):
+    """A fake `docker image inspect` that resolves each tag to a stated digest."""
+
+    def run(cmd, **kwargs):
+        if cmd[:3] == ["docker", "image", "inspect"]:
+            tag = cmd[3]
+            return _Completed(0, f'["{tag}@{digest_by_tag[tag]}"]')
+        return _Completed(0)  # the `git diff` at the end
+
+    return run
+
+
+def _tree(tmp_path, compose_refs=(), dockerfile_lines=()):
+    """A throwaway repo root: a compose file plus one Dockerfile, so the walk finds both."""
+    services = "".join(
+        f"  svc{i}:\n    image: {reference}\n" for i, reference in enumerate(compose_refs)
+    )
+    (tmp_path / "docker-compose.yml").write_text(f"services:\n{services}", encoding="utf-8")
+    (tmp_path / "Dockerfile.api").write_text(
+        "".join(f"{line}\n" for line in dockerfile_lines), encoding="utf-8"
+    )
+    return tmp_path
+
+
+def test_gate1_fails_on_arg_interpolated_from():
+    """`FROM ${BASE_IMAGE}` fails as INTERPOLATION, not as a missing digest.
+
+    Both diagnoses produce a red gate, so the distinction looks cosmetic. It is not. A message
+    about a missing digest sends the reader looking for a digest to add, and the fix that suggests
+    - `FROM ${BASE_IMAGE}@${BASE_DIGEST}` - satisfies a digest check and pins nothing at all. The
+    message has to name the actual remedy, which is writing the base image literally.
+    """
+    result = preflight.check_image_reference("${BASE_IMAGE}", where="Dockerfile.api:1")
+
+    assert result.status == preflight.FAIL
+    assert "literal" in result.detail.lower(), (
+        f"the message does not tell the reader to write the base image literally: {result.detail}"
+    )
+    assert "${BASE_IMAGE}" in result.detail, "the observed reference is not reported"
+
+    # The WRONG diagnosis, asserted by its absence. This is what mutation 1 restores.
+    assert "no `@sha256:...` digest" not in result.detail, (
+        "an interpolated reference was diagnosed as a missing digest - the reader is sent to add "
+        "a digest, and interpolating one too would pass the gate while pinning nothing"
+    )
+
+    # A digest bolted onto an interpolated name does not rescue it.
+    interpolated_digest = preflight.check_image_reference(f"${{BASE_IMAGE}}@{GOOD_DIGEST}")
+    assert interpolated_digest.status == preflight.FAIL
+    assert "literal" in interpolated_digest.detail.lower()
+
+
+def test_gate1_fails_on_bare_dollar_interpolated_from():
+    """`FROM $BASE`, no braces. Both spellings are legal shell and legal Dockerfile."""
+    for reference in ("$BASE", "$BASE_IMAGE:1.0", "registry.example/$NAME:tag"):
+        result = preflight.check_image_reference(reference)
+        assert result.status == preflight.FAIL, f"{reference!r} was accepted"
+        assert "literal" in result.detail.lower(), (
+            f"{reference!r} failed for some other reason: {result.detail}"
+        )
+
+
+def test_gate1_skips_from_scratch():
+    """`FROM scratch` is Docker's empty base - no registry reference, nothing to pin.
+
+    Skipped rather than failed, and REPORTED rather than dropped: a reference the walk declined to
+    check has to be visible in the walk's own output, or an unmentioned omission is
+    indistinguishable from a reference nobody enumerated.
+    """
+    sites, declined = preflight.dockerfile_from_sites(
+        f"FROM {'scratch'}\nCOPY x /x\nFROM python:3.12-slim@{GOOD_DIGEST} AS run\n",
+        REPO_ROOT / "Dockerfile.fake",
+    )
+
+    assert [site.reference for site in sites] == [f"python:3.12-slim@{GOOD_DIGEST}"], (
+        f"`FROM scratch` was treated as a registry reference: {[s.reference for s in sites]}"
+    )
+    assert declined == ["Dockerfile.fake:1 FROM scratch"], (
+        f"`FROM scratch` was dropped silently rather than reported: {declined}"
+    )
+
+
+def test_gate1_rejects_digest_without_tag(tmp_path):
+    """A bare `name@sha256:...` is rejected, through the full enumerate-then-check path.
+
+    This is what makes the drift check non-vacuous. `--write-digest` resolves a digest FROM a tag;
+    a reference with no tag offers nothing to resolve, so the drift comparison silently applies to
+    zero references - CLAUDE.md § 2's theme 2, inside the tool built to catch theme 2.
+    """
+    root = _tree(
+        tmp_path,
+        compose_refs=[f"caddy@{GOOD_DIGEST}"],
+        dockerfile_lines=[f"FROM python:3.12-slim@{GOOD_DIGEST} AS build"],
+    )
+    enumeration = preflight.enumerate_image_sites(repo_root=root)
+    assert preflight.check_enumeration(enumeration).status == preflight.PASS
+
+    results = [
+        preflight.check_image_reference(site.reference, where=site.label)
+        for site in enumeration.sites
+    ]
+    failures = [result for result in results if result.status == preflight.FAIL]
+
+    assert len(failures) == 1, f"expected exactly the untagged reference to fail, got {failures}"
+    assert "NO TAG" in failures[0].detail
+    assert GOOD_DIGEST in failures[0].detail, "the observed reference is not reported"
+
+
+def test_gate1_accepts_tag_and_digest():
+    """The positive case, or every rejection above could hold for the wrong reason."""
+    for reference in (
+        f"caddy:2-alpine@{GOOD_DIGEST}",
+        f"timescale/timescaledb:2.26.2-pg16@{GOOD_DIGEST}",
+        f"registry.example:5000/img:1.0@{GOOD_DIGEST}",
+    ):
+        result = preflight.check_image_reference(reference)
+        assert result.status == preflight.PASS, f"{reference!r} was rejected: {result.detail}"
+
+
+def test_write_digest_writes_unpinned_reference(tmp_path):
+    """Case one of three: no digest, or the placeholder. Both are WRITES.
+
+    The placeholder is the committed marker for "not resolved yet" (CLAUDE.md § 12) and writing it
+    is the whole reason this command exists - four were replaced in Phase 10. If it were
+    classified as drift it would become the one thing --write-digest refuses to write, sending the
+    operator back to the hand-editing this removes.
+    """
+    resolved = "sha256:" + "44" * 32
+    root = _tree(
+        tmp_path,
+        compose_refs=["caddy:2-alpine", f"postgres:16@{preflight.PLACEHOLDER_DIGEST}"],
+        dockerfile_lines=[f"FROM python:3.12-slim@{preflight.PLACEHOLDER_DIGEST} AS build"],
+    )
+    run = _daemon(
+        {"caddy:2-alpine": resolved, "postgres:16": resolved, "python:3.12-slim": resolved}
+    )
+
+    assert preflight._digest_command(write=True, run=run, repo_root=root) == 0
+
+    for site in preflight.enumerate_image_sites(repo_root=root).sites:
+        assert preflight.parse_image_reference(site.reference).digest == resolved, (
+            f"{site.label} was not written: {site.reference}"
+        )
+        assert preflight.check_image_reference(site.reference).status == preflight.PASS
+
+
+def test_write_digest_noop_when_pin_resolves_identically(tmp_path):
+    """Case two of three: pinned, and the daemon agrees. The FILE BYTES must not change.
+
+    Asserted on bytes rather than on the exit code, because a rewrite that produces identical
+    content is still a rewrite - it rewrites mtime, and it is one formatting change away from
+    reflowing a file this project keeps comments in.
+    """
+    root = _tree(
+        tmp_path,
+        compose_refs=[f"caddy:2-alpine@{GOOD_DIGEST}"],
+        dockerfile_lines=[
+            "# a comment that must survive",
+            f"FROM python:3.12-slim@{GOOD_DIGEST} AS build",
+        ],
+    )
+    before = {
+        path: path.read_bytes() for path in (root / "docker-compose.yml", root / "Dockerfile.api")
+    }
+    run = _daemon({"caddy:2-alpine": GOOD_DIGEST, "python:3.12-slim": GOOD_DIGEST})
+
+    assert preflight._digest_command(write=True, run=run, repo_root=root) == 0
+
+    for path, original in before.items():
+        assert path.read_bytes() == original, f"{path.name} was rewritten on a no-op run"
+
+
+def test_write_digest_raises_when_pin_resolves_differently(tmp_path):
+    """Case three of three: pinned, and the tag has MOVED. Raise; do not rewrite.
+
+    A tag that resolves to a new digest is the event worth noticing - `latest` resolving to two
+    TimescaleDB versions three months apart cost the prior project a full session (CLAUDE.md § 5).
+    Rewriting it converts that event into a one-line diff nobody reads. Accepting the new image is
+    a human decision, taken by deleting the old digest first.
+    """
+    moved = "sha256:" + "99" * 32
+    root = _tree(
+        tmp_path,
+        compose_refs=[f"caddy:2-alpine@{GOOD_DIGEST}"],
+        dockerfile_lines=[f"FROM python:3.12-slim@{GOOD_DIGEST} AS build"],
+    )
+    before = (root / "docker-compose.yml").read_bytes()
+
+    with pytest.raises(preflight.DigestDriftError) as raised:
+        preflight._digest_command(
+            write=True,
+            run=_daemon({"caddy:2-alpine": moved, "python:3.12-slim": GOOD_DIGEST}),
+            repo_root=root,
+        )
+
+    message = str(raised.value)
+    assert GOOD_DIGEST in message, "the message does not report the digest that was written down"
+    assert moved in message, "the message does not report what the tag now resolves to"
+    assert "docker-compose.yml" in message, "the message does not name the file"
+
+    assert (root / "docker-compose.yml").read_bytes() == before, (
+        "the drifting reference was rewritten anyway - the raise is decorative"
+    )
+
+
+def test_gate1_still_enumerates_all_references(tmp_path):
+    """Regression guard on d9acd96: the walk covers every reference, not the first.
+
+    A fixture rather than the repo's own files, so it fails on the logic rather than on somebody
+    legitimately adding a service. Two multi-stage Dockerfiles plus a compose file, because that
+    is the shape that made the old gate check one reference out of five while reporting the stack
+    as pinned (CLAUDE.md § 22).
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        f"services:\n"
+        f"  db:\n    image: postgres:16@{GOOD_DIGEST}\n"
+        f"  proxy:\n    image: caddy:2-alpine@{GOOD_DIGEST}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "Dockerfile.api").write_text(
+        f"FROM python:3.12-slim@{GOOD_DIGEST} AS build\n"
+        f"FROM python:3.12-slim@{GOOD_DIGEST} AS runtime\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "Dockerfile.frontend").write_text(
+        f"FROM node:22-bookworm-slim@{GOOD_DIGEST} AS build\n"
+        f"FROM node:22-bookworm-slim@{GOOD_DIGEST} AS artifact\n",
+        encoding="utf-8",
+    )
+
+    enumeration = preflight.enumerate_image_sites(repo_root=tmp_path)
+
+    assert len(enumeration.sites) == 6, (
+        f"the walk found {len(enumeration.sites)} of 6 references: "
+        f"{[site.label for site in enumeration.sites]}"
+    )
+    assert len(enumeration.files_walked) == 3
+    assert {site.path.name for site in enumeration.sites} == {
+        "docker-compose.yml",
+        "Dockerfile.api",
+        "Dockerfile.frontend",
+    }
+    assert preflight.check_enumeration(enumeration).status == preflight.PASS
+
+
+# ---------------------------------------------------------------------------------------------
 # 4-7: the .env secrets
 # ---------------------------------------------------------------------------------------------
 

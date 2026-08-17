@@ -57,6 +57,25 @@ PLACEHOLDER_DIGEST = "sha256:" + "0" * 64
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 PASSWORD_RE = re.compile(r"^[0-9a-f]{64}$")
 
+# `FROM ${BASE_IMAGE}` / `FROM $BASE`. Matches a `$` anywhere in the reference, braced or not,
+# because either spelling makes the reference unresolvable at read time.
+INTERPOLATION_RE = re.compile(r"\$")
+
+# `FROM scratch` names Docker's empty base. It is a reserved pseudo-stage rather than a registry
+# reference: there is nothing to pull and nothing to pin.
+SCRATCH = "scratch"
+
+
+class DigestDriftError(RuntimeError):
+    """An already-pinned reference resolved to a digest other than the one written down.
+
+    Raised rather than rewritten. A tag that resolves to a new digest IS the incident - it is
+    `latest` resolving to two TimescaleDB versions wearing a different hat (CLAUDE.md § 5) - and
+    silently rewriting converts the interesting event into a clean diff nobody reads. Accepting a
+    new digest is a human decision, taken by deleting the old one first.
+    """
+
+
 PASS = "PASS"
 FAIL = "FAIL"
 SKIP = "SKIP"
@@ -135,6 +154,22 @@ def check_image_reference(reference: str, where: str | None = None) -> Result:
     """
     parsed = parse_image_reference(reference)
     site = f"{where} " if where else ""
+
+    # BEFORE the digest check, deliberately. An interpolated reference has no digest either, so
+    # falling through to the check below produces a TRUE failure with a WRONG diagnosis: it sends
+    # the reader looking for a digest to add, and the fix that suggests - interpolating a digest
+    # variable too - passes the gate and pins nothing.
+    if INTERPOLATION_RE.search(parsed.raw):
+        return Result(
+            f"{site}image reference is written literally",
+            FAIL,
+            f"observed: {parsed.raw}\n"
+            f"         the reference is INTERPOLATED. A base image assembled from a build "
+            f"argument or environment variable cannot be statically verified as pinned - what it "
+            f"resolves to depends on who invoked the build and with what. Write the base image "
+            f"literally as name:tag@sha256:..., and do NOT satisfy this by interpolating the "
+            f"digest as well: that passes this gate and pins nothing.",
+        )
 
     if parsed.digest is None:
         return Result(
@@ -261,10 +296,16 @@ def dockerfile_from_sites(
     pin. It is returned separately rather than dropped, because a reference this walk declined to
     check has to be visible in the walk's own report - an unmentioned omission is indistinguishable
     from a reference nobody enumerated.
+
+    `FROM scratch` is declined the same way, by seeding the declared-stage set with it. Docker
+    reserves the name for the empty base, so there is no registry reference behind it and nothing
+    to pull. Handling it here, as a name rather than as a special case at the check, is what keeps
+    the alternative off the table: a broad "skip references that fail to parse" clause at the gate
+    would swallow real misses alongside it.
     """
     sites: list[ImageSite] = []
     stage_references: list[str] = []
-    declared: set[str] = set()
+    declared: set[str] = {SCRATCH}
 
     for number, line in enumerate(dockerfile_text.splitlines(), start=1):
         match = _FROM_LINE_RE.match(line)
@@ -380,8 +421,8 @@ def check_enumeration(enumeration: Enumeration) -> Result:
     detail = f"{len(enumeration.sites)} reference(s) across {len(enumeration.files_walked)} file(s) - {breakdown}"
     if enumeration.stage_references:
         detail += (
-            "\n         not checked (intra-file stage references, no digest to pin): "
-            + ", ".join(enumeration.stage_references)
+            "\n         not checked (no registry reference to pin - intra-file stage names and "
+            "`scratch`): " + ", ".join(enumeration.stage_references)
         )
     return Result(name, PASS, detail)
 
@@ -868,15 +909,36 @@ def _digest_command(write: bool, run=subprocess.run, repo_root: Path = REPO_ROOT
             resolved[tag] = digest
 
         digest = resolved[tag]
-        current = parsed.digest or "(none)"
+        current = parsed.digest
 
         print(f"  {site.label:<32} {tag}")
         if current == digest:
             print(f"      {current}   unchanged")
             continue
 
+        # Three cases, distinguished explicitly, because only two of them are writes.
+        #
+        # THE PLACEHOLDER IS UNPINNED, NOT DRIFT. It is the committed marker for "this digest has
+        # not been resolved yet" (CLAUDE.md § 12), chosen precisely because it cannot resolve, and
+        # writing it is the entire reason this command exists - four were replaced in Phase 10.
+        # Classifying it as drift would make the placeholder the one thing --write-digest refuses
+        # to write, and send the operator straight back to the hand-editing this removes.
+        if current is not None and current != PLACEHOLDER_DIGEST:
+            raise DigestDriftError(
+                f"{site.label} is ALREADY PINNED and {tag} now resolves to a different digest.\n"
+                f"  written:  {current}\n"
+                f"  resolves: {digest}\n"
+                f"  file:     {site.path}:{site.line_number}\n\n"
+                f"Not rewritten. A tag that resolves to a new digest is the event worth noticing - "
+                f"it is `latest` resolving to two TimescaleDB versions three months apart wearing a "
+                f"different hat (CLAUDE.md § 5) - and rewriting it here would turn that event into "
+                f"a one-line diff nobody reads.\n"
+                f"Accepting the new image is a human decision: delete the old digest from the line, "
+                f"leaving {tag}, and re-run --write-digest."
+            )
+
         changes += 1
-        print(f"      {current}\n   -> {digest}   WOULD CHANGE")
+        print(f"      {current or '(none)'}\n   -> {digest}   WOULD WRITE")
         replacements.setdefault(site.path, []).append(
             (site.line_number, site.reference, resolved_reference(site.reference, digest))
         )
@@ -938,7 +1000,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.resolve_digest or args.write_digest:
-        return _digest_command(write=args.write_digest, run=subprocess.run)
+        try:
+            return _digest_command(write=args.write_digest, run=subprocess.run)
+        except DigestDriftError as exc:
+            # Non-zero and loud. Nothing was written; the files still hold the old digests.
+            print(f"\nFAIL: {exc}", file=sys.stderr)
+            return 1
 
     if args.dry_run:
         enumeration = enumerate_image_sites()
