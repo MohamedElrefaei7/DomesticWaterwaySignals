@@ -409,11 +409,16 @@ def _command_literals() -> list[tuple[str, int, list[str]]]:
 
 
 def _dynamic_shell_run_sites() -> list[tuple[str, int]]:
-    """`shell.run(...)` calls whose first argument is neither a list literal nor a plain name.
+    """`shell.run(...)` calls whose argv this walk cannot identify.
 
-    An argv assembled inline - `["terraform"] + verbs`, or a list whose first element is an
-    f-string - is one `_command_literals` cannot read, and an unreadable command is an unchecked
-    one.
+    ARGUMENTS MAY BE INTERPOLATED; THE VERB MAY NOT. `["aws", "route53", "get-health-check",
+    "--health-check-id", health_check_id]` is fine and necessary - the id comes from state. What is
+    refused is an argv whose FIRST element is not a literal, because then neither this walk nor a
+    reader can say which binary is being run: `[binary] + verbs` reads as configurable and is
+    exactly the shape that makes the allow-list unverifiable from the source.
+
+    A plain name is permitted, because it is a forwarded argv whose literal lives at the call site
+    and is caught by `_command_literals` there.
     """
     offenders: list[tuple[str, int]] = []
     for path in _package_modules():
@@ -432,8 +437,11 @@ def _dynamic_shell_run_sites() -> list[tuple[str, int]]:
             first = node.args[0]
             if isinstance(first, ast.Name):
                 continue
-            if isinstance(first, ast.List) and all(
-                isinstance(e, ast.Constant) and isinstance(e.value, str) for e in first.elts
+            if (
+                isinstance(first, ast.List)
+                and first.elts
+                and isinstance(first.elts[0], ast.Constant)
+                and isinstance(first.elts[0].value, str)
             ):
                 continue
             offenders.append((path.name, node.lineno))

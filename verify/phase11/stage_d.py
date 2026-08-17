@@ -241,3 +241,282 @@ def checks(planfile: str, state_bucket: str | None = None) -> Sequence[Check]:
         lambda: check_iam_allows_no_wildcard(plan),
         lambda: check_iam_excludes_the_state_bucket(plan, bucket),
     ]
+
+
+# =============================================================================================
+# Stage D post-apply - D6 (the search string), D7 (the raw bytes), D8 (subscription and budget)
+# =============================================================================================
+#
+# THE SEARCH STRING IS READ FROM DEPLOYED STATE AND ASSERTED AGAINST LIVE RESPONSE BYTES.
+#
+# Neither half alone is a check. Comparing the Terraform literal to the application's constant is
+# two files in a repo agreeing with each other, which they will keep doing while the monitor is
+# blind. Fetching the endpoint and looking for a string this module hardcoded proves the API says
+# something, not that ROUTE53 is looking for it. So: read what the health check is ACTUALLY
+# configured to search for, fetch what the endpoint ACTUALLY returns through Caddy, and assert one
+# contains the other.
+#
+# D7 IS A SEPARATE STEP FROM D6 FOR ONE REASON: compression. Route53 matches the literal against
+# the first 5,120 bytes of the body AS SENT. Caddy compresses, and a compressed body leaves every
+# app-side test green while the monitor never matches again. `fetch.get` sets
+# `Accept-Encoding: identity` explicitly - see that module's docstring for why the urllib default
+# happening to work is worse than it failing.
+
+from verify.phase11 import fetch  # noqa: E402
+from verify.phase11.result import Precondition  # noqa: E402
+
+HEALTH_PATH = "/api/health"
+
+# The literal string AWS returns for a subscription nobody has clicked the confirmation link for.
+# It is a STATE, not an error, and every AWS call about it succeeds - which is why it needs its own
+# assertion rather than being noticed.
+PENDING_CONFIRMATION = "PendingConfirmation"
+
+
+def _state_outputs() -> dict[str, Any]:
+    from verify.phase11.stage_c import TERRAFORM_DIR
+
+    from verify.phase11 import shell
+
+    completed = shell.run(["terraform", "show", "-json"], cwd=TERRAFORM_DIR)
+    if completed.returncode != 0:
+        raise Precondition(
+            f"d-post: `terraform show -json` exited {completed.returncode}: "
+            f"{completed.stderr.strip() or '(no stderr)'}"
+        )
+    import json as _json
+
+    try:
+        document = _json.loads(completed.stdout)
+    except _json.JSONDecodeError as exc:
+        raise Precondition(f"d-post: `terraform show -json` output is not JSON: {exc}") from exc
+    return (document.get("values") or {}).get("outputs") or {}
+
+
+def _output(name: str) -> str:
+    outputs = _state_outputs()
+    if name not in outputs:
+        raise Precondition(
+            f"d-post: no `{name}` output in state. observed outputs: {sorted(outputs)}. "
+            f"Stage D's apply creates it, so this usually means the apply has not run."
+        )
+    return str(outputs[name].get("value", ""))
+
+
+def health_check_id_from_state() -> str:
+    """Route53 health check id, from the Terraform OUTPUT rather than from a note somewhere."""
+    return _output("api_health_check_id")
+
+
+def alerts_topic_arn_from_state() -> str:
+    return _output("alerts_topic_arn")
+
+
+def search_string_from_route53(health_check_id: str) -> str:
+    """What the health check is ACTUALLY configured to look for. Never a constant in this file.
+
+    `test_d_post_reads_search_string_from_state_not_a_constant` drives a DIFFERENT string through
+    here and requires the verdict to follow it, so a hardcoded `"degraded":false` fails that test
+    rather than passing for the wrong reason.
+    """
+    from verify.phase11 import shell
+
+    completed = shell.run(
+        ["aws", "route53", "get-health-check", "--health-check-id", health_check_id]
+    )
+    if completed.returncode != 0:
+        raise Precondition(
+            f"d-post: get-health-check exited {completed.returncode}: "
+            f"{completed.stderr.strip() or '(no stderr)'}"
+        )
+    import json as _json
+
+    try:
+        payload = _json.loads(completed.stdout)
+    except _json.JSONDecodeError as exc:
+        raise Precondition(f"d-post: get-health-check output is not JSON: {exc}") from exc
+
+    config = (payload.get("HealthCheck") or {}).get("HealthCheckConfig") or {}
+    search = config.get("SearchString")
+    if not search:
+        raise Precondition(
+            f"d-post: health check {health_check_id} has no SearchString "
+            f"(Type={config.get('Type')!r}). An HTTPS_STR_MATCH check without one matches nothing, "
+            f"and a check of another type is watching only for a status code."
+        )
+    return search
+
+
+def check_search_string_is_in_the_body(
+    search_string: str, response: fetch.Response
+) -> CheckResult:
+    """The bytes Route53 looks for are in the bytes the edge actually sends.
+
+    Byte comparison, not string comparison, and no decoding first: a codec normalising the body is
+    a codec normalising away the difference being looked for.
+    """
+    name = "the live body contains Route53's search string"
+    expected = f"{search_string!r} present in the first 5120 bytes of the body"
+    encoding = response.header("Content-Encoding")
+    window = response.body[:5120]
+    needle = search_string.encode("utf-8")
+
+    if response.status != 200:
+        return failed(name, expected, f"HTTP {response.status} from {HEALTH_PATH}")
+
+    if needle not in window:
+        return failed(
+            name,
+            expected,
+            f"absent. Content-Encoding={encoding!r}, {len(response.body)} bytes, "
+            f"body starts {window[:120]!r}. "
+            f"A Content-Encoding other than identity is the whole reason this step exists: "
+            f"Route53 matches the literal against the bytes AS SENT, so a compressed body leaves "
+            f"every application-side test green while the monitor never matches again.",
+        )
+
+    if encoding not in (None, "identity"):
+        return failed(
+            name,
+            expected,
+            f"the string is present but Content-Encoding={encoding!r}. The request asked for "
+            f"identity and the edge compressed anyway, so what Route53 receives is not this.",
+        )
+    return passed(
+        name,
+        expected,
+        f"present, Content-Encoding={encoding!r}, {len(response.body)} bytes",
+    )
+
+
+def check_subscription_is_confirmed(subscriptions: Sequence[dict[str, Any]]) -> CheckResult:
+    """`PendingConfirmation` is the literal failure, not a state to wait out.
+
+    An unconfirmed subscription delivers nothing. Every AWS call about it succeeds, the topic
+    exists, the alarm is wired to it, and the first anybody knows is the outage nobody was emailed
+    about. This is CONTEXT.md § Up Next item 5, made into an assertion.
+    """
+    name = "the SNS email subscription is confirmed"
+    expected = "at least one subscription whose SubscriptionArn is a real ARN"
+    if not subscriptions:
+        return failed(
+            name, expected, "0 subscriptions on the topic - the email was never subscribed"
+        )
+
+    pending = [
+        s for s in subscriptions if s.get("SubscriptionArn") == PENDING_CONFIRMATION
+    ]
+    confirmed = [
+        s for s in subscriptions if s.get("SubscriptionArn", "").startswith("arn:")
+    ]
+    if not confirmed:
+        return failed(
+            name,
+            expected,
+            f"{len(pending)} of {len(subscriptions)} still {PENDING_CONFIRMATION}. Nothing is "
+            f"delivered until somebody clicks the link in the confirmation email.",
+        )
+    if pending:
+        return failed(
+            name,
+            expected,
+            f"{len(confirmed)} confirmed but {len(pending)} still {PENDING_CONFIRMATION}: "
+            f"{[s.get('Endpoint') for s in pending]}",
+        )
+    return passed(
+        name,
+        expected,
+        f"{len(confirmed)} confirmed: {[s.get('Endpoint') for s in confirmed]}",
+    )
+
+
+def check_budget_exists(budget: dict[str, Any], expected_limit: str) -> CheckResult:
+    """The budget is real and its limit is the one in `variables.tf`.
+
+    § Up Next item 6 has been open with status unknown since Phase 10. A budget nobody has
+    confirmed exists is the same class of thing as an alarm nobody has watched fire.
+    """
+    name = "the monthly budget exists with the configured limit"
+    expected = f"BudgetType COST, LimitAmount {expected_limit}"
+    if not budget:
+        return failed(name, expected, "no budget returned")
+
+    amount = (budget.get("BudgetLimit") or {}).get("Amount")
+    budget_type = budget.get("BudgetType")
+    observed = f"BudgetType={budget_type!r} LimitAmount={amount!r} name={budget.get('BudgetName')!r}"
+
+    if budget_type != "COST":
+        return failed(name, expected, observed)
+    # String comparison on the numeric value: AWS returns "25" or "25.0" depending on how it was
+    # set, so the compare is on float with the raw values reported either way.
+    try:
+        if float(amount) != float(expected_limit):
+            return failed(name, expected, observed)
+    except (TypeError, ValueError):
+        return failed(name, expected, observed)
+    return passed(name, expected, observed)
+
+
+def checks_d_post(base_url: str = "https://bargeanalysis.com") -> Sequence[Check]:
+    from verify.phase11.stage_c import _aws_json
+
+    health_check_id = health_check_id_from_state()
+    search_string = search_string_from_route53(health_check_id)
+    response = fetch.get(f"{base_url}{HEALTH_PATH}")
+
+    topic_arn = alerts_topic_arn_from_state()
+    subscriptions = (
+        _aws_json(
+            ["aws", "sns", "list-subscriptions-by-topic", "--topic-arn", topic_arn],
+            what="d-post subscriptions",
+        ).get("Subscriptions")
+        or []
+    )
+
+    identity = _aws_json(["aws", "sts", "get-caller-identity"], what="d-post account id")
+    budgets = _aws_json(
+        ["aws", "budgets", "describe-budgets", "--account-id", str(identity.get("Account", ""))],
+        what="d-post budgets",
+    )
+    limit = _budget_limit_from_variables()
+    budget_name = _budget_name_from_variables()
+    budget = next(
+        (b for b in (budgets.get("Budgets") or []) if b.get("BudgetName") == budget_name), {}
+    )
+
+    return [
+        lambda: check_search_string_is_in_the_body(search_string, response),
+        lambda: check_subscription_is_confirmed(subscriptions),
+        lambda: check_budget_exists(budget, limit),
+    ]
+
+
+def _budget_limit_from_variables() -> str:
+    """`var.monthly_budget_usd`'s default, READ from variables.tf rather than restated here."""
+    return _variable_default("monthly_budget_usd")
+
+
+def _budget_name_from_variables() -> str:
+    return f"{_variable_default('project_name')}-monthly"
+
+
+def _variable_default(variable: str) -> str:
+    import re as _re
+
+    from verify.phase11.stage_c import TERRAFORM_DIR
+
+    path = TERRAFORM_DIR / "variables.tf"
+    if not path.exists():
+        raise Precondition(f"d-post: {path} does not exist; cannot read {variable}'s default")
+    text = path.read_text(encoding="utf-8")
+    start = text.find(f'variable "{variable}"')
+    if start == -1:
+        raise Precondition(f'd-post: no `variable "{variable}"` block in {path}')
+    end = len(text)
+    position = text.find('\nvariable "', start + 1)
+    if position != -1:
+        end = position
+    match = _re.search(r'^\s*default\s*=\s*"?([^"\n]+)"?', text[start:end], _re.MULTILINE)
+    if match is None:
+        raise Precondition(f'd-post: no `default` inside `variable "{variable}"` in {path}')
+    return match.group(1).strip()

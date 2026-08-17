@@ -21,7 +21,7 @@ import argparse
 import sys
 from typing import Callable, Sequence
 
-from verify.phase11 import stage_c, stage_d
+from verify.phase11 import stage_c, stage_d, stage_i, stage_j
 from verify.phase11.result import EXIT_PRECONDITION, Check, Precondition, report
 
 # stage identifier -> builder taking the stage's positional arguments and returning its checks.
@@ -31,6 +31,9 @@ STAGES: dict[str, Callable[..., Sequence[Check]]] = {
     "c-pre": stage_c.checks_c_pre,
     "c-post": stage_c.checks_c_post,
     "d-pre": stage_d.checks,
+    "d-post": stage_d.checks_d_post,
+    "i": stage_i.checks,
+    "j": stage_j.checks,
 }
 
 
@@ -63,7 +66,35 @@ def main(argv: list[str] | None = None) -> int:
         dest="as_json",
         help="emit a machine-readable summary on stdout; a human transcribes it into the log",
     )
+    # Stage-specific options. They are forwarded ONLY when given, so a flag passed to a stage that
+    # does not take it is a TypeError caught below and reported as a usage error (exit 2) rather
+    # than being silently ignored - a flag that does nothing is worse than one that is rejected.
+    parser.add_argument(
+        "--expect",
+        choices=("Success", "Failure"),
+        help="stage i: the Route53 verdict to wait for",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        help="stage i: seconds to poll before giving up (exit 2, never exit 1)",
+    )
+    parser.add_argument(
+        "--base-url",
+        dest="base_url",
+        help="stages d-post and j: the origin to fetch, e.g. https://bargeanalysis.com",
+    )
     parsed = parser.parse_args(argv)
+
+    options = {
+        name: value
+        for name, value in (
+            ("expect", parsed.expect),
+            ("timeout", parsed.timeout),
+            ("base_url", parsed.base_url),
+        )
+        if value is not None
+    }
 
     registered = ", ".join(sorted(STAGES)) or "(none registered yet)"
 
@@ -81,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_PRECONDITION
 
     try:
-        checks = builder(*parsed.args)
+        checks = builder(*parsed.args, **options)
     except TypeError as exc:
         # Wrong arity for the stage - a usage error, not a failed check.
         print(f"usage error: stage {parsed.stage!r}: {exc}", file=sys.stderr)
