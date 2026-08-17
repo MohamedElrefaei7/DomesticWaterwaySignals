@@ -57,6 +57,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
 from app import db
+from app.orchestration import session
 from app.ingest import socrata_client
 from app.ingest.socrata_client import (
     ABSENT,
@@ -497,5 +498,5 @@ def usda_rates_ingest_job(url: str | None = None, client=None, today: date | Non
     row whose status is the AND of two independent things, and the heartbeat then cannot say which
     one went quiet. The three rates datasets are not two sources - see ingest().
     """
-    with db.connection(url) as conn:
+    with session.writing(url) as conn:
         return ingest(conn, client=client, today=today)

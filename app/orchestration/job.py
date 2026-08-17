@@ -26,6 +26,7 @@ import logging
 from datetime import datetime, timezone
 
 from app import db
+from app.orchestration import session
 
 logger = logging.getLogger(__name__)
 
@@ -100,13 +101,12 @@ def _open_run(url: str | None, job_name: str) -> int:
     Committed before the caller is allowed to start work. Everything about this function's
     correctness is in the fact that it returns only after the commit.
     """
-    with db.connection(url) as conn:
+    with session.writing(url) as conn:
         run_id = conn.execute(
             "INSERT INTO job_runs (job_name, started_at, status) VALUES (%s, %s, 'running')"
             " RETURNING run_id",
             (job_name, _now()),
         ).fetchone()[0]
-        conn.commit()
     return run_id
 
 
@@ -120,13 +120,12 @@ def _close_run(url: str | None, run_id: int, status: str, rows_written, error_me
     for hours, and an idle connection held across it is a connection that a database restart,
     a network blip, or a server-side idle timeout will have quietly killed by the time it matters.
     """
-    with db.connection(url) as conn:
+    with session.writing(url) as conn:
         conn.execute(
             "UPDATE job_runs SET status = %s, finished_at = %s, rows_written = %s,"
             " error_message = %s WHERE run_id = %s",
             (status, _now(), rows_written, error_message, run_id),
         )
-        conn.commit()
 
 
 def job(job_name: str, *, url: str | None = None):

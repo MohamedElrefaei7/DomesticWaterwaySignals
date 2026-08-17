@@ -54,6 +54,7 @@ if __package__ in (None, ""):  # pragma: no cover - the CLI path, not the test s
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app import db
+from app.orchestration import session
 from app.analogs import events, gate as gate_module, outcomes, parameters, render, similarity
 from app.features.targets import TARGET_HORIZON, TARGET_LOCATION
 
@@ -637,7 +638,7 @@ def main(argv=None) -> int:  # pragma: no cover - the live-verification path
 
     as_of = datetime.strptime(args.as_of, "%Y-%m-%d").date()
 
-    with db.connection() as conn:
+    with session.writing() as conn:
         result = query(conn, as_of=as_of, site_id=args.site, persist=not args.no_persist)
 
     _print_result(result, args.explain)

@@ -50,6 +50,7 @@ if __package__ in (None, ""):  # pragma: no cover - the CLI path, not the test s
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app import db
+from app.orchestration import session
 from app.features import registry, rollup, targets as targets_module
 from app.orchestration.job import job
 
@@ -272,7 +273,7 @@ def features_build_job(url: str | None = None, today: date | None = None) -> int
     """
     today = datetime.now(timezone.utc).date() if today is None else today
     start, end = window_for(today)
-    with db.connection(url) as conn:
+    with session.writing(url) as conn:
         result = build(conn, start, end)
     return result["gauge_daily_rows"] + result["feature_rows"] + result["target_rows"]
 
@@ -327,7 +328,7 @@ def main(argv=None) -> int:  # pragma: no cover - the live-verification path
     )
 
     started = datetime.now(timezone.utc)
-    with db.connection() as conn:
+    with session.writing() as conn:
         result = build(conn, start, end)
     elapsed = datetime.now(timezone.utc) - started
 

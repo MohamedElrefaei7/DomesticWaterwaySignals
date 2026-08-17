@@ -36,6 +36,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from app import db
+from app.orchestration import session
 from app.orchestration.job import job
 
 logger = logging.getLogger(__name__)
@@ -538,21 +539,22 @@ def backup_nightly_job(
         copy_to_monthly(s3, bucket, daily_key, f"{MONTHLY_PREFIX}{archive_path.name}")
 
     finished_at = datetime.now(timezone.utc)
-    with db.connection(url) as conn:
+    # THE COMMIT IS THE CONTEXT MANAGER'S, NOT THIS FUNCTION'S. `session.writing` commits on a
+    # clean exit and rolls back on an exception; `db.connection` commits nothing implicitly
+    # (app/db.py), which is the correct default and is what this line used to get wrong.
+    #
+    # The defect this replaces: the job reported success, job_runs recorded success, S3 held a
+    # verified archive, and the `backups` row was silently rolled back on close - so the next
+    # run's size floor had nothing to compare against and the restore test found no backup to
+    # restore. A layer reporting success while the thing downstream receives nothing, § 2's theme
+    # 1, caught by a test rather than by review. Stage B then measured that eight of ten write
+    # paths could lose their commit with the suite still green, which is why the boundary now
+    # lives in a helper instead of in a line every call site has to remember.
+    with session.writing(url) as conn:
         backup_id = record_backup(
             conn, bucket=bucket, key=daily_key, byte_size=byte_size,
             snapshot=snapshot, started_at=started_at, finished_at=finished_at,
         )
-        # EXPLICIT, because `db.connection` deliberately commits nothing implicitly (app/db.py) -
-        # psycopg's own context manager would have committed here and this project's wrapper will
-        # not, precisely so that the difference is never accidental.
-        #
-        # Without this the job reports success, job_runs records success, S3 holds a verified
-        # archive, and the `backups` row is silently rolled back on close - so the next run's size
-        # floor has nothing to compare against and the restore test finds no backup to restore.
-        # A layer reporting success while the thing downstream receives nothing: § 2's theme 1,
-        # caught by test_backup_integration_end_to_end rather than by review.
-        conn.commit()
 
     # ONLY NOW. If verification had failed the file would still be here, and the error would say
     # where - the local archive is the only copy known to restore.

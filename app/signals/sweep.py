@@ -63,6 +63,7 @@ if __package__ in (None, ""):  # pragma: no cover - the CLI path, not the test s
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app import db
+from app.orchestration import session
 from app.features import targets as targets_module
 from app.signals import pairs as pairs_module
 from app.signals import regimes as regimes_module
@@ -751,7 +752,7 @@ def main(argv=None) -> int:  # pragma: no cover - the live-verification path
         return 2
 
     started = datetime.now(timezone.utc)
-    with db.connection() as conn:
+    with session.writing() as conn:
         result = run(
             conn,
             lag_min=args.lag_min,

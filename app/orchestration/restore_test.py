@@ -37,7 +37,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app import db
-from app.orchestration import backup
+from app.orchestration import backup, session
 from app.orchestration.job import job
 
 logger = logging.getLogger(__name__)
@@ -561,7 +561,7 @@ def restore_test_monthly_job(
 
         # ONLY AFTER EVERY ASSERTION. Marking before them would leave a verification mark on a
         # backup whose restore then failed, which is worse than no mark at all.
-        with db.connection(url) as conn:
+        with session.writing(url) as conn:
             mark_verified(
                 conn,
                 record["backup_id"],
@@ -569,7 +569,6 @@ def restore_test_monthly_job(
                 f"{len(counts)} tables compared, {chunks} compressed chunks, "
                 f"restored from s3://{record['s3_bucket']}/{record['s3_key']}",
             )
-            conn.commit()
 
         succeeded = True
         logger.info(

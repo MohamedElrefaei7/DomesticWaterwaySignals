@@ -44,6 +44,7 @@ if __package__ in (None, ""):  # pragma: no cover - the CLI path, not the test s
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app import db
+from app.orchestration import session
 from app.ingest import socrata_client, usda_movements, usda_rates
 from app.ingest.socrata_client import SocrataClient
 
@@ -323,7 +324,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - the live-v
     keys = args.datasets or sorted(INGESTORS)
     started = datetime.now(timezone.utc)
     results = []
-    with db.connection() as conn:
+    with session.writing() as conn:
         for key in keys:
             results.append(backfill(conn, key))
     elapsed = datetime.now(timezone.utc) - started

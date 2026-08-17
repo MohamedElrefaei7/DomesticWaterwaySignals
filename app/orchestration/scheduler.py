@@ -37,7 +37,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from app import db
 from app.features import build as features_build
 from app.ingest import usda_movements, usda_rates, usgs_daily_ingest, usgs_ingest
-from app.orchestration import backup, heartbeat, restore_test
+from app.orchestration import backup, heartbeat, restore_test, session
 from app.orchestration.cadence import CADENCES
 
 logger = logging.getLogger(__name__)
@@ -107,7 +107,7 @@ def _on_job_missed(event, url: str | None = None) -> None:
     """
     scheduled_for = getattr(event, "scheduled_run_time", None) or datetime.now(timezone.utc)
     try:
-        with db.connection(url) as conn:
+        with session.writing(url) as conn:
             conn.execute(
                 "INSERT INTO job_runs (job_name, started_at, finished_at, status, error_message)"
                 " VALUES (%s, %s, %s, 'missed', %s)",
@@ -119,7 +119,6 @@ def _on_job_missed(event, url: str | None = None) -> None:
                     f"job's misfire grace window",
                 ),
             )
-            conn.commit()
         logger.warning("job %r missed its run scheduled for %s", event.job_id, scheduled_for)
     except Exception:
         logger.exception(

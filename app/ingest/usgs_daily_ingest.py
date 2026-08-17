@@ -25,6 +25,7 @@ if __package__ in (None, ""):  # pragma: no cover - the CLI path, not the test s
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app import db
+from app.orchestration import session
 from app.ingest import gauges as gauges_module
 from app.ingest.usgs_daily_client import STAT_MEAN, UsgsDailyClient
 from app.orchestration.job import job
@@ -184,7 +185,7 @@ def usgs_daily_ingest_job(url: str | None = None, client=None, today: date | Non
     has already been fetched and not revised - the freshness registry, not this number, is what
     notices a source that has gone quiet.
     """
-    with db.connection(url) as conn:
+    with session.writing(url) as conn:
         return ingest(conn, client=client, today=today)
 
 

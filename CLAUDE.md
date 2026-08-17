@@ -1315,3 +1315,65 @@ inside the system is behaving exactly as designed.
   and every `FROM`, reports each by file and line, and **fails when the walk finds no Dockerfiles or
   no references** — because a gate that passes over an empty collection is green forever and
   watching nothing (§ 21's "a static assertion must prove it resolved the source tree first").
+
+---
+
+## 23. Transaction boundaries, and the tests that can see them
+
+Learned auditing the Phase 11 rollback defect (Stage B). §§ 14–16 govern data a source published,
+§ 17 data this project computed, § 18 claims about relationships, § 19 claims about the last few
+times conditions looked like this, § 20 what happens through a JSON encoder, § 21 what a human sees,
+§ 22 who can reach any of it. **This governs whether what a job says it wrote is in the database.**
+
+It is § 2's theme 1 in its purest available form. The nightly backup's `backups` INSERT was
+discarded on close: the job returned, `job_runs` recorded success, S3 held a verified archive, and
+every layer agreed with itself. Nothing was wrong anywhere except that the row was not there.
+
+- **`db.connection` commits nothing implicitly, and that default stays.** psycopg's own context
+  manager commits on a clean exit; this project's wrapper does not, because there are places where
+  the difference between committed and not committed is the entire point of the code, and a default
+  that hides it makes the distinction accidental rather than stated.
+- **The cost of that default is paid by a helper, not by every call site's memory.**
+  `app/orchestration/session.writing()` commits on a clean exit, rolls back on `BaseException`, and
+  always re-raises. Write paths use it; a path that forgets to commit no longer loses its work
+  silently, because there is nothing left to forget. **Three kinds of call site are exempt and each
+  is named in an exact-set allow-list with its reason** — read-only paths, the migration runner
+  (whose transaction boundaries ARE its correctness argument, § 3 and § 12), and connections whose
+  transaction is itself the point (the dump's exported snapshot, the throwaway's autocommit).
+  Allow-list by exact equality with per-function COUNTS, like every other allowlist here (§§ 8, 11,
+  22): a new bare call fails until somebody writes down which kind it is, a removed one fails too,
+  and a second raw connection inside an already-permitted function is caught rather than absorbed.
+- **A test that verifies a write through the session that made it cannot distinguish committed from
+  uncommitted, and is the test that passed on the broken backup job.** Every write path gets an
+  integration test that drives the real entrypoint and reads back on a connection opened **after the
+  writer's connection is closed**. **The claim relied on is that the writer's TRANSACTION has ended,
+  never merely that the reader is a different session object** — the two are different claims, and
+  only the first survives the introduction of a connection pool. State which one a test depends on.
+- **Measured, because the scale of this is the argument for the helper: deleting each write path's
+  commit left EIGHT OF TEN paths' tests green** (2026-08-17). Five of eight job entrypoints were
+  never invoked by any test; two ingest functions were never called at any level. The one defect
+  that was caught was not caught because that path was written more carefully — it was caught
+  because its test happened to drive the real job and read back on a fresh connection.
+- **An early commit and a late commit in the same function cannot be told apart by any assertion
+  made after a successful run.** Where a path commits before long work (the sweep's `signal_runs`
+  row, the `@job` decorator's `running` row) the guard must make the work FAIL and assert the early
+  row survives. A test asserting the final state passes with the early commit deleted, because the
+  later one writes the same row — measured, on a test whose docstring already claimed to cover both.
+- **A source-text test is legitimate when the source text IS the invariant, and illegitimate when it
+  is a proxy for behaviour. These read as contradictory and are one rule, so they are written
+  together and must stay together.** Phase 11 had three tests that grepped their own module's
+  docstrings for a phrase; the behaviour could change freely while the sentence stayed, so the test
+  was pinned to the comment. That is illegitimate — not because it reads source, but because the
+  source was standing in for something else. A test asserting that no write path opens a raw
+  connection reads source too, and is direct evidence: the call site is the whole property, and a
+  bare connection that never executes is exactly as much of a violation as one that does. **The
+  operational test of which kind you have: mutate the behaviour. Under the illegitimate kind the
+  test stays green — that is the failure. Under the legitimate kind there is no behaviour to mutate,
+  only the source, and mutating it turns the test red.**
+- **A source-scanning guard walks the AST, never a regex, and confirms both that it resolved the
+  source tree and that it found something.** The modules this guard covers contain the forbidden
+  call in their own docstrings, in the sentences explaining why it is forbidden; a regex matches its
+  own explanation, fails permanently, and the fix somebody reaches for is a weaker pattern. Guard
+  precision with an INVERTED mutation — put the forbidden call in a comment and require the test to
+  stay **green** — because a guard that is merely strict is not the same as one that is correct, and
+  only the second survives a codebase that documents itself.

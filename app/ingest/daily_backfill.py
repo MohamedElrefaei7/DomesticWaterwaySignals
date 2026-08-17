@@ -67,6 +67,7 @@ if __package__ in (None, ""):  # pragma: no cover - the CLI path, not the test s
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app import db
+from app.orchestration import session
 from app.ingest import gauges as gauges_module
 from app.ingest import usgs_daily_ingest
 from app.ingest.usgs_client import MissingSeriesError
@@ -481,7 +482,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - the live-v
         return 2
 
     started = datetime.now(timezone.utc)
-    with db.connection() as conn:
+    with session.writing() as conn:
         results = backfill(
             conn,
             site_ids=args.sites,
