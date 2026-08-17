@@ -23,7 +23,7 @@ import pytest
 from app.ingest import daily_backfill, usgs_daily_ingest
 from app.ingest import gauges as gauges_module
 from app.ingest.gauges import EXPECTED, UNEXPLAINED, KnownGap
-from tests.ingest.test_daily_backfill import ConnStub, ScriptedDailyClient, daily, gauge
+from tests.ingest.test_daily_backfill import ConnStub, ScriptedDailyClient, gauge
 
 # The two gaps found by the full-range measurement of 2026-08-14: a single request per site over
 # 1990-01-01 to 2026-08-01 for 00060/00003, counting values per year.

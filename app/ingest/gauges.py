@@ -519,15 +519,6 @@ def parse_record_starts() -> dict[str, dict[str, date | None]]:
     return starts
 
 
-def parse_daily_floors() -> dict[str, date]:
-    """site id -> dv_record_start, as the sequence leaves it. The daily backfill's floors."""
-    return {
-        site: columns["dv_record_start"]
-        for site, columns in parse_record_starts().items()
-        if columns.get("dv_record_start") is not None
-    }
-
-
 # ---------------------------------------------------------------------------------------------
 # Known gaps: the ranges a source will not serve.
 # ---------------------------------------------------------------------------------------------

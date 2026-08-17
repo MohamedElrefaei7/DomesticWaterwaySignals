@@ -202,7 +202,7 @@ def database_url():
 
 # Identical to tests/orchestration/conftest.py's reset, and deliberately duplicated rather than
 # imported across suites: the two `conftest` modules already collided once when both suites ran
-# in one pytest invocation (see CONTEXT.md, provisioning 1). A shared helper here would be a
+# in one pytest invocation (see docs/phase-log.md, Phases 1 and 2). A shared helper here would be a
 # third import path into the same collision.
 RESET_SCHEMA_SQL = """
 -- ONE `DROP TABLE` STATEMENT FOR EVERY TABLE, NOT ONE STATEMENT PER TABLE.

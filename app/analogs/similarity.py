@@ -10,7 +10,7 @@ is the property that matters while nobody has grounds to choose anything better:
     an unweighted metric makes no claim about which feature matters
 
 and after a sweep that scanned 6,966 pairs and found one contemporaneous relationship at lag 0
-(CONTEXT.md, PHASE 6 - VERIFIED), "no claim about which feature matters" is the only honest claim
+(docs/phase-log.md, Phase 6), "no claim about which feature matters" is the only honest claim
 available. Anything better-behaved would be asserting something this project has not measured.
 
 WHY NO FITTED WEIGHTING EXISTS HERE, AND WHY THAT IS ENFORCED STRUCTURALLY

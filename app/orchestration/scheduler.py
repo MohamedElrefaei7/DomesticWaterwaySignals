@@ -42,7 +42,7 @@ from app.orchestration.cadence import CADENCES
 
 logger = logging.getLogger(__name__)
 
-# CLAUDE.md § 12 / CONTEXT.md housekeeping: this table must be EXCLUDED from dumps when backups
+# CLAUDE.md § 12 / CONTEXT.md § Housekeeping: this table must be EXCLUDED from dumps when backups
 # land in Phase 11. Restoring a stale scheduler state is worse than restoring none — the restored
 # rows carry next_run_time values from whenever the dump was taken, and a job store full of
 # long-past fire times interacts with coalesce and misfire grace in ways nobody reasoned about.

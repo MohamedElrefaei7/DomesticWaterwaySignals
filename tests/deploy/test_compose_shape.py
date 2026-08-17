@@ -11,7 +11,6 @@ from __future__ import annotations
 import re
 
 from . import (
-    COMPOSE_PATH,
     DIGEST_RE,
     ENV_EXAMPLE_PATH,
     EXPECTED_SERVICES,
@@ -279,19 +278,16 @@ def test_the_caddy_data_directory_is_on_the_data_volume():
     )
 
 
-def test_the_compose_file_still_names_timescaledb_first():
-    """verify/preflight.py gate 1 reads the FIRST `image:` line in this file.
-
-    That was unambiguous when there was one service. With three image references it means the gate
-    checks one of them, and which one is decided by file order — so reordering the services would
-    silently re-point the only live digest check at a different image. This test is the tripwire
-    for that, and the gap itself is recorded in the Phase 10 report rather than papered over here:
-    verify/ was out of scope for this commit.
-    """
-    text = read_artifact(COMPOSE_PATH)
-    first_image = re.search(r"^\s*image:\s*(?P<ref>\S+)\s*$", text, re.MULTILINE)
-    assert first_image is not None, "no image: line found"
-    assert first_image.group("ref").startswith("timescale/timescaledb:"), (
-        f"the first image: line is {first_image.group('ref')!r}, so preflight gate 1 is now "
-        f"checking that image instead of the database's."
-    )
+# REMOVED: test_the_compose_file_still_names_timescaledb_first.
+#
+# It was a stopgap for a gap that no longer exists. `verify/preflight.py` gate 1 read the FIRST
+# `image:` line in this file and checked that one reference, so which image was gated was decided
+# by file order and reordering the services would silently re-point the only live digest check.
+# The test was the tripwire for that reorder.
+#
+# Gate 1 now enumerates EVERY `image:` line here and EVERY `FROM` line in every Dockerfile, and
+# reports each by name — so service order is no longer load-bearing and a tripwire guarding it
+# asserts nothing. Keeping it would be worse than deleting it: a test named for a property the
+# system no longer depends on is a green check that teaches the next reader a rule that is not
+# true. See verify/preflight.py::enumerate_image_sites and
+# tests/verify/test_preflight_checks.py::test_gate_one_enumerates_every_image_reference_in_the_stack.

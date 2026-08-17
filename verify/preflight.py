@@ -1,8 +1,14 @@
 """Preflight gates: everything that must hold before any other verification means anything.
 
-CLAUDE.md § 13 in executable form. Five gates — image pin, `.env` secret agreement, data-volume
-identity, data-volume contents, and applied migrations — plus the digest-resolution helper that
-exists because hand-editing the digest has now failed twice.
+CLAUDE.md § 13 in executable form. Five gate groups — image pins, `.env` secret agreement,
+data-volume identity, data-volume contents, and applied migrations — plus the digest-resolution
+helper that exists because hand-editing a digest has now failed three times.
+
+THE IMAGE GATE ENUMERATES THE COLLECTION IT IS NAMED FOR. It reads every `image:` line in
+docker-compose.yml and every `FROM` line in every Dockerfile, and it reports each one by name. The
+version that read only the first `image:` line checked one reference out of five while reporting
+the stack as verified — a gate over a subset is worse than no gate, because the summary line makes
+the unchecked references look checked. See the block above `enumerate_image_sites`.
 
 TWO CONVENTIONS RUN THROUGH EVERY CHECK HERE, and they are the reason this file is longer than the
 checks themselves would suggest:
@@ -49,7 +55,6 @@ MINIMUM_DATA_BYTES = 10 * 1024 * 1024
 PLACEHOLDER_DIGEST = "sha256:" + "0" * 64
 
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
-IMAGE_LINE_RE = re.compile(r"^(?P<indent>\s*)image:\s*(?P<reference>\S+)\s*$", re.MULTILINE)
 PASSWORD_RE = re.compile(r"^[0-9a-f]{64}$")
 
 PASS = "PASS"
@@ -116,19 +121,24 @@ def parse_image_reference(reference: str) -> ImageReference:
     return ImageReference(raw=raw, name=name, tag=tag, digest=digest)
 
 
-def check_image_reference(reference: str) -> Result:
-    """The image pin gate. Four distinct failures, four distinct messages.
+def check_image_reference(reference: str, where: str | None = None) -> Result:
+    """The image pin gate, for ONE reference. Four distinct failures, four distinct messages.
 
     The placeholder and the malformed-digest cases are separated deliberately. `0000...0000` is
     64 valid hex characters and satisfies any shape validation there is, so a single "bad digest"
     message would send the operator to check their typing when the actual fix is to run
     --write-digest. The two have different causes and different remedies.
+
+    `where` names the file and line the reference was read from. With five references in the stack,
+    a result that says only "image is pinned by tag@digest" does not say WHICH image, and an
+    operator reading five near-identical lines has to re-derive by hand what the walk already had.
     """
     parsed = parse_image_reference(reference)
+    site = f"{where} " if where else ""
 
     if parsed.digest is None:
         return Result(
-            "image is pinned by digest",
+            f"{site}image is pinned by digest",
             FAIL,
             f"observed: {parsed.raw}\n"
             f"         no `@sha256:...` digest at all - this is a floating tag, and a floating tag "
@@ -138,7 +148,7 @@ def check_image_reference(reference: str) -> Result:
 
     if parsed.tag is None:
         return Result(
-            "image reference carries a tag",
+            f"{site}image reference carries a tag",
             FAIL,
             f"observed: {parsed.raw}\n"
             f"         the reference has a digest but NO TAG. The digest is the pin; the tag is how "
@@ -149,7 +159,7 @@ def check_image_reference(reference: str) -> Result:
 
     if parsed.digest == PLACEHOLDER_DIGEST:
         return Result(
-            "image digest is not the placeholder",
+            f"{site}image digest is not the placeholder",
             FAIL,
             f"observed: {parsed.digest}\n"
             f"         this is the all-zero PLACEHOLDER digest, not a resolved one. It is 64 valid "
@@ -160,7 +170,7 @@ def check_image_reference(reference: str) -> Result:
 
     if not DIGEST_RE.match(parsed.digest):
         return Result(
-            "image digest is well formed",
+            f"{site}image digest is well formed",
             FAIL,
             f"observed: {parsed.digest!r} (length {len(parsed.digest)})\n"
             f"         expected `sha256:` followed by exactly 64 lowercase hex characters. This is "
@@ -169,36 +179,244 @@ def check_image_reference(reference: str) -> Result:
         )
 
     return Result(
-        "image is pinned by tag@digest",
+        f"{site}image is pinned by tag@digest",
         PASS,
         f"{parsed.name}:{parsed.tag}\n         pinned at {parsed.digest}",
     )
 
 
-def read_image_reference(compose_text: str) -> str:
-    """The first `image:` value in the compose file.
+# ---------------------------------------------------------------------------------------------
+# Enumerating every image reference in the stack
+# ---------------------------------------------------------------------------------------------
+#
+# THIS GATE USED TO READ THE FIRST `image:` LINE IN docker-compose.yml AND NOTHING ELSE.
+#
+# That was unambiguous when the stack was one service. Phase 10 took it to four services and two
+# Dockerfiles - five references - and the gate went on checking one of them while the summary line
+# said the stack was verified. A gate that checks a subset of what it names is worse than no gate,
+# because it reports the whole set as verified: CLAUDE.md § 2's theme 2 arriving inside the tool
+# that exists to catch theme 2. The Caddy digest was hand-edited in that window, which is the exact
+# failure --write-digest was written to eliminate.
+#
+# So the collection is enumerated, and the enumeration is itself asserted: a walk that finds no
+# Dockerfiles, or a compose file with no `image:` line, is a FAILURE rather than a clean run over
+# an empty set (CLAUDE.md § 21 - a static assertion must prove it resolved the source tree first).
+#
+# Still a regex rather than a YAML parse, and still for the original reason: --write-digest rewrites
+# these lines in place, and a round-trip through a YAML library would discard every comment in the
+# file - including the blocks above the image lines that explain why the tags are there.
 
-    Deliberately not a YAML parse. This function is also used by --write-digest to rewrite the
-    line in place, and a round-trip through a YAML library would discard every comment in the
-    file - including the block above the image line that explains why the tag is there.
+DOCKERFILE_GLOB = "Dockerfile*"
+
+_IMAGE_LINE_RE = re.compile(r"^\s*image:\s*(?P<reference>\S+)\s*$")
+_FROM_LINE_RE = re.compile(
+    r"^\s*FROM\s+(?P<reference>\S+)(?:\s+AS\s+(?P<stage>\S+))?\s*$", re.IGNORECASE
+)
+
+
+@dataclass(frozen=True)
+class ImageSite:
+    """One place an image reference is written down: which file, which line, which reference.
+
+    The line number is what makes the rewrite surgical and the failure message actionable. A
+    message naming only the image tells an operator which pin is wrong; one naming the file and
+    line tells them where to look, and there are now five places to look.
     """
-    match = IMAGE_LINE_RE.search(compose_text)
-    if match is None:
-        raise ValueError(f"no `image:` line found in {COMPOSE_PATH}")
-    return match.group("reference")
+
+    path: Path
+    line_number: int  # 1-indexed, as an editor counts
+    kind: str  # "compose image:" or "Dockerfile FROM"
+    reference: str
+    stage: str | None = None
+
+    @property
+    def label(self) -> str:
+        stage = f" [{self.stage}]" if self.stage else ""
+        return f"{self.path.name}:{self.line_number}{stage}"
 
 
-def rewrite_image_digest(compose_text: str, digest: str) -> str:
-    """Replace the digest on the image line, preserving the tag, indentation, and every comment."""
-    reference = read_image_reference(compose_text)
+def compose_image_sites(compose_text: str, path: Path = COMPOSE_PATH) -> list[ImageSite]:
+    """Every `image:` line in the compose file, in file order.
+
+    Every one, not the first: with four services, which reference the old gate checked was decided
+    by file order, so reordering the services silently re-pointed the only live digest check at a
+    different image.
+    """
+    sites = []
+    for number, line in enumerate(compose_text.splitlines(), start=1):
+        match = _IMAGE_LINE_RE.match(line)
+        if match is not None:
+            sites.append(
+                ImageSite(path, number, "compose image:", match.group("reference"))
+            )
+    return sites
+
+
+def dockerfile_from_sites(
+    dockerfile_text: str, path: Path
+) -> tuple[list[ImageSite], list[str]]:
+    """(image references, intra-file stage references) from a Dockerfile's `FROM` lines.
+
+    A `FROM` naming an earlier stage (`FROM build AS runtime`) is not an image and has no digest to
+    pin. It is returned separately rather than dropped, because a reference this walk declined to
+    check has to be visible in the walk's own report - an unmentioned omission is indistinguishable
+    from a reference nobody enumerated.
+    """
+    sites: list[ImageSite] = []
+    stage_references: list[str] = []
+    declared: set[str] = set()
+
+    for number, line in enumerate(dockerfile_text.splitlines(), start=1):
+        match = _FROM_LINE_RE.match(line)
+        if match is None:
+            continue
+        reference = match.group("reference")
+        stage = match.group("stage")
+
+        if reference in declared:
+            stage_references.append(f"{path.name}:{number} FROM {reference}")
+        else:
+            sites.append(ImageSite(path, number, "Dockerfile FROM", reference, stage))
+
+        if stage:
+            declared.add(stage)
+
+    return sites, stage_references
+
+
+def dockerfile_paths(repo_root: Path = REPO_ROOT) -> list[Path]:
+    """Every Dockerfile in the repo root, sorted. Discovered, never listed.
+
+    A hardcoded list is a second copy of the same fact, and the copy is what goes stale the day a
+    third Dockerfile lands - which is exactly how a new build ends up on an unpinned base with a
+    green gate above it.
+    """
+    return sorted(path for path in repo_root.glob(DOCKERFILE_GLOB) if path.is_file())
+
+
+@dataclass(frozen=True)
+class Enumeration:
+    """What the walk found, including what it declined to check and what it could not read."""
+
+    sites: list[ImageSite]
+    files_walked: list[Path]
+    stage_references: list[str]
+    unreadable: list[str]
+
+
+def enumerate_image_sites(
+    repo_root: Path = REPO_ROOT, compose_path: Path | None = None
+) -> Enumeration:
+    """Every image reference the running stack resolves, across the compose file and every
+    Dockerfile."""
+    compose_path = compose_path or (repo_root / COMPOSE_PATH.name)
+
+    sites: list[ImageSite] = []
+    walked: list[Path] = []
+    stage_references: list[str] = []
+    unreadable: list[str] = []
+
+    try:
+        sites.extend(compose_image_sites(compose_path.read_text(encoding="utf-8"), compose_path))
+        walked.append(compose_path)
+    except OSError as exc:
+        unreadable.append(f"{compose_path}: {exc}")
+
+    for path in dockerfile_paths(repo_root):
+        try:
+            found, stages_named = dockerfile_from_sites(path.read_text(encoding="utf-8"), path)
+        except OSError as exc:
+            unreadable.append(f"{path}: {exc}")
+            continue
+        sites.extend(found)
+        stage_references.extend(stages_named)
+        walked.append(path)
+
+    return Enumeration(sites, walked, stage_references, unreadable)
+
+
+def check_enumeration(enumeration: Enumeration) -> Result:
+    """The walk's own report, and the guard against it having walked nothing.
+
+    A gate over a collection that quietly walked an empty collection is green forever and watching
+    nothing. This project has shipped that twice - an ingress test over an empty set, and a source
+    scanner that would have passed against an empty directory.
+    """
+    name = "every image reference in the stack was enumerated"
+
+    if enumeration.unreadable:
+        return Result(
+            name,
+            FAIL,
+            "observed: could not read " + "; ".join(enumeration.unreadable) + "\n"
+            "         a file this gate is named for was not walked, so the references in it were "
+            "not checked.",
+        )
+
+    dockerfiles = [path for path in enumeration.files_walked if path.name != COMPOSE_PATH.name]
+    if not dockerfiles:
+        return Result(
+            name,
+            FAIL,
+            f"observed: 0 files matching {DOCKERFILE_GLOB!r} under {REPO_ROOT}\n"
+            f"         two services build rather than pull, so half the stack's pins live in "
+            f"`FROM` lines. A walk that finds no Dockerfiles has checked none of them and would "
+            f"otherwise report the stack as fully pinned.",
+        )
+
+    if not enumeration.sites:
+        return Result(
+            name,
+            FAIL,
+            f"observed: 0 image references across {len(enumeration.files_walked)} file(s)\n"
+            f"         every per-reference check below would pass vacuously over an empty set.",
+        )
+
+    per_file: dict[str, int] = {}
+    for site in enumeration.sites:
+        per_file[site.path.name] = per_file.get(site.path.name, 0) + 1
+    breakdown = ", ".join(f"{name_}: {count}" for name_, count in sorted(per_file.items()))
+
+    detail = f"{len(enumeration.sites)} reference(s) across {len(enumeration.files_walked)} file(s) - {breakdown}"
+    if enumeration.stage_references:
+        detail += (
+            "\n         not checked (intra-file stage references, no digest to pin): "
+            + ", ".join(enumeration.stage_references)
+        )
+    return Result(name, PASS, detail)
+
+
+def rewrite_reference_lines(text: str, replacements: list[tuple[int, str, str]]) -> str:
+    """Swap references on the given 1-indexed lines, preserving everything else on them.
+
+    Line-scoped rather than a whole-file `replace`, because the same reference appears on both
+    `FROM` lines of a multi-stage build and a file-wide replacement would depend on how many times
+    it happened to occur. Indentation, the `AS <stage>` suffix, and every comment survive.
+    """
+    lines = text.splitlines(keepends=True)
+
+    for number, old_reference, new_reference in replacements:
+        index = number - 1
+        if not 0 <= index < len(lines):
+            raise ValueError(f"line {number} is outside a file of {len(lines)} lines")
+        if old_reference not in lines[index]:
+            raise ValueError(
+                f"line {number} does not contain {old_reference!r}: {lines[index].rstrip()!r}"
+            )
+        lines[index] = lines[index].replace(old_reference, new_reference, 1)
+
+    return "".join(lines)
+
+
+def resolved_reference(reference: str, digest: str) -> str:
+    """`name:tag@digest`, refusing to produce a digest-only reference."""
     parsed = parse_image_reference(reference)
     if parsed.tag is None:
         raise ValueError(
             f"refusing to rewrite {reference!r}: it has no tag, so the new digest would not be "
             f"re-derivable. Add a tag first."
         )
-    updated = f"{parsed.name}:{parsed.tag}@{digest}"
-    return compose_text.replace(reference, updated, 1)
+    return f"{parsed.name}:{parsed.tag}@{digest}"
 
 
 def resolve_digest(tag: str, run=subprocess.run) -> str:
@@ -492,12 +710,19 @@ def check_migration_count(applied: int, on_disk: int) -> Result:
 # ---------------------------------------------------------------------------------------------
 
 
-def gate_image() -> Result:
-    try:
-        reference = read_image_reference(COMPOSE_PATH.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        return Result("image is pinned by tag@digest", SKIP, f"could not read the image line: {exc}")
-    return check_image_reference(reference)
+def gate_images() -> list[Result]:
+    """The enumeration's own report, then one result per reference found.
+
+    Not one result for the stack. Five references collapsed into a single PASS/FAIL says nothing
+    about which of them is wrong, and a single FAIL stops the operator at the first one rather than
+    handing them the whole list.
+    """
+    enumeration = enumerate_image_sites()
+    results = [check_enumeration(enumeration)]
+    results.extend(
+        check_image_reference(site.reference, where=site.label) for site in enumeration.sites
+    )
+    return results
 
 
 def gate_env() -> list[Result]:
@@ -568,7 +793,7 @@ def gate_migrations() -> list[Result]:
 
 
 def run_all_gates() -> list[Result]:
-    results = [gate_image()]
+    results = gate_images()
     results.extend(gate_env())
     results.extend(gate_data_volume())
     results.extend(gate_migrations())
@@ -580,54 +805,104 @@ def run_all_gates() -> list[Result]:
 # ---------------------------------------------------------------------------------------------
 
 
-def _digest_command(write: bool, run=subprocess.run) -> int:
-    compose_text = COMPOSE_PATH.read_text(encoding="utf-8")
-    reference = read_image_reference(compose_text)
-    parsed = parse_image_reference(reference)
+def _digest_command(write: bool, run=subprocess.run, repo_root: Path = REPO_ROOT) -> int:
+    """Resolve - and optionally write - EVERY reference in the stack, with a per-reference diff.
 
-    print(f"compose image reference: {parsed.raw}")
+    Every one, because the version of this that wrote only the first left the other four to be
+    hand-edited, and hand-editing a 64-character content hash is the failure this command exists to
+    remove. It had already produced a hand-edited Caddy digest by the time it was fixed.
 
-    if parsed.tag is None:
+    Each tag is resolved once even when several references share it, so the two `FROM` lines of a
+    multi-stage build cannot receive two different resolutions of the same tag - which is the
+    failure that surfaces as an ImportError in a C extension and reads like a broken dependency.
+    """
+    enumeration = enumerate_image_sites(repo_root=repo_root)
+
+    if enumeration.unreadable:
+        for problem in enumeration.unreadable:
+            print(f"FAIL: could not read {problem}", file=sys.stderr)
+        return 1
+
+    if not enumeration.sites:
         print(
-            f"\nFAIL: the reference has no tag, so there is nothing to resolve a digest FROM.\n"
-            f"      A digest-only reference cannot tell anyone what to pull. Add a tag first.",
+            "FAIL: no image references found. Nothing was resolved, and a run that resolves "
+            "nothing must not exit zero.",
             file=sys.stderr,
         )
         return 1
 
-    print(f"tag to resolve:          {parsed.name}:{parsed.tag}")
+    print(f"image references in the stack ({len(enumeration.sites)}):\n")
 
-    try:
-        digest = resolve_digest(f"{parsed.name}:{parsed.tag}", run=run)
-    except RuntimeError as exc:
-        print(f"\nFAIL: {exc}", file=sys.stderr)
-        return 1
+    # tag -> digest, so a tag shared by several sites is asked about once and answers identically
+    # everywhere. Resolving per site would let two stages disagree.
+    resolved: dict[str, str] = {}
+    replacements: dict[Path, list[tuple[int, str, str]]] = {}
+    changes = 0
 
-    print(f"resolved digest:         {digest}")
+    for site in enumeration.sites:
+        parsed = parse_image_reference(site.reference)
 
-    if not DIGEST_RE.match(digest):
-        print(f"\nFAIL: Docker returned a digest that is not sha256+64 hex: {digest!r}", file=sys.stderr)
-        return 1
+        if parsed.tag is None:
+            print(
+                f"\nFAIL: {site.label} references {site.reference!r}, which has no tag, so there "
+                f"is nothing to resolve a digest FROM. A digest-only reference cannot tell anyone "
+                f"what to pull. Add a tag first.",
+                file=sys.stderr,
+            )
+            return 1
 
-    if not write:
-        if parsed.digest == digest:
-            print("\nthe compose file already carries this digest; nothing to do")
-            return 0
-        print(
-            f"\ncompose currently carries: {parsed.digest}\n"
-            f"re-run with --write-digest to rewrite the image line."
+        tag = f"{parsed.name}:{parsed.tag}"
+        if tag not in resolved:
+            try:
+                digest = resolve_digest(tag, run=run)
+            except RuntimeError as exc:
+                print(f"\nFAIL: resolving {tag} for {site.label}: {exc}", file=sys.stderr)
+                return 1
+            if not DIGEST_RE.match(digest):
+                print(
+                    f"\nFAIL: Docker returned a digest for {tag} that is not sha256+64 hex: "
+                    f"{digest!r}",
+                    file=sys.stderr,
+                )
+                return 1
+            resolved[tag] = digest
+
+        digest = resolved[tag]
+        current = parsed.digest or "(none)"
+
+        print(f"  {site.label:<32} {tag}")
+        if current == digest:
+            print(f"      {current}   unchanged")
+            continue
+
+        changes += 1
+        print(f"      {current}\n   -> {digest}   WOULD CHANGE")
+        replacements.setdefault(site.path, []).append(
+            (site.line_number, site.reference, resolved_reference(site.reference, digest))
         )
-        # Non-zero while the file still disagrees with the daemon: work remains.
-        return 1
 
-    updated = rewrite_image_digest(compose_text, digest)
-    if updated == compose_text:
-        print("\nthe compose file already carries this digest; nothing to write")
+    if changes == 0:
+        print(f"\nall {len(enumeration.sites)} reference(s) already carry the resolved digest")
         return 0
 
-    COMPOSE_PATH.write_text(updated, encoding="utf-8")
-    print(f"\nrewrote {COMPOSE_PATH.relative_to(REPO_ROOT)}. Review and commit this diff:\n")
-    run(["git", "diff", "--", str(COMPOSE_PATH)], cwd=str(REPO_ROOT))
+    if not write:
+        print(
+            f"\n{changes} of {len(enumeration.sites)} reference(s) disagree with the daemon.\n"
+            f"re-run with --write-digest to rewrite them."
+        )
+        # Non-zero while the files still disagree with the daemon: work remains.
+        return 1
+
+    for path, edits in replacements.items():
+        original = path.read_text(encoding="utf-8")
+        path.write_text(rewrite_reference_lines(original, edits), encoding="utf-8")
+        print(f"\nrewrote {path.relative_to(repo_root)} ({len(edits)} reference(s))")
+
+    print("\nReview and commit this diff:\n")
+    run(
+        ["git", "diff", "--", *sorted(str(path) for path in replacements)],
+        cwd=str(repo_root),
+    )
     return 0
 
 
@@ -642,12 +917,18 @@ def main(argv: list[str] | None = None) -> int:
     group.add_argument(
         "--resolve-digest",
         action="store_true",
-        help="print the digest Docker reports for the tag in docker-compose.yml, and change nothing",
+        help=(
+            "print the digest Docker reports for every image reference in the stack - "
+            "docker-compose.yml and every Dockerfile - and change nothing"
+        ),
     )
     group.add_argument(
         "--write-digest",
         action="store_true",
-        help="resolve the digest and rewrite the image line in docker-compose.yml, then show the diff",
+        help=(
+            "resolve every image reference in the stack and rewrite each one in place, "
+            "then show the diff"
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -660,9 +941,17 @@ def main(argv: list[str] | None = None) -> int:
         return _digest_command(write=args.write_digest, run=subprocess.run)
 
     if args.dry_run:
+        enumeration = enumerate_image_sites()
+        walked = ", ".join(path.name for path in enumeration.files_walked) or "(nothing)"
         print("preflight would run these gates, in order:\n")
         for name in (
-            f"image reference in {COMPOSE_PATH.name} is tag@digest, resolved, not the placeholder",
+            f"every image reference across {walked} was enumerated "
+            f"({len(enumeration.sites)} found)",
+            *(
+                f"{site.label} {site.reference.split('@')[0]} is tag@digest, resolved, "
+                f"not the placeholder"
+                for site in enumeration.sites
+            ),
             f"{ENV_PATH.name} is mode 600",
             f"{ENV_PATH.name}: POSTGRES_PASSWORD and DATABASE_URL's password are equal, 64-hex",
             f"{DATA_DIR} is on a different st_dev than /",

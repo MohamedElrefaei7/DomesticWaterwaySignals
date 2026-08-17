@@ -16,7 +16,7 @@ gate has refused something somebody wanted.
 THE REFUSAL IS NOT AN ERROR, AND IT IS NOT LOGGED AS ONE
 ---------------------------------------------------------
 Phase 6 scanned 6,966 pairs and one passed, at LAG 0 - a contemporaneous association, with zero
-passing rows at any non-zero lag in either direction (CONTEXT.md, PHASE 6 - VERIFIED). This engine
+passing rows at any non-zero lag in either direction (docs/phase-log.md, Phase 6). This engine
 is built on top of that. Most queries against this dataset are expected to refuse, and:
 
     AN ANALOG ENGINE THAT FINDS CONFIDENT ANALOGS WHERE THE SWEEP FOUND NO RELATIONSHIP

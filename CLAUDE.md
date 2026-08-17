@@ -3,12 +3,19 @@
 This file is the project **contract**. Claude Code reads it as ground truth at the start of every
 session. It holds invariants, conventions, and decisions that are not up for re-litigation.
 
-**It does not hold plans.** Current state, recent decisions, and `§ Up Next` live in `CONTEXT.md`.
+**It does not hold plans.** Current state, open questions, and `§ Up Next` live in `CONTEXT.md`.
 Contracts here; log there. If you are about to write "next we will…" into this file, it belongs in
 `CONTEXT.md`.
 
-**Precedence:** this file > `CONTEXT.md` > any handoff or summary document. If a summary conflicts
-with this file, this file wins and the summary is stale.
+**The log is four files beside it, split on 2026-08-17 when `CONTEXT.md` reached ~3,500 lines and
+stopped being read.** `CONTEXT.md` is current state; `docs/findings.md` is every measured finding by
+domain; `docs/decisions.md` is decisions and the alternatives rejected; `docs/phase-log.md` is the
+per-phase verification blocks, chronological; `docs/query-outputs.md` is verbatim query output.
+
+**Precedence:** this file > `CONTEXT.md` > `docs/` > any handoff or summary document. If a summary
+conflicts with this file, this file wins and the summary is stale. The `docs/` files are the log's
+own detail rather than a second authority: where one disagrees with `CONTEXT.md`, `CONTEXT.md` is
+the current state and that file is the record of a moment.
 
 These contracts were learned expensively on a prior project. Each one exists because its absence
 caused a real failure. Do not relax one because it looks like ceremony — if you believe one is
@@ -39,6 +46,14 @@ wrong, say so in the commit report and leave it in place.
   started server bound the port you expect** — a port already held by an earlier attempt is not
   taken from its holder, so the new server does not bind, the old process answers, and a page comes
   back from something that is not under test. Cost most of the Phase 9 verification session.
+- **DNS records for a domain fronted by a CDN must be DNS-ONLY during ACME HTTP-01 issuance.** A
+  proxied record resolves the domain to the CDN's own IPs, so the challenge is answered by the CDN
+  and **never reaches the origin** — while `dig` returns an answer, the name looks correct, and the
+  only symptom is a failed validation. **Failed issuance is what Let's Encrypt rate-limits, per
+  domain per week**, so the mistake costs days rather than minutes. Caught on 2026-08-17 before
+  Caddy was started for the first time: the `bargeanalysis.com` A record had been created proxied.
+  Proxying afterwards is a legitimate choice and needs DNS-01 or origin certificates; it is not a
+  thing to be discovering during first-ever issuance.
 - **Report what you verified, not what you intended.** Commit reports are checked against the repo
   with `git show` and `grep`. A report describing a change that did not land is worse than no report.
 - **When a measurement contradicts the plan, the measurement wins.** Report the contradiction; do not
@@ -1183,3 +1198,16 @@ inside the system is behaving exactly as designed.
   database role is `SELECT`-only and has been observed refusing a write, and no response carries a
   secret. It is not defensible as an inheritance: a future session adding a write endpoint has to
   be able to find the sentence saying that no-auth was predicated on no-writes.
+- **A verification gate that checks a SUBSET of what it names is worse than no gate, because it
+  reports the whole set as verified. Any gate over a collection enumerates the collection, and the
+  enumeration is itself asserted.** `verify/preflight.py` gate 1 read the FIRST `image:` line in
+  `docker-compose.yml` and checked that one reference. That was unambiguous at one service; at four
+  services and two Dockerfiles it gated **one reference out of five** while the summary line said
+  the stack was pinned, and the four it did not gate were hand-edited — the exact failure
+  `--write-digest` exists to eliminate, reintroduced by the tool built to prevent it. **Which
+  reference got checked was decided by file order**, so a reorder silently re-pointed the only live
+  digest check, and the stopgap was a test asserting that a service stayed first. That is § 2's
+  theme 2 arriving inside the tool that exists to catch theme 2. The gate now walks every `image:`
+  and every `FROM`, reports each by file and line, and **fails when the walk finds no Dockerfiles or
+  no references** — because a gate that passes over an empty collection is green forever and
+  watching nothing (§ 21's "a static assertion must prove it resolved the source tree first").

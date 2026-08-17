@@ -2,7 +2,7 @@
 
 `app/features/` computes numbers about the river and the market. `app/signals/` measured whether
 they are related, and the answer was essentially no: 6,966 pairs scanned, ONE passed, at LAG 0,
-with zero passing rows at any non-zero lag in either direction (CONTEXT.md, PHASE 6 - VERIFIED).
+with zero passing rows at any non-zero lag in either direction (docs/phase-log.md, Phase 6).
 
 THIS PACKAGE IS BUILT ON TOP OF THAT, AND THE FACT IS NOT SOFTENED ANYWHERE IN IT. The engine will
 refuse most or all queries against this dataset, and:

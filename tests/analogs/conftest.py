@@ -36,7 +36,7 @@ through the builder would make every one of them also a test of the builder.
 
 import os
 import sys
-from datetime import date, timedelta
+from datetime import timedelta
 from pathlib import Path
 
 import pytest

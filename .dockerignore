@@ -55,6 +55,7 @@ htmlcov/
 # keeps verification out of `app/`, and shipping it inside the running image would put it back.
 CLAUDE.md
 CONTEXT.md
+docs/
 tests/
 verify/
 scripts/

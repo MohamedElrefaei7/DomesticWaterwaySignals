@@ -1,27 +1,30 @@
 # The read API (Phase 8) as a container. Two stages, a pinned base, and a non-root user.
 #
 # ---------------------------------------------------------------------------------------------
-# THE DIGESTS BELOW ARE PLACEHOLDERS AND THEY CANNOT RESOLVE.
+# THE DIGESTS BELOW WERE RESOLVED ON THE INSTANCE, 2026-08-17. DO NOT HAND-EDIT THEM.
 # ---------------------------------------------------------------------------------------------
 #
-# `sha256:0000...0000` is 64 valid hex characters, so it passes every shape check there is and
-# fails by VALUE — which is the point (CLAUDE.md § 12: a placeholder digest in a committed file
-# must be one that cannot resolve, so a missed step fails loudly rather than falling back to a
-# floating tag). `docker build` against it stops with a manifest error.
+# They started as `sha256:0000...0000` — 64 valid hex characters, so a placeholder that passes
+# every shape check and fails by VALUE, which is the point (CLAUDE.md § 12: a placeholder digest in
+# a committed file must be one that cannot resolve, so a missed step fails loudly rather than
+# falling back to a floating tag). `docker build` against it stops with a manifest error.
 #
-# Resolve it ON THE INSTANCE, never from a laptop cache and never from an agent's recollection
-# (CLAUDE.md § 5):
+# `verify/preflight.py --write-digest` READS AND REWRITES BOTH LINES BELOW. It enumerates every
+# `image:` in docker-compose.yml and every `FROM` in every Dockerfile, resolves each tag against
+# the local daemon exactly once, and writes them in place with a per-reference diff. The earlier
+# version wrote only the first compose `image:` line, which left these two — and the Caddy image —
+# to be hand-edited; a 64-character content hash is not a value a human should be typing, and
+# hand-editing it is what failed on the compose line twice.
 #
-#     docker pull python:3.12-slim
-#     docker image inspect python:3.12-slim --format '{{index .RepoDigests 0}}'
-#
-# and paste the digest into BOTH `FROM` lines below. They must be the same value —
+# BOTH `FROM` LINES MUST CARRY THE SAME DIGEST.
 # tests/deploy/test_dockerfiles.py::test_the_base_image_is_pinned_by_digest asserts that, because
 # two stages on two different bases is a runtime that was never the thing the wheels were built
-# against, and it produces an import error that reads like a broken dependency.
+# against, and it produces an import error that reads like a broken dependency. Resolving once per
+# tag is what makes the two agree by construction rather than by care.
 #
-# `verify/preflight.py --write-digest` does NOT touch this file. It rewrites the first `image:`
-# line in docker-compose.yml and nothing else; see the Phase 10 report.
+# To re-resolve, on the instance and never from a laptop cache (CLAUDE.md § 5):
+#
+#     docker pull python:3.12-slim && python3 -m verify.preflight --write-digest
 
 # ---------------------------------------------------------------------------------------------
 # Stage 1 — dependencies
@@ -37,7 +40,7 @@
 # so no toolchain is installed at all. The stage separation is not there because it is needed
 # today; it is there so that the day one is needed, the tempting one-line fix lands in the stage
 # where it is free.
-FROM python:3.12-slim@sha256:0000000000000000000000000000000000000000000000000000000000000000 AS build
+FROM python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a AS build
 
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
@@ -53,7 +56,7 @@ RUN pip install -r requirements.txt
 # ---------------------------------------------------------------------------------------------
 # Stage 2 — runtime
 # ---------------------------------------------------------------------------------------------
-FROM python:3.12-slim@sha256:0000000000000000000000000000000000000000000000000000000000000000 AS runtime
+FROM python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a AS runtime
 
 # PYTHONDONTWRITEBYTECODE because the application directory is owned by root and read-only to the
 # process; a __pycache__ write would fail on every import in a way that costs a debugging session

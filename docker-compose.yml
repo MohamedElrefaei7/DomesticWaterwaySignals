@@ -45,12 +45,13 @@
 #      non-comment text never names it. That test is why the frontend build's copy step lives in
 #      Dockerfile.frontend's CMD and not in a `command:` here.
 #
-#   4. `timescaledb` STAYS THE FIRST SERVICE IN THIS FILE. `verify/preflight.py` gate 1 reads the
-#      FIRST `image:` line in this file and checks that one reference — deliberately, so it can
-#      rewrite the line with --write-digest without a YAML round-trip discarding every comment.
-#      With four services it now gates one of three image references. Reordering would silently
-#      re-point the gate at a different image; the other two are covered by
-#      tests/deploy/test_compose_shape.py instead. Recorded as a real gap in the Phase 10 report.
+#   4. SERVICE ORDER IN THIS FILE IS NOT LOAD-BEARING, and it used to be. `verify/preflight.py`
+#      gate 1 once read the FIRST `image:` line here and checked that one reference, so which image
+#      was gated was decided by file order and a reorder silently re-pointed the only live digest
+#      check. Gate 1 now enumerates EVERY `image:` line in this file and EVERY `FROM` line in every
+#      Dockerfile, reports each by name, and --write-digest rewrites all of them. Still a regex
+#      rather than a YAML parse, for the original reason: a round-trip through a YAML library would
+#      discard every comment in this file, including this one.
 
 services:
   timescaledb:
@@ -198,20 +199,16 @@ services:
   # caddy — TLS termination, the static bundle, and the /api reverse proxy. THE ONLY PUBLIC FACE.
   # ---------------------------------------------------------------------------------------------
   caddy:
-    # Pinned by digest, tagged for re-derivability, and THE DIGEST IS A PLACEHOLDER THAT CANNOT
-    # RESOLVE (CLAUDE.md § 12). Resolve on the instance:
-    #
-    #     docker pull caddy:2-alpine
-    #     docker image inspect caddy:2-alpine --format '{{index .RepoDigests 0}}'
+    # Pinned by digest, tagged for re-derivability, RESOLVED ON THE INSTANCE 2026-08-17.
     #
     # `caddy:2-alpine` is the major-2 rolling tag, so it floats and the digest is what actually
-    # fixes the version. Record the exact `caddy version` output in CONTEXT.md when resolving, so
-    # the digest is re-derivable to a release rather than to a moving tag.
+    # fixes the version.
     #
-    # NOTE: `verify/preflight.py --write-digest` will NOT write this line. It rewrites the first
-    # `image:` line in this file, which is timescaledb's. This one is edited by hand, which is the
-    # thing that has already failed twice on the other line — check it by eye against the pull.
-    image: caddy:2-alpine@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    # `verify/preflight.py --write-digest` DOES write this line — it enumerates every `image:` here
+    # and every `FROM` in every Dockerfile, and rewrites each in place. It did not when this digest
+    # was first resolved, so this one was hand-edited, which is the exact failure --write-digest
+    # exists to remove. Do not hand-edit it again.
+    image: caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
 
     restart: unless-stopped
 

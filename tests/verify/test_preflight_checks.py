@@ -108,24 +108,165 @@ def test_image_line_without_a_tag_is_rejected():
     assert tagged.digest == GOOD_DIGEST
 
 
-def test_the_repos_own_compose_file_passes_the_image_gate():
-    """Not a hypothetical: the file actually in this repo must satisfy the gate it ships with."""
-    reference = preflight.read_image_reference(
-        (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-    )
-    parsed = preflight.parse_image_reference(reference)
+def test_a_tag_without_a_digest_is_a_failure():
+    """`name:tag` with no `@sha256:...` is a FLOATING TAG and must not pass.
 
-    assert parsed.tag is not None, "docker-compose.yml has no tag on its image reference"
-    assert parsed.digest is not None, "docker-compose.yml is not pinned by digest"
-    assert preflight.check_image_reference(reference).status == preflight.PASS
+    It is the one malformation that looks completely ordinary — it is what every Compose file on
+    the internet contains — so the temptation is to treat "has a tag" as good enough. `latest` on a
+    database image resolved to two different TimescaleDB versions three months apart on the prior
+    project (CLAUDE.md § 5), and CLAUDE.md § 22 requires `tag@digest` on every image in this stack.
+    """
+    for floating in (
+        "timescale/timescaledb:2.26.2-pg16",
+        "python:3.12-slim",
+        "caddy:2-alpine",
+        "caddy:latest",
+    ):
+        result = preflight.check_image_reference(floating)
+        assert result.status == preflight.FAIL, (
+            f"{floating!r} was accepted with no digest - a floating tag passed the pin gate"
+        )
+        assert "no `@sha256:...` digest" in result.detail
+        assert floating in result.detail, "the observed reference is not reported"
+
+    # The same reference WITH a digest passes, or the assertions above hold for the wrong reason.
+    assert (
+        preflight.check_image_reference(f"caddy:2-alpine@{GOOD_DIGEST}").status == preflight.PASS
+    )
+
+
+def test_gate_one_enumerates_every_image_reference_in_the_stack():
+    """EVERY `image:` line in the compose file, not the first one.
+
+    The version this replaces read `IMAGE_LINE_RE.search(...)` — the first match — and with four
+    services it checked one reference out of five while the summary line reported the stack as
+    verified. Which one it checked was decided by file order, so reordering the services silently
+    re-pointed the only live digest check at a different image.
+
+    Asserted against the repo's own compose file rather than a fixture, because the number that
+    matters is how many references this stack actually has.
+    """
+    compose_text = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    sites = preflight.compose_image_sites(compose_text)
+
+    expected = [
+        line.split("image:", 1)[1].strip()
+        for line in compose_text.splitlines()
+        if line.strip().startswith("image:")
+    ]
+    assert len(expected) >= 2, (
+        "the compose file has fewer than two `image:` lines, so this test cannot tell an "
+        "enumerating gate from a first-match one"
+    )
+    assert [site.reference for site in sites] == expected, (
+        f"the walk found {[s.reference for s in sites]}, expected {expected}. A gate that reads "
+        f"only the first reference reports the whole stack as verified while checking one image."
+    )
+
+    # Every one of them is line-located, so a failure names where to look.
+    for site in sites:
+        assert site.line_number >= 1
+        assert compose_text.splitlines()[site.line_number - 1].strip().endswith(site.reference)
+
+    # And the whole-stack walk carries them plus the Dockerfiles' bases.
+    enumeration = preflight.enumerate_image_sites()
+    assert set(expected) <= {site.reference for site in enumeration.sites}
+    assert preflight.check_enumeration(enumeration).status == preflight.PASS
+
+
+def test_gate_one_covers_every_dockerfile_from_line():
+    """Half the stack's pins live in `FROM` lines, and the gate reads none of them until it does.
+
+    Two of the four services build rather than pull, so a check over compose `image:` keys alone
+    reports a fully pinned stack while the api and the frontend build on whatever
+    `python:3.12-slim` resolved to that morning (CLAUDE.md § 22).
+
+    The walk is asserted to have found the Dockerfiles at all: a scanner that resolves no files
+    passes every assertion written against what it found, which is the vacuous-pass failure this
+    project has shipped twice.
+    """
+    paths = preflight.dockerfile_paths()
+    assert len(paths) >= 2, (
+        f"found {[p.name for p in paths]} - expected at least Dockerfile.api and "
+        f"Dockerfile.frontend. A walk over no Dockerfiles checks no FROM lines and reports green."
+    )
+
+    enumeration = preflight.enumerate_image_sites()
+    by_file = {}
+    for site in enumeration.sites:
+        by_file.setdefault(site.path.name, []).append(site.reference)
+
+    for path in paths:
+        expected = [
+            line.split()[1]
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip().upper().startswith("FROM ")
+        ]
+        assert by_file.get(path.name) == expected, (
+            f"{path.name}: the walk found {by_file.get(path.name)}, expected {expected}"
+        )
+        assert expected, f"{path.name} declares no FROM line"
+
+    # A FROM naming an earlier STAGE is not an image and is reported rather than dropped.
+    sites, stage_references = preflight.dockerfile_from_sites(
+        f"FROM python:3.12-slim@{GOOD_DIGEST} AS build\nFROM build AS runtime\n",
+        REPO_ROOT / "Dockerfile.fake",
+    )
+    assert [site.reference for site in sites] == [f"python:3.12-slim@{GOOD_DIGEST}"]
+    assert stage_references == ["Dockerfile.fake:2 FROM build"]
+
+
+def test_an_enumeration_that_walked_nothing_is_a_failure(tmp_path):
+    """A gate over a collection must prove it resolved the collection.
+
+    An empty repo root has no compose file and no Dockerfiles, so every per-reference check below
+    would pass over an empty set and the run would exit zero. That is CLAUDE.md § 2's theme 2, and
+    it is the same shape as the ingress test that passed because the set it constrained was empty.
+    """
+    empty = preflight.enumerate_image_sites(repo_root=tmp_path)
+    result = preflight.check_enumeration(empty)
+    assert result.status == preflight.FAIL, (
+        "a walk that found no files reported PASS - the gate is green over an empty set"
+    )
+    assert "observed:" in result.detail
+
+    # A compose file with references but no Dockerfiles is still a failure: two services build.
+    (tmp_path / "docker-compose.yml").write_text(
+        f"services:\n  db:\n    image: postgres:16@{GOOD_DIGEST}\n", encoding="utf-8"
+    )
+    no_dockerfiles = preflight.check_enumeration(preflight.enumerate_image_sites(repo_root=tmp_path))
+    assert no_dockerfiles.status == preflight.FAIL
+    assert "Dockerfile" in no_dockerfiles.detail
+
+
+def test_the_repos_own_files_pass_the_image_gate():
+    """Not a hypothetical: the files actually in this repo must satisfy the gate they ship with.
+
+    Every reference, in every file — so a placeholder left unresolved in one Dockerfile stage fails
+    here rather than at `docker build` on the instance.
+    """
+    results = preflight.gate_images()
+    assert len(results) >= 6, (
+        f"gate_images produced {len(results)} result(s): one enumeration report plus one per "
+        f"reference, and this stack has five references"
+    )
+
+    failures = [result for result in results if result.status != preflight.PASS]
+    assert failures == [], "\n\n".join(result.render() for result in failures)
 
 
 def test_rewriting_the_digest_preserves_the_tag_and_the_comments():
-    """--write-digest must not turn the file into a digest-only reference, or reformat it."""
+    """--write-digest must not turn a file into a digest-only reference, or reformat it."""
     original = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-    updated = preflight.rewrite_image_digest(original, OTHER_DIGEST)
+    sites = preflight.compose_image_sites(original)
 
-    parsed = preflight.parse_image_reference(preflight.read_image_reference(updated))
+    first = sites[0]
+    updated = preflight.rewrite_reference_lines(
+        original,
+        [(first.line_number, first.reference, preflight.resolved_reference(first.reference, OTHER_DIGEST))],
+    )
+
+    parsed = preflight.parse_image_reference(preflight.compose_image_sites(updated)[0].reference)
     assert parsed.digest == OTHER_DIGEST
     assert parsed.tag is not None, "the rewrite dropped the tag"
 
@@ -134,7 +275,97 @@ def test_rewriting_the_digest_preserves_the_tag_and_the_comments():
     assert len(updated.splitlines()) == len(original.splitlines())
 
     with pytest.raises(ValueError, match="no tag"):
-        preflight.rewrite_image_digest(f"    image: name@{GOOD_DIGEST}\n", OTHER_DIGEST)
+        preflight.resolved_reference(f"name@{GOOD_DIGEST}", OTHER_DIGEST)
+
+    # A line that does not carry the reference it was told to swap is a refusal, not a silent
+    # no-op: a rewrite that "succeeded" without changing anything is how a stale digest survives.
+    with pytest.raises(ValueError, match="does not contain"):
+        preflight.rewrite_reference_lines("a\nb\n", [(2, "nothing-here", "x")])
+
+
+def test_write_digest_rewrites_every_reference_not_just_the_first(tmp_path):
+    """--write-digest writes EVERY reference, in every file, or the rest stay hand-edited.
+
+    Hand-editing a 64-character content hash is the failure this command exists to remove, and the
+    version that wrote only the first `image:` line had already produced a hand-edited Caddy digest
+    by the time the gate was widened.
+
+    Driven through `_digest_command` — the real CLI path — against a throwaway tree and a fake
+    Docker daemon, so what is exercised is the command rather than a re-implementation of it in the
+    test. Different tags resolve to DIFFERENT digests here, so a command that resolved one tag and
+    wrote it everywhere would be caught rather than flattered.
+    """
+    digest_by_tag = {
+        "postgres:16": "sha256:" + "11" * 32,
+        "caddy:2-alpine": "sha256:" + "22" * 32,
+        "python:3.12-slim": "sha256:" + "33" * 32,
+    }
+
+    class Completed:
+        def __init__(self, returncode=0, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["docker", "image", "inspect"]:
+            tag = cmd[3]
+            return Completed(0, f'["{tag}@{digest_by_tag[tag]}"]')
+        return Completed(0)  # the `git diff` at the end
+
+    (tmp_path / "docker-compose.yml").write_text(
+        f"services:\n"
+        f"  db:\n"
+        f"    # a comment that must survive\n"
+        f"    image: postgres:16@{PLACEHOLDER}\n"
+        f"  proxy:\n"
+        f"    image: caddy:2-alpine@{PLACEHOLDER}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "Dockerfile.api").write_text(
+        f"FROM python:3.12-slim@{PLACEHOLDER} AS build\n"
+        f"FROM python:3.12-slim@{PLACEHOLDER} AS runtime\n",
+        encoding="utf-8",
+    )
+
+    before = preflight.enumerate_image_sites(repo_root=tmp_path)
+    assert len(before.sites) == 4, (
+        f"the scratch tree should offer four references, found {[s.label for s in before.sites]}"
+    )
+
+    assert preflight._digest_command(write=True, run=fake_run, repo_root=tmp_path) == 0
+
+    after = preflight.enumerate_image_sites(repo_root=tmp_path)
+    assert len(after.sites) == 4
+
+    for site in after.sites:
+        assert PLACEHOLDER not in site.reference, (
+            f"{site.label} still carries the placeholder - the rewrite reached only some of the "
+            f"references, and the rest are left to be hand-edited"
+        )
+        assert preflight.check_image_reference(site.reference).status == preflight.PASS
+
+        parsed = preflight.parse_image_reference(site.reference)
+        assert parsed.digest == digest_by_tag[f"{parsed.name}:{parsed.tag}"], (
+            f"{site.label} carries a digest belonging to some other tag"
+        )
+
+    # Comments and line count survive the multi-file rewrite.
+    compose = (tmp_path / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "# a comment that must survive" in compose
+    assert len(compose.splitlines()) == 6
+
+    # Re-running is a no-op that exits zero, rather than a second rewrite.
+    assert preflight._digest_command(write=True, run=fake_run, repo_root=tmp_path) == 0
+
+    # And --resolve-digest exits NON-zero while a file still disagrees with the daemon, because
+    # work remains. Exercised on a tree where one reference is stale.
+    (tmp_path / "Dockerfile.api").write_text(
+        f"FROM python:3.12-slim@{PLACEHOLDER} AS build\n"
+        f"FROM python:3.12-slim@{digest_by_tag['python:3.12-slim']} AS runtime\n",
+        encoding="utf-8",
+    )
+    assert preflight._digest_command(write=False, run=fake_run, repo_root=tmp_path) == 1
 
 
 # ---------------------------------------------------------------------------------------------
