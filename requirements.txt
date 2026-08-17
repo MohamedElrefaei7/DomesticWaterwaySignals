@@ -36,3 +36,12 @@ fastapi==0.141.1
 #     uvicorn app.api.main:app --host 127.0.0.1 --port 8000
 # The `api` and `caddy` Compose services, TLS and the domain are Phase 10.
 uvicorn==0.52.3
+
+# S3, for the nightly backup and the monthly restore test (Phase 11). Pinned like everything else
+# here; botocore is pinned by boto3's own metadata and is deliberately NOT re-pinned, matching the
+# fastapi/pydantic reasoning above.
+#
+# CREDENTIALS COME FROM THE INSTANCE ROLE VIA IMDS. There are no AWS keys in `.env`, ever, and the
+# instance policy grants no delete action of any kind (CLAUDE.md § 8) - retention is a bucket
+# lifecycle rule, which S3 executes itself and the instance cannot reach.
+boto3==1.42.9

@@ -236,6 +236,19 @@ CADENCES: tuple[Cadence, ...] = (
         # one, which nothing downstream would otherwise report.
         overdue_after=timedelta(days=3),
     ),
+    Cadence(
+        job_name="backup_nightly",
+        # NIGHTLY. The RPO this buys is stated rather than implied: up to 24 hours of writes can be
+        # lost, because there is no WAL archiving and therefore no point-in-time recovery. That is
+        # defensible for a system whose sources publish hourly at fastest and weekly at slowest - a
+        # lost day of USGS polling is re-fetchable from USGS - and it is only defensible written
+        # down.
+        interval=timedelta(seconds=86400),
+        # 30 HOURS, deliberately tighter than the three-interval convention the other daily entries
+        # use. Those jobs can be caught up from their sources; this one cannot. A day nobody backed
+        # up is a day that is in no archive, and no later run recovers it.
+        overdue_after=timedelta(hours=30),
+    ),
 )
 
 BY_NAME: dict[str, Cadence] = {c.job_name: c for c in CADENCES}

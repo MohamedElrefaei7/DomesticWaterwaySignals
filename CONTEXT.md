@@ -340,6 +340,42 @@ commits to satisfy a file-layout preference.
 `psycopg.errors.RaiseException`, not a constraint violation, and the message names the column —
 `refusing to update column byte_size on backup_id=N`.
 
+### Part 6 — nightly backup (`<sha-part-6>`)
+
+`app/orchestration/backup.py`, registered as `backup_nightly` with its cadence entry (24h interval,
+30h `overdue_after`). **`boto3==1.42.9` added to `requirements.txt`** — the phase's one runtime
+dependency — and **`moto[s3]==5.1.22` to `requirements-dev.txt`**. No lock/hash file exists in this
+project, so nothing else needed regenerating.
+
+**THE INTEGRATION TIER RAN FOR REAL.** A local `timescale/timescaledb` container plus Docker meant
+real dumps, real truncations and real `pg_restore`. **563 passed / 0 skipped** with `DATABASE_URL`
+set; 414 passed / 149 skipped without.
+
+**Three findings that only running it could produce:**
+
+1. **The end-to-end test caught a real Theme 1 bug in the job.** `db.connection()` deliberately
+   commits nothing implicitly (`app/db.py`), so the `backups` INSERT was **silently rolled back**
+   while the job reported success, `job_runs` recorded success, and S3 held a verified archive.
+   The next run's size floor would have had nothing to compare against and the restore test would
+   have found no backup to restore. Fixed with an explicit `conn.commit()`.
+2. **`apscheduler_jobs` is not created by any migration.** `SQLAlchemyJobStore` issues its own DDL
+   at scheduler startup, so a freshly-migrated database does not have it — and
+   `assert_excluded_table_exists` correctly refused to dump. The fixture now creates it the way
+   the scheduler does. **On a restored database the table exists only because its DDL was in the
+   dump**, which is exactly why `--exclude-table` was rejected in favour of `--exclude-table-data`.
+3. **Measured: `pg_restore --list` accepts a truncated archive at 95%, 98% and 99% of full size,
+   while a full restore rejects all three.** At one third — the incident's own proportions — the
+   TOC is destroyed too and `--list` also fails, *at this database's size*. So the load-bearing
+   truncation test uses **both** cuts: the one-third case is the incident's proportions, and the
+   95% case is its **shape**, and only the 95% case goes red when verification is swapped to
+   `--list`. A version of the test using one third alone stayed green under that mutation.
+
+**Four of my own tests were too weak and were rewritten after mutations escaped them.** Two grepped
+the module source for `ETag` and `return None` — and the module's own docstrings contain both
+words, explaining why it does not use them. Two called helpers directly (`upload_and_verify`)
+rather than the job, so mutations to the job body never reached them. All four are now behavioural
+and all eleven mutations are confirmed.
+
 ---
 
 ## Standing items, carried until somebody closes them

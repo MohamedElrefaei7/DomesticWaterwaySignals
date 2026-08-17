@@ -25,3 +25,9 @@ httpx2==2.10.0
 # The integration tier needs DATABASE_URL pointing at a THROWAWAY database - tests/orchestration/
 # drops this project's tables between tests. Without it those tests skip with a stated reason
 # rather than passing silently.
+
+# S3 stub for the backup and restore-test suites (Phase 11). moto intercepts botocore at the
+# client layer, so the tests exercise the REAL boto3 calls - upload_file's multipart path and
+# head_object's ContentLength - rather than a hand-written fake that would agree with whatever the
+# job happened to do.
+moto[s3]==5.1.22

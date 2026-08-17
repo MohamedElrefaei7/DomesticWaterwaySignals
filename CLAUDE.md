@@ -135,6 +135,32 @@ describes does not hold has already happened here.
 - **A failed backup writes no `backups` row.** The failure lives in `job_runs`, where failures
   belong. Never a `verified = false` placeholder: a later query for "the most recent backup" would
   find it and report one that does not exist.
+- **Dumps run from a one-shot container off the same pinned digest as the server**, never from
+  host tools. A host `pg_dump` at a different major version either refuses or produces a subtly
+  wrong archive; same digest means the versions match mechanically rather than by memory. The
+  digest is READ from the Compose file, never written down a second time.
+- **The dump writes with `-f` to a bind mount. Nothing is piped through stdout.**
+  `pg_dump | cat > file` reintroduces the truncation class directly — a broken pipe with a zero
+  exit is exactly "exits zero, writes a third of a file". The command is built as an argv list, so
+  there is no shell to interpret a pipe.
+- **Row counts are snapshot-consistent**, captured inside the dump's own transaction via
+  `pg_export_snapshot()` + `pg_dump --snapshot`, with the counting connection held open until
+  `pg_dump` exits. Counting on a separate connection describes a database state the archive does
+  not contain, and the restore test built on those counts then either fails spuriously or acquires
+  a tolerance wide enough to hide real loss.
+- **`--exclude-table-data`, never `--exclude-table`, and the pattern's target is asserted to exist
+  first.** `--exclude-table-data` succeeds silently when its pattern matches nothing, so a rename
+  turns the exclusion into a no-op and stale scheduler state ships in every backup with no error
+  anywhere. Dropping the table instead would leave the restored database structurally different
+  from production, defeating the restore test.
+- **Upload is verified by comparing `head_object`'s `ContentLength` to the local size, never by
+  ETag or MD5.** `upload_file` is multipart-capable and a multipart ETag is not the object's MD5,
+  so a comparison either always fails on large archives or gets deleted.
+- **The local archive is deleted only after upload verification passes**, and a failure keeps it
+  and says where it is. It is the only copy known to restore.
+- **`rows_written` is NULL for a job that writes no rows to this database.** `0` claims the job
+  counts rows and today counted none; the dumped row count would make one column mean two things
+  depending on which job wrote it.
 - **Migrations never run on container start.** A restart loop would become a migration loop.
 
 ---

@@ -37,7 +37,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from app import db
 from app.features import build as features_build
 from app.ingest import usda_movements, usda_rates, usgs_daily_ingest, usgs_ingest
-from app.orchestration import heartbeat
+from app.orchestration import backup, heartbeat
 from app.orchestration.cadence import CADENCES
 
 logger = logging.getLogger(__name__)
@@ -67,6 +67,10 @@ JOB_FUNCTIONS = {
     # THE FIRST NON-INGEST JOB. It reads what the four above have landed and writes the derived
     # layer. Nothing orders it against them - see its cadence entry.
     "features_build": features_build.features_build_job,
+    # THE FIRST JOB THAT WRITES NOTHING TO THIS DATABASE'S DATA TABLES. It returns None, so
+    # rows_written is NULL rather than 0 - a backup writes no rows, and 0 would claim it counts
+    # them and today counted none (CLAUDE.md § 4).
+    "backup_nightly": backup.backup_nightly_job,
 }
 
 # NOT REGISTERED HERE, DELIBERATELY: app/ingest/backfill.py, app/ingest/daily_backfill.py and
