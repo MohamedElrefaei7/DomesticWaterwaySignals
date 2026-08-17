@@ -161,6 +161,30 @@ describes does not hold has already happened here.
 - **`rows_written` is NULL for a job that writes no rows to this database.** `0` claims the job
   counts rows and today counted none; the dumped row count would make one column mean two things
   depending on which job wrote it.
+- **Restore tests read the archive FROM S3**, never from local staging. The local file passing
+  proves nothing about what is in the bucket, and on a healthy instance it has already been
+  deleted. Downloading is also the only exercise the IAM read path gets before the day it matters.
+- **The restore is wrapped in `timescaledb_pre_restore()` / `timescaledb_post_restore()`.**
+  Without them the restore appears to succeed while hypertable and chunk metadata is wrong,
+  surfacing much later as queries returning plausible partial results.
+- **Every role the archive references is CREATED before restoring; `--no-owner --no-privileges`
+  is forbidden.** Stripping privileges makes any restore succeed at the cost of never exercising
+  the grants. The roles are discovered from the source database, never listed in code — a
+  hardcoded list omits the object OWNER, and the restore then fails on `ALTER SCHEMA … OWNER TO`.
+  After restoring, the read-only role is made to attempt a `DELETE` and must be refused: that is
+  the only assertion proving the security property is in the backup rather than only in production.
+- **Restored counts must equal recorded counts EXACTLY, with key sets compared in BOTH
+  directions, and every mismatch reported.** No tolerance of any size — a tolerance is a tolerance
+  for exactly the loss the test exists to detect. Comparing only the intersection hides a dropped
+  table and an unexpected one. `apscheduler_jobs` is the single expected difference and its zero
+  count is asserted explicitly, because asserting the expected difference is what proves the
+  exclusion worked rather than assuming it.
+- **`ANALYZE`'s EFFECT is asserted, not its invocation.** A step that runs `ANALYZE` and never
+  checks it ran is a step that quietly stops running.
+- **A throwaway restore container carries a random-suffixed name, publishes only on loopback, and
+  is torn down with `docker rm -f` from a `finally`** that survives `KeyboardInterrupt`. Its logs
+  are captured before removal on failure. Readiness is confirmed by a real query from outside, not
+  by `pg_isready` — the official image runs a temporary server during `initdb` that answers yes.
 - **Migrations never run on container start.** A restart loop would become a migration loop.
 
 ---

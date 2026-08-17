@@ -37,7 +37,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from app import db
 from app.features import build as features_build
 from app.ingest import usda_movements, usda_rates, usgs_daily_ingest, usgs_ingest
-from app.orchestration import backup, heartbeat
+from app.orchestration import backup, heartbeat, restore_test
 from app.orchestration.cadence import CADENCES
 
 logger = logging.getLogger(__name__)
@@ -71,6 +71,11 @@ JOB_FUNCTIONS = {
     # rows_written is NULL rather than 0 - a backup writes no rows, and 0 would claim it counts
     # them and today counted none (CLAUDE.md § 4).
     "backup_nightly": backup.backup_nightly_job,
+    # A BACKUP NOBODY HAS RESTORED IS A BACKUP NOBODY KNOWS THEY HAVE. The nightly job proves an
+    # archive can be READ; this one proves it can be restored INTO A DATABASE, which is a different
+    # claim - extension state, hypertable metadata, roles and grants all live outside the block
+    # stream that pg_restore -f /dev/null walks.
+    "restore_test_monthly": restore_test.restore_test_monthly_job,
 }
 
 # NOT REGISTERED HERE, DELIBERATELY: app/ingest/backfill.py, app/ingest/daily_backfill.py and

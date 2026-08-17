@@ -249,6 +249,29 @@ CADENCES: tuple[Cadence, ...] = (
         # up is a day that is in no archive, and no later run recovers it.
         overdue_after=timedelta(hours=30),
     ),
+    Cadence(
+        job_name="restore_test_monthly",
+        # MONTHLY. A full restore into a throwaway container is the most expensive thing this
+        # system does on a schedule. Monthly is often enough that a broken backup is caught inside
+        # one retention window - daily objects live 35 days - and rare enough that it is not
+        # competing with ingest for the volume.
+        interval=timedelta(days=30),
+        # THE DERIVED misfire_grace_time HERE IS ROUGHLY FIFTEEN DAYS, AND THAT IS ACCEPTED.
+        #
+        # misfire_grace_time is a derived, read-only property - max(60, interval // 2) - shared by
+        # every entry in this table. A restore test has no time-of-day semantics: the question it
+        # answers ("is the most recent verified backup restorable") is exactly as valid on the
+        # tenth as on the first. So running late after an outage is the DESIRED behaviour rather
+        # than a misfire, and with coalesce=True it runs once, promptly, rather than once per
+        # missed slot.
+        #
+        # The alternative was changing a derivation every existing job depends on, to accommodate
+        # one new job, in a phase about backups. That is blast radius for nothing.
+        #
+        # 45 days is one and a half intervals: a genuinely missed month is visible without a run
+        # that merely started late tripping the alert.
+        overdue_after=timedelta(days=45),
+    ),
 )
 
 BY_NAME: dict[str, Cadence] = {c.job_name: c for c in CADENCES}

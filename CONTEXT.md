@@ -376,6 +376,37 @@ words, explaining why it does not use them. Two called helpers directly (`upload
 rather than the job, so mutations to the job body never reached them. All four are now behavioural
 and all eleven mutations are confirmed.
 
+### Part 7 — monthly restore test (`<sha-part-7>`)
+
+`app/orchestration/restore_test.py`, registered as `restore_test_monthly` (30d interval, 45d
+`overdue_after`, derived grace ~15 days as accepted in Part 5). **592 passed / 0 skipped** with
+`DATABASE_URL` and Docker; 437 passed / 155 skipped without.
+
+**The integration tier really restores.** Real archives, real throwaway containers, real
+`timescaledb_pre_restore`/`post_restore`, real teardown — and `docker ps -a` shows no leaked
+containers after the suite.
+
+**Two findings that only running it could produce:**
+
+1. **`create_roles` originally created only `waterway_api`, and the restore failed** on
+   `ERROR: role "dwstest" does not exist / Command was: ALTER SCHEMA public OWNER TO dwstest`.
+   "Create every role the archive references" means the OBJECT OWNER too, not just the interesting
+   one. Roles are now **discovered from the source database** rather than listed in code — a
+   hardcoded list is a second copy of a fact the database already holds.
+2. **`pg_isready` is not a readiness check for this image.** The official Postgres image runs a
+   temporary server during `initdb`; `pg_isready` inside the container answers yes to it, so the
+   restore that follows hits a database about to be restarted underneath it. Passed in isolation
+   every time, errored under full-suite load — the signature of exactly that race. Readiness is
+   now a real query over the published port from outside.
+
+**Three of my own tests were confirmed weak by mutations and rewritten.**
+`test_restore_test_integration_fails_when_a_table_is_short` deleted the WHOLE table, which any
+comparison catches including a percentage tolerance — it now deletes **exactly one row**, the
+smallest real loss there is and precisely what a tolerance swallows. The pre/post-restore ordering
+test raised `ValueError` from `.index` rather than asserting, so it now asserts presence first.
+The S3 download test failed on "no bytes" rather than on "no S3 read", so it now plants a **stale
+local copy** — an implementation reading local staging finds it, succeeds, and is caught.
+
 ---
 
 ## Standing items, carried until somebody closes them
