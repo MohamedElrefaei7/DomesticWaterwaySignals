@@ -860,3 +860,88 @@ def test_resolve_digest_hard_fails_rather_than_guessing():
         return FakeCompleted(0, f'["timescale/timescaledb@{GOOD_DIGEST}"]')
 
     assert preflight.resolve_digest(TAG, run=one_digest) == GOOD_DIGEST
+
+
+# ---------------------------------------------------------------------------------------------
+# The all-zero digest, from both sides of the tool.
+# ---------------------------------------------------------------------------------------------
+#
+# ONE VALUE, TWO MEANINGS, DEPENDING ON WHICH SIDE OF THE TOOL YOU ARE ON.
+#
+#   To gate 1        it is INVALID. It is 64 valid hex characters, so it passes every shape check
+#                    there is; it is wrong by value rather than by form, and letting it through
+#                    ships the "not resolved yet" marker to production.
+#   To --write-digest it is UNPINNED. It is the committed marker chosen precisely because it cannot
+#                    resolve, and writing over it is the entire reason the command exists.
+#
+# The asymmetry is the design. Treating it as pinned-and-differing would make the marker the one
+# thing --write-digest refuses to write, sending the operator back to the hand-editing the command
+# exists to remove - which is how two digests got hand-edited in Phase 10. Treating it as valid for
+# gate 1 lets the marker ship.
+#
+# A TEST ON EACH SIDE, rather than one test of a shared helper, because there is no shared helper
+# to test: the two sides reach opposite conclusions about the same value, so any single assertion
+# about "what the placeholder means" would have to pick one and would be wrong about the other.
+
+
+def test_gate1_rejects_all_zero_digest():
+    """Gate 1 FAILS on the marker. This is about the verdict, not the wording.
+
+    `test_all_zero_digest_is_reported_as_the_placeholder` above asserts the message is distinct
+    from the malformed-digest message, which is a different property: it would still pass if both
+    branches returned PASS with different text. This one is the verdict, isolated, so that the
+    half of the asymmetry that keeps the marker out of production has a test naming it.
+    """
+    result = preflight.check_image_reference(f"{TAG}@{preflight.PLACEHOLDER_DIGEST}")
+
+    assert result.status == preflight.FAIL, (
+        f"gate 1 returned {result.status} for the all-zero placeholder digest. It is 64 valid hex "
+        f"characters and passes every shape check, so nothing else in the gate will stop it - "
+        f"this is the assertion that keeps the 'not resolved yet' marker out of production."
+    )
+    assert preflight.PLACEHOLDER_DIGEST in result.detail, (
+        "the failure does not report the observed value (CLAUDE.md § 13)"
+    )
+
+
+def test_write_digest_overwrites_all_zero_marker_without_raising(tmp_path):
+    """--write-digest treats the marker as UNPINNED and writes it. It must not raise.
+
+    ISOLATED TO THE MARKER. `test_write_digest_writes_unpinned_reference` covers this case, but it
+    covers it alongside a reference carrying no digest at all, and its name and docstring are about
+    the unpinned case - so a later narrowing of that test to what it says it tests would take this
+    with it silently. Here the ONLY thing wrong with any reference is the marker.
+
+    The assertion that matters is the absence of DigestDriftError. If the marker were classified as
+    drift, the command would refuse the one write it was built for, and the operator's next move is
+    to edit the digest by hand.
+    """
+    resolved = "sha256:" + "77" * 32
+    root = _tree(
+        tmp_path,
+        compose_refs=[f"caddy:2-alpine@{preflight.PLACEHOLDER_DIGEST}"],
+        dockerfile_lines=[f"FROM python:3.12-slim@{preflight.PLACEHOLDER_DIGEST} AS build"],
+    )
+    run = _daemon({"caddy:2-alpine": resolved, "python:3.12-slim": resolved})
+
+    try:
+        exit_code = preflight._digest_command(write=True, run=run, repo_root=root)
+    except preflight.DigestDriftError as exc:
+        raise AssertionError(
+            f"--write-digest raised DigestDriftError on the all-zero marker: {exc}\n"
+            f"The marker is the committed 'not resolved yet' value, not a pin that moved. "
+            f"Refusing to write it makes it the one thing this command cannot fix, which sends "
+            f"the operator back to hand-editing digests - the failure --write-digest exists to "
+            f"remove, and the one that produced two hand-edited digests in Phase 10."
+        ) from exc
+
+    assert exit_code == 0, f"--write-digest exited {exit_code} while replacing only markers"
+
+    sites = preflight.enumerate_image_sites(repo_root=root).sites
+    assert sites, "the enumeration found no image sites; this test would assert over nothing"
+    for site in sites:
+        assert preflight.parse_image_reference(site.reference).digest == resolved, (
+            f"{site.label} still carries the marker after --write-digest: {site.reference}"
+        )
+        # And the written result is one gate 1 now accepts - the two sides agree afterwards.
+        assert preflight.check_image_reference(site.reference).status == preflight.PASS
