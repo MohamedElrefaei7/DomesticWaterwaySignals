@@ -97,6 +97,12 @@ no longer matches the data:
 
 ## § Up Next
 
+**THE DEPLOYMENT RUNBOOK IS `docs/runbooks/phase-11.md`, IN THE REPO AND VERSIONED.** It executes
+items 1–11 below, collapsed to **six human actions** with a verifier call before and after each, and
+it names every stop-condition as `exit != 0`. The eleven items stay here as the log's record of what
+is pending; the runbook is how to do them. Where the two disagree, the runbook is the procedure and
+this is the state.
+
 **PHASE 11 AND STAGE B ARE BOTH CODE-COMPLETE AND UNAPPLIED.** Phase 11 is eight commits beginning
 `f29d734`; Stage B is seven more beginning `6607ba7`, which audited the commit boundaries and made
 four corrections rather than adding capability. Every part is written, tested and
@@ -578,6 +584,71 @@ Each of these was a test this session wrote, believed, and then watched fail to 
 The three analog-engine questions, `SIMILARITY_CUTOFF` and friends, the Cairo site number,
 `gauge_series` UTC bucketing, `lock_movements` being unused, the IV chunk interval, and Node not
 being pinned in provisioning. None closed, narrowed, or quietly dropped.
+
+---
+
+## Phase 11 verification tooling — `verify/phase11/`, five commits, unapplied like everything else
+
+Roughly twenty-five manual conditions turned into **six human actions plus ten verifier
+invocations**. `python3 -m verify.phase11 <stage>`, stages `c-pre`, `c-post`, `d-pre`, `d-post`,
+`e`, `f`, `g`, `h`, `i`, `j`. The runbook is `docs/runbooks/phase-11.md`.
+
+**Read-only by construction, two mechanisms.** An allow-list of permitted subcommands per binary
+(`terraform show/version/providers schema`, `docker ps/inspect/compose ps/compose config`, twelve
+enumerated AWS read verbs) with `plan`, `apply`, `init` and every destructive docker verb absent —
+refused for being unlisted, not for being recognised. An AST walk asserts nothing outside `shell.py`
+touches `subprocess`. Everything reading the database connects as `waterway_api`, with no fallback
+to the owner. Three exit codes: 0 passed, 1 a check failed, 2 could not tell.
+
+**Five things the prompt specified that turned out not to be checkable as written**, each measured
+rather than reasoned about:
+
+1. **`c-post` cannot use `terraform show -json` alone.** With no plan file it emits a STATE
+   document, whose keys are `['checks', 'format_version', 'terraform_version', 'values']` — there is
+   no `resource_changes` key at all, so "assert there are no resource changes" is true on every
+   input forever, including a migration that carried nothing. It takes a plan file, and
+   `require_plan` refuses the wrong document type as a precondition.
+2. **A "No changes." plan is not an empty `resource_changes` list.** Measured on 1.15.8: one
+   `["no-op"]` entry per resource, `"applyable": false`. The empty-list form would go red on a
+   correct migration of seventeen resources. An EMPTY list is its own failure — it means the plan
+   was computed against empty state.
+3. **`d-pre`'s wildcard check has to be scoped to `aws_iam_policy` and to `Effect: Allow`.**
+   `aws_s3_bucket_policy.backups` carries `"Action": "s3:*"` in a **Deny** statement, so an
+   unscoped check fails on the correct plan — and the repair somebody reaches for is a weaker check
+   rather than a scoped one.
+4. **Stage H's "exactly the four production services" is wrong by one.** `frontend-build` exits by
+   design (`restart: "no"`, gated by `service_completed_successfully`), so the running set is three.
+   Two exact sets are asserted instead, plus its exit code.
+5. **Two mutation tables named a test that cannot distinguish the implementations.** Substring-
+   searching the plan text for `Delete` still catches `s3:DeleteObject`, so
+   `test_d_pre_fails_on_iam_delete_action` goes red only on its observed-value assertion while the
+   verdict stays correct; the discriminator is
+   `test_d_pre_passes_when_delete_appears_only_in_a_description`. And dropping
+   `Accept-Encoding: identity` is invisible to a test that drives a gzipped body through the check,
+   because that tests the CHECK rather than the REQUEST; a new test inspects the outgoing headers.
+
+**Two defects the tests caught while the tooling was being written:** `bootstrap_bucket_default()`
+matched the first `default =` in `bootstrap/main.tf`, which belongs to `variable "aws_region"` and
+is `"us-east-1"`; and `row_counts` keys are schema-qualified (`public.job_runs`, `backup.py:249`),
+so an unqualified comparison reports every table as both missing and unexpected.
+
+**What the tooling deliberately does not cover**, listed in the runbook and repeated here because
+"a runbook that implies full automation is one somebody will trust past its limits": the two
+`terraform apply`s, `terraform init -migrate-state`, the two concurrent `plan`s that prove locking,
+the SNS confirmation click, the `waterway_api` `DELETE` refusal and the `backups` trigger refusal
+(both are genuine writes and the verifier connects as a role that cannot make one), the `pg_restore`
+95%-cut asymmetry check, stopping a service for Stage I, the alert email arriving, and the three
+`docker compose down/up` cycles for the Part 4 healthcheck race.
+
+**One thing the writeback commit must update by hand:** `verify/phase11/protected.py`'s
+`PROTECTED_ADDRESSES` holds the 17 addresses that exist NOW. After Stage D's apply the state holds
+17 + 13 plus a data source, and `d-pre`'s set-equality check will fail on the next plan until the
+list matches. That failure is the mechanism working, not a defect.
+
+**Fixtures are hand-built and sanitised.** Their shape was verified against real Terraform 1.15.8
+output; their values are placeholders, because `.gitignore` keeps `*.tfstate` out of this repo
+deliberately and a fixture cut from live state would put the account id, the EIP and the instance id
+back in.
 
 ---
 

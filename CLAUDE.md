@@ -576,6 +576,34 @@ These bind every check under `verify/`, and any check written anywhere else.
 - **Verification apparatus lives in `verify/`, never in `app/`.** A probe job in `app/` means
   production code shipping a job that exists only to be watched. Anything a harness registers in
   the persistent job store it removes again on every exit path, or it keeps firing in production.
+- **Verification tooling is read-only BY CONSTRUCTION, not by intention, and there are two
+  mechanisms because neither covers the other.** Every subprocess goes through a wrapper enforcing
+  an ALLOW-LIST of permitted subcommands per binary — a deny-list is the tempting shape because the
+  dangerous verbs are the ones you can name, and it permits `terraform state rm`, `terraform
+  import`, `docker volume prune` and every verb added after it was written, **while reporting
+  success**. An AST walk asserts nothing outside the wrapper module touches `subprocess` at all;
+  that is § 23's legitimate kind of source test, because the call site IS the invariant, and it is
+  an AST walk rather than a regex because these modules name the forbidden call in the prose
+  explaining why it is forbidden. Separately, anything reading the database connects as the
+  read-only role, so read-onlyness is enforced by Postgres rather than by review — **and there is
+  no fallback to the owner connection.** The fallback is the tempting move and it silently discards
+  the guarantee the whole approach is for; a missing GRANT stops and names it.
+- **A verifier has THREE exit codes, and the third is the one that matters: 0 passed, 1 a check
+  failed, 2 usage or an unmet precondition. A verifier that cannot check exits 2, never 0 — and
+  never 1 either.** "I could not tell" and "I checked and it is wrong" send an operator to two
+  different investigations, and collapsing them is how a broken verifier reads as a passing one.
+  An empty check list is exit 2 for the same reason a SKIP is not a PASS. Checks run in declared
+  order and stop at the first failure, because later ones assume the earlier ones held and a
+  cascade buries the real one. **A verifier never writes to a tracked file**: it emits a summary a
+  human transcribes, because a verifier that auto-writes puts unreviewed claims into the log, and
+  the log's whole value is that every claim in it was looked at.
+- **A check over deployed state reads what is DEPLOYED, and asserts it against what is SERVED.**
+  Comparing a Terraform literal to an application constant is two files in a repo agreeing with
+  each other, which they keep doing while the thing they describe is broken; fetching an endpoint
+  and looking for a string the checker hardcoded proves the endpoint says something, not that
+  anything is looking for it. Read the configured value from the live resource, fetch the live
+  response, and assert one contains the other. Structured output only — `terraform show -json`, not
+  the human-readable form, which is laid out for people, changes between versions, and truncates.
 ---
 
 ## 14. Ingest conventions
