@@ -93,9 +93,32 @@ services:
       - /mnt/data/timescaledb:/var/lib/postgresql/data
 
     healthcheck:
-      # -U/-d are required: bare `pg_isready` checks with the wrong default user and reports a
-      # server that is up and rejecting us as healthy.
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-waterway} -d ${POSTGRES_DB:-waterway}"]
+      # ===========================================================================================
+      # A REAL QUERY OVER TCP AS THE REAL USER. NOT `pg_isready`, AND NOT BECAUSE IT IS STRICTER.
+      # ===========================================================================================
+      #
+      # `pg_isready -U ... -d ...` was here through Phase 11 and it answers YES TO THE WRONG
+      # SERVER. The official Postgres entrypoint runs `initdb` and then starts a TEMPORARY server
+      # to apply initialisation - and that server listens ONLY on a unix socket in a private
+      # directory, with no TCP listener at all. `pg_isready` without `-h` connects over exactly
+      # that socket, so it reports healthy while the database the rest of the stack has to reach
+      # does not yet exist.
+      #
+      # `api` gates on `condition: service_healthy`, so that made the API's startup ordering
+      # decorative from Phase 2 onward: on a cold start the API could be released to connect to a
+      # server that was still initialising. It is timing-dependent, which is why it has not been
+      # seen - a slow initdb under load is when it would appear, and it would look like a
+      # connection error from an application that had just been told the database was ready.
+      #
+      # The probe therefore requires three things initdb's temporary server cannot offer: a TCP
+      # connection (`-h 127.0.0.1`), an authenticated session as the real user, and a query the
+      # real database answers.
+      #
+      # NOT FIXED BY LENGTHENING start_period. A longer grace makes the race rarer, which is worse
+      # than leaving it visible: an intermittent startup failure that only appears under load is
+      # the expensive version of this bug. start_period stays at 30s and is a bound on how long a
+      # legitimately slow start may take, not a way of not looking.
+      test: ["CMD-SHELL", "psql -h 127.0.0.1 -U ${POSTGRES_USER:-waterway} -d ${POSTGRES_DB:-waterway} -c 'SELECT 1' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5

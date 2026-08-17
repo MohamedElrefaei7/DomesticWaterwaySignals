@@ -324,3 +324,78 @@ def test_api_service_runs_single_uvicorn_worker():
                 f"{name} runs uvicorn with --workers {count}. The rate limiter's buckets are "
                 f"per-process, so every limit is silently multiplied by {count}."
             )
+
+
+def test_timescaledb_healthcheck_requires_tcp_and_credentials():
+    """The database probe must be one `initdb`'s temporary server cannot satisfy.
+
+    THE FAILURE THIS REPLACES IS A HEALTHCHECK THAT ANSWERS YES ABOUT THE WRONG SERVER. The
+    official Postgres entrypoint runs `initdb` and then starts a TEMPORARY server to apply
+    initialisation. That server listens only on a unix socket in a private directory - there is no
+    TCP listener at all - and `pg_isready` with no `-h` connects over exactly that socket. So a
+    probe that looks correct, and that carries `-U` and `-d` and therefore looks careful, reports
+    healthy while the database everything else must reach does not yet exist.
+
+    `api` gates on `condition: service_healthy`, so this made the API's startup ordering decorative
+    from Phase 2 onward. It is timing-dependent, which is why nobody has seen it: a slow initdb
+    under load is when the API gets released against a server that is still initialising, and the
+    symptom is a connection error from an application that had just been told the database was
+    ready. CLAUDE.md § 13 already knows this shape - "readiness is confirmed by a real query from
+    outside, not by pg_isready" is written there about the restore test's throwaway container, and
+    production was not held to it.
+
+    Three properties, each asserted separately so the failure says which one is missing:
+      a HOST, so the probe crosses TCP rather than the private socket;
+      the real USER and DATABASE, so it is an authenticated session against the real database;
+      a QUERY, so the server answers rather than merely accepting the connection.
+
+    NOT SATISFIED BY A LONGER start_period, and that is asserted too. A longer grace makes the race
+    rarer rather than absent, and an intermittent startup failure that only appears under load is
+    the version of this bug that costs a session.
+    """
+    compose = load_compose()
+    service = compose["services"]["timescaledb"]
+
+    healthcheck = service.get("healthcheck")
+    assert healthcheck, (
+        "the timescaledb service declares no healthcheck at all, while `api` depends on it with "
+        "`condition: service_healthy` - which Compose then cannot evaluate"
+    )
+
+    test = healthcheck["test"]
+    assert isinstance(test, list) and test, f"healthcheck.test is not a non-empty list: {test!r}"
+    command = " ".join(test)
+
+    assert "pg_isready" not in command, (
+        f"the probe uses pg_isready: {command!r}\n"
+        f"initdb runs a temporary server on a unix socket in a private directory, and pg_isready "
+        f"without -h connects over exactly that socket - so it reports healthy about a server "
+        f"that is not the one anything else can reach. Use a real query over TCP."
+    )
+
+    assert re.search(r"-h\s+\S+", command), (
+        f"the probe names no host: {command!r}\n"
+        f"Without -h the client uses the unix socket, which is the one transport initdb's "
+        f"temporary server offers. The host is what makes this probe unsatisfiable by it."
+    )
+
+    assert re.search(r"-U\s+\S+", command), f"the probe names no user: {command!r}"
+    assert re.search(r"-d\s+\S+", command), f"the probe names no database: {command!r}"
+    assert "POSTGRES_USER" in command and "POSTGRES_DB" in command, (
+        f"the probe hardcodes its user or database rather than reading the same variables the "
+        f"server is configured from: {command!r}. Two copies of one fact drift silently."
+    )
+
+    assert re.search(r"-c\s+'?\s*SELECT", command, re.IGNORECASE), (
+        f"the probe issues no query: {command!r}\n"
+        f"Accepting a connection and answering a query are different claims, and a server can do "
+        f"the first while still starting up."
+    )
+
+    # The grace is a bound on a legitimately slow start, never the fix for the race above.
+    start_period = healthcheck.get("start_period")
+    assert start_period == "30s", (
+        f"healthcheck.start_period is {start_period!r}, not 30s. If it was lengthened to make a "
+        f"startup failure go away, the failure is still there and is now rarer - which is worse, "
+        f"because an intermittent one that appears only under load is the expensive kind."
+    )
