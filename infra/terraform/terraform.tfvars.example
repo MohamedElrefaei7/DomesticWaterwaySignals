@@ -14,3 +14,15 @@ ami_id = "ami-0XXXXXXXXXXXXXXXX"
 instance_type        = "t3.small"
 root_volume_size_gb  = 20
 data_volume_size_gb  = 50
+
+# --- Phase 11 -----------------------------------------------------------------------------
+
+# REQUIRED, no default. The address subscribed to the alarm topic. After apply, confirm the
+# subscription from your inbox: an unconfirmed subscription delivers nothing while the alarm
+# reports as configured.
+alert_email = "you@example.com"
+
+# Optional; these are the defaults.
+# project_name       = "domestic-waterway-signals"
+# domain_name        = "bargeanalysis.com"
+# monthly_budget_usd = 25

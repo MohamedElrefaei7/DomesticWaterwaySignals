@@ -64,3 +64,45 @@ variable "data_volume_size_gb" {
   type        = number
   default     = 50
 }
+
+# ------------------------------------------------------------------------------------------
+# Phase 11 — backups, monitoring, budget
+# ------------------------------------------------------------------------------------------
+
+variable "project_name" {
+  description = <<-EOT
+    Name prefix for resources whose names must be globally or account-unique. Used to build the
+    backup bucket name together with the account id, which is read from a data source rather
+    than written down.
+  EOT
+  type        = string
+  default     = "domestic-waterway-signals"
+}
+
+variable "domain_name" {
+  description = "Public hostname the external health check probes. Must resolve to the EIP."
+  type        = string
+  default     = "bargeanalysis.com"
+}
+
+variable "alert_email" {
+  description = <<-EOT
+    Address subscribed to the alarm topic. NO DEFAULT: an alert destination nobody chose is an
+    alert nobody reads. Set it in terraform.tfvars, which is git-ignored.
+
+    An SNS email subscription is created PENDING and delivers nothing until the confirmation
+    link is clicked. That is a Theme 1 shape — the alarm reports as configured while its only
+    delivery path is inert — so confirm it and check the subscription ARN is not the literal
+    string `PendingConfirmation`.
+  EOT
+  type        = string
+}
+
+variable "monthly_budget_usd" {
+  description = <<-EOT
+    Monthly cost threshold for the budget alarm. There is a running instance, an EIP and an EBS
+    volume billing continuously, and two S3 buckets joining them in this phase.
+  EOT
+  type        = number
+  default     = 25
+}

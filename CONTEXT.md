@@ -196,6 +196,58 @@ recovering from a bad apply.
 **Still pending (human steps):** `bootstrap` apply, `terraform init -migrate-state`, the clean-plan
 check, and the two-shell concurrent-lock test. `§ Up Next` item 4 stays open until they run.
 
+### Part 3 — backup bucket, scoped IAM, external health check, alarm, budget (`<sha-part-3>`)
+
+**The health check string-matches `"degraded":false` on the field the API already has.** No
+`status` field was added and no ok token invented — `CLAUDE.md § 20` forbids a bare
+`{"status":"ok"}` because that shape is what let the prior project record "Completed" for two and
+a half months. Measured: a healthy body renders as
+`{"degraded":false,"checked_at":"...","jobs":[...` — the token starts at **byte 1**, far inside
+Route53's 5,120-byte window.
+
+**The search string is validated against rendered bytes, not against another literal.**
+`test_health_check_search_string_matches_rendered_body` drives the real FastAPI app through
+`TestClient` and asserts the Terraform literal appears in `response.content`. A literal-to-literal
+comparison catches a typo and misses a change of response class or JSON separators — the failure
+that would leave this monitor permanently green. Confirmed by mutating the literal to
+`"degraded": false` (one space), which is invisible to a literal comparison and went red here.
+
+**`test_rendered_degraded_body_does_not_contain_search_string` is the load-bearing one.** Renaming
+`JobHealth.overdue` to `degraded` produces a body reading
+`{"degraded":true,...,"jobs":[{...,"degraded":false}...]}` — top-level degraded, nested healthy —
+and the monitor would read the degraded system as healthy. The test caught it.
+
+**The instance role gains a customer-managed policy with no delete action and no `s3:*`**,
+scoped by reference to the backup bucket. Retention is the bucket lifecycle rule, which S3
+executes itself and the instance cannot reach: `backups/daily/` at 35 days, `backups/monthly/` at
+400, both with `noncurrent_version_expiration` (7 and 30 days) so versioning does not retain every
+overwritten object forever.
+
+**`test_instance_policy_cannot_reach_state_bucket` was strengthened mid-part.** As first written
+it passed under `Resource = ["*"]` — a wildcard reaches the state bucket without naming it, so the
+test named for the property was green while only the scoping test caught the mutation. It now
+parses every `Resource` entry and requires each to reference the backup bucket.
+
+**`tests/terraform/test_iam.py::test_instance_role_attaches_only_ssm_core` was widened.** It
+asserted a total of one attachment, correct while `iam.tf` said "No S3 policy — the backup bucket
+doesn't exist yet (Phase 11)". It now asserts exactly one **AWS-managed** attachment (SSM core),
+requires every customer-managed attachment to point at a policy declared in this repo, and still
+forbids inline policies. A bare count of two would have been a weaker test that passed today;
+what is guarded is that nobody attaches `AmazonS3FullAccess`.
+
+**Budget alert added** (`§ Up Next` item 6, open since Phase 10 with status unknown): a `COST`
+budget at `var.monthly_budget_usd` (default 25) with both ACTUAL and FORECASTED notifications.
+The forecast is the one that arrives while there is still time to act.
+
+**Health check and alarm are pinned to an explicit `aws.us_east_1` aliased provider**, not left to
+`var.aws_region`. Route53 health-check metrics exist only there; the comment alone would not
+survive somebody moving the default region.
+
+**Still pending (human steps):** `terraform apply`, SNS subscription confirmation and the
+`PendingConfirmation` check, `get-health-check-status`, the forced-degradation test, and the
+`Accept-Encoding:` curl that confirms what Route53 actually receives rather than what the app
+returns.
+
 ---
 
 ## Standing items, carried until somebody closes them
