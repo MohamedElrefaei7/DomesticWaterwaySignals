@@ -109,10 +109,9 @@ per-IP rate limit Phase 10 did not ship.
    restoring stale `next_run_time` values is worse than restoring none.
 3. **A restore test that actually restores**, followed by `ANALYZE`, which is part of restoring and
    is neither a migration nor a scheduled job.
-4. **S3 backend with locking for Terraform state.** State is local and there is now applied
-   infrastructure behind it: if `infra/terraform/terraform.tfstate` is lost, `prevent_destroy`
-   protects nothing, because Terraform no longer knows the data volume or the EIP exist. **Highest-
-   value piece of unowned work in `infra/`.**
+4. ~~**S3 backend with locking for Terraform state.**~~ **WRITTEN, PENDING MIGRATION.** HCL landed
+   in Part 2 below; `terraform init -migrate-state` is a human step and has not been run yet.
+   Until it is, state is still local and this item is not closed.
 5. **External uptime monitoring**, alerting on the `degraded` field rather than on the status code —
    `/api/health` returns 200 while degraded by design.
 6. **Confirm the AWS budget alert exists.** Status unknown. There is a running instance, an EIP and
@@ -166,6 +165,36 @@ files exercise those branches.
 **Tests live in `tests/verify/test_preflight_checks.py`, not `tests/deploy/test_preflight_gate1.py`.**
 Every other gate-1 test is already in that file; a second home would split the gate's coverage for
 no reason.
+
+### Part 2 — Terraform remote state with locking (`<sha-part-2>`)
+
+**Stop-condition ran clean.** `git ls-files infra/terraform/ | grep tfstate` printed nothing, and
+`.gitignore:16-17` carries `*.tfstate` and `*.tfstate.*` — the second covering `.tfstate.backup`.
+`git check-ignore -v` confirms all three bootstrap artefacts (`terraform.tfstate`,
+`terraform.tfstate.backup`, `.terraform/`) are ignored at that path. **Checked, not assumed.** No
+credential exposure and no rotation commit needed.
+
+**Locking mechanism: native S3 (`use_lockfile = true`), not a DynamoDB table.** Installed
+Terraform is **v1.15.8**; conditional-write locking against a `.tflock` object arrived in 1.10 and
+DynamoDB-based locking was deprecated in 1.11. A lock table would be a second resource, a second
+failure mode and a second line on the bill for something S3 now does natively.
+`test_backend_has_locking_enabled` accepts either mechanism, so a future move between them does
+not require rewriting the guard.
+
+**The state bucket name is written twice and guarded by a test.** A `backend` block is evaluated
+before variables, locals and data sources exist, so it cannot interpolate — the account-id suffix
+used for Part 3's backup bucket is not available here. `backend.tf` holds the literal
+`domestic-waterway-signals-tfstate`; `bootstrap/main.tf` holds it as the default of
+`var.state_bucket_name`; `test_backend_bucket_matches_bootstrap_bucket` reads both and asserts
+they agree. A global name collision fails the bootstrap apply immediately, before any state moves.
+
+**The state bucket deliberately has no lifecycle rule**, the opposite of Part 3's backup bucket,
+guarded by the inverse assertion `test_state_bucket_has_no_lifecycle_expiry`. Each state object
+version is a recovery point of a few kilobytes and the day one is wanted is the day somebody is
+recovering from a bad apply.
+
+**Still pending (human steps):** `bootstrap` apply, `terraform init -migrate-state`, the clean-plan
+check, and the two-shell concurrent-lock test. `§ Up Next` item 4 stays open until they run.
 
 ---
 

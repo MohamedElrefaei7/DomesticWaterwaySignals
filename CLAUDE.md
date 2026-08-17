@@ -255,6 +255,24 @@ not the user-facing output.
 - IMDSv2 required on every instance.
 - IAM roles carry exactly the managed policies they need, added in the commit that needs them.
 - `terraform apply` is human-only, as is any operation that destroys or detaches the data volume.
+- **Terraform state lives in the versioned, locked S3 backend, never on one machine.**
+  `prevent_destroy` is an attribute of STATE, not of the resource: lose the state file and
+  Terraform no longer knows the data volume or the EIP exist, so the guard protects nothing and
+  the next plan proposes creating a second copy of infrastructure that is already running.
+  Locking is not optional either — two concurrent applies against an unlocked backend both read
+  the same state and the second write discards the first's record of what it created.
+- **The state bucket is created by a separate bootstrap configuration whose own state stays
+  local, and that local state is disposable.** A bucket cannot hold the state that describes it;
+  the backend must exist before the configuration using it can initialise. The instinct on
+  finding a local `terraform.tfstate` in `bootstrap/` is to "fix" it by pointing it at the bucket
+  beside it, which is a circular dependency that surfaces as an unrecoverable `init`. If that
+  local state is lost the bucket is **imported, never recreated** — which is the point of
+  bootstrapping it separately: the one piece of state that cannot be remote is also the one whose
+  loss costs nothing.
+- **A `backend` block cannot interpolate** — it is evaluated before variables, locals, data
+  sources and providers exist — so the state bucket name is a literal there and a second literal
+  in the bootstrap configuration. Where a value is forced to be written twice, a test reads both
+  copies and asserts they agree; two files holding one fact drift silently.
 - `.terraform.lock.hcl` is locked for every platform that will run `terraform init` — laptop and
   CI/server architectures alike — via `terraform providers lock -platform=... -platform=...` before
   committing, and the lock file's growth is confirmed, not assumed. A lock file that only carries the
