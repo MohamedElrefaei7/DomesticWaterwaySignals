@@ -121,10 +121,21 @@ The pending human steps are listed under each part below and gathered here:
    error about an excluded table that says nothing about ordering.
 9. The two jobs, one at a time, through the real runner Stage B added:
    ```
-   cd /opt/inland-waterway-signals && set -a; . ./.env; set +a
+   cd /opt/inland-waterway-signals
+   source .venv/bin/activate          # NOT optional — see below
+   set -a; . ./.env; set +a
    python3 -m app.orchestration.run_once backup_nightly
    python3 -m app.orchestration.run_once restore_test_monthly
    ```
+   **The activation is load-bearing and its absence does not look like a missing venv.** The jobs
+   run from a host venv, not a container (§ Scheduler and jobs), and `boto3` is installed only
+   there — so a bare `python3 -m app.orchestration.run_once backup_nightly` reaches the system
+   interpreter and dies on `ModuleNotFoundError: boto3`. **Measured against the source, not
+   assumed:** `backup.py:479` imports boto3 inside `backup_nightly`, above the `mkdir` and the
+   dump, so the failure is early and nothing is left in staging — but the error names a Python
+   package rather than an interpreter, so it reads as a missing dependency in the backup job. The
+   fix somebody reaches for is `pip install boto3`, which on the system interpreter succeeds and
+   moves the failure one import further down.
    Exit `0` succeeded, `1` the job failed (recorded in `job_runs`), `2` usage.
 10. Burst `/api/conclusion` from a laptop, not the instance.
 11. `docker compose down && docker compose up -d`, then `docker compose ps` — **three times**. The
