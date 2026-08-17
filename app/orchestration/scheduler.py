@@ -197,15 +197,18 @@ def start(scheduler) -> None:
     scheduler.resume()
 
 
-def build_scheduler(url: str | None = None, *, jobstore_url: str | None = None):
-    """Construct the scheduler and its listener. Registers no jobs and does not start it.
+def check_cadence_agreement() -> None:
+    """CADENCES and JOB_FUNCTIONS must describe the same set of jobs, in both directions.
 
-    Jobs are registered by register_jobs() after start, because reconciling against the persisted
-    schedule requires a queryable job store. Use start() for the whole sequence.
+    EXTRACTED SO THERE IS ONE OF IT. It was inline in build_scheduler() until the one-shot runner
+    needed the same check; a runner that wrote its own would be a second copy of the same fact, and
+    two copies of one fact drift silently - which is the reasoning CLAUDE.md § 4 already applies to
+    the cadence table itself being the single source of truth for both timing and thresholds.
 
-    `url` (psycopg DSN, for job bookkeeping) and `jobstore_url` (SQLAlchemy DSN, for the job store)
-    are separate parameters only so tests can supply one without a live database behind the other.
-    In production both come from DATABASE_URL.
+    Both directions matter and they fail differently. A cadence entry with no function never fires
+    and the heartbeat reports it overdue forever. A registered function with no cadence entry never
+    runs at all, and nothing reports that it never ran - which is the worse of the two, because it
+    is silent.
     """
     missing = [c.job_name for c in CADENCES if c.job_name not in JOB_FUNCTIONS]
     if missing:
@@ -219,6 +222,19 @@ def build_scheduler(url: str | None = None, *, jobstore_url: str | None = None):
             f"registered functions with no cadence entry: {unscheduled}. These would never run, "
             f"and nothing would report that they never ran."
         )
+
+
+def build_scheduler(url: str | None = None, *, jobstore_url: str | None = None):
+    """Construct the scheduler and its listener. Registers no jobs and does not start it.
+
+    Jobs are registered by register_jobs() after start, because reconciling against the persisted
+    schedule requires a queryable job store. Use start() for the whole sequence.
+
+    `url` (psycopg DSN, for job bookkeeping) and `jobstore_url` (SQLAlchemy DSN, for the job store)
+    are separate parameters only so tests can supply one without a live database behind the other.
+    In production both come from DATABASE_URL.
+    """
+    check_cadence_agreement()
 
     # Decision 15: PERSISTENT job store, against the same Postgres.
     #
