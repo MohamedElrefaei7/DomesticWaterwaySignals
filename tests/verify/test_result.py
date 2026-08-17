@@ -215,10 +215,14 @@ def test_no_stage_named_is_exit_2(capsys):
 # quietly go stale; and a second write inside an already-permitted function is caught rather than
 # absorbed by the entry that is already there.
 #
-# It is empty in Part 1 and that is the assertion, not a placeholder. Stage E's `/mnt/data`
-# free-space baseline (Part 4) is the one write this package is expected to ever make, and when it
-# lands it lands here with its reason beside it.
-PERMITTED_WRITES: dict[str, int] = {}
+# Stage E's `/mnt/data` free-space baseline is the ONE write this package makes. Stages G and H
+# read it, and it is under /mnt/data rather than /tmp because /tmp is cleared on reboot and may be
+# a tmpfs sized from RAM - a baseline that vanishes leaves the later stages comparing against
+# nothing and reporting that as zero. It is not a tracked file: a verifier that writes into the
+# repo puts unreviewed values in the log.
+PERMITTED_WRITES: dict[str, int] = {
+    "stage_e.py:_write_baseline": 1,
+}
 
 _WRITE_CALLS = {"write_text", "write_bytes", "mkdir", "unlink", "rename", "touch", "open"}
 

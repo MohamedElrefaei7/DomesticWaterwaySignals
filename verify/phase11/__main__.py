@@ -21,7 +21,16 @@ import argparse
 import sys
 from typing import Callable, Sequence
 
-from verify.phase11 import stage_c, stage_d, stage_i, stage_j
+from verify.phase11 import (
+    stage_c,
+    stage_d,
+    stage_e,
+    stage_f,
+    stage_g,
+    stage_h,
+    stage_i,
+    stage_j,
+)
 from verify.phase11.result import EXIT_PRECONDITION, Check, Precondition, report
 
 # stage identifier -> builder taking the stage's positional arguments and returning its checks.
@@ -32,6 +41,10 @@ STAGES: dict[str, Callable[..., Sequence[Check]]] = {
     "c-post": stage_c.checks_c_post,
     "d-pre": stage_d.checks,
     "d-post": stage_d.checks_d_post,
+    "e": stage_e.checks,
+    "f": stage_f.checks,
+    "g": stage_g.checks,
+    "h": stage_h.checks,
     "i": stage_i.checks,
     "j": stage_j.checks,
 }
