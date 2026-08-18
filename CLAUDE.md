@@ -1609,3 +1609,68 @@ what the failure invites, and it silently stops catching the thing. Walk the AST
 *executed* — the arguments of `.execute()`, the call site itself — so prose is not in scope at all.
 Then confirm precision with an **inverted mutation** (§ 23): the documenting prose is already
 present, so the guard must be **green** with it there.
+
+---
+
+## 25. A correct mechanism keyed on a wrong parameter
+
+Learned when the monthly restore test failed on its first ever run (2026-08-18). §§ 14–24 govern
+data, claims, serialization, rendering, reach, transaction boundaries and cluster settings. **This
+governs a class of defect that cuts across all of them**, and it is named here because it has now
+happened three times in three consecutive commits.
+
+**The shape: the mechanism is present, idiomatic, and passes every test that exercises *whether it
+is used*; the parameter it is keyed on is wrong, and it fails only against production's specific
+configuration.** It is not § 2's theme 1 — nothing reports success while the thing downstream gets
+nothing — and it is not quite theme 2 either. It is narrower and more expensive: the test asserts
+the mechanism is **invoked** rather than that it **takes effect against the configuration
+production actually has**, so the guard is green everywhere except the one place it matters.
+
+The three occurrences, in the order they were found:
+
+1. **`SET LOCAL ROLE` on an autocommit connection** (§ 3). The switch is discarded silently at the
+   end of the statement, so the read-only assertion ran its `DELETE` as the OWNER and would have
+   accused the backup's grants every month. A test that the role switch was *issued* passes.
+2. **`gauge_series` binding by OID** (§ 15). The rename would have repointed the view onto the
+   archive, which holds identical data at commit time and diverges on the next ingest. A test that
+   the view *exists and returns rows* passes, on both sides of the defect.
+3. **The pgpass entry keyed on the production database while `pg_restore` connects to the
+   throwaway** (§ 3). libpq matches on all five fields and **does not error on a non-matching
+   file — it falls through to prompting**, so it surfaces as an authentication failure. A test that
+   the file is *written, at 0600, with PGPASSFILE exported* passes.
+
+**The guard is an assertion on the observable downstream of the parameter**, never on the call:
+the role that `current_user` reports, the OID the view resolves to, the connection succeeding
+without a prompt.
+
+- **The harness's own configuration is part of what the test asserts, and where it differs from
+  production the test is blind in exactly that direction.** All three of the above were executed
+  on every test run and none was observed. The pgpass one is the clearest: the integration tier
+  runs against `POSTGRES_HOST_AUTH_METHOD=trust`, where **libpq never consults the pgpass file at
+  all**, so every assertion about it was vacuous — measured, by applying the defect and watching
+  `test_restore_test_mark_verified_visible_from_new_connection`, which drives the real job end to
+  end, stay green. A test whose subject is a credential needs a server that demands one; a test
+  whose subject is a lookup needs the lookup to be reached.
+- **A fixture that provides the production-like configuration verifies it got one, by crossing the
+  boundary.** `-e POSTGRES_HOST_AUTH_METHOD=scram-sha-256` is configuration; connecting with a
+  deliberately wrong password and watching the server refuse is the property. A reused volume keeps
+  the `pg_hba.conf` written at first init, so the environment variable can be set and ignored — and
+  a fixture that trusted it would assert nothing while reporting a pass.
+- **Where such a fixture cannot be produced, the test SKIPS with the reason stated, never passes.**
+  A skip naming "this server accepts any password, so it cannot demonstrate a pgpass lookup
+  failing" is a visible line in the report. The alternative is a test that runs, goes green, and
+  measures nothing — which is how all three of these survived review.
+- **Prefer the flag that makes the whole class legible over the fix to the instance.** `pg_dump`
+  and `pg_restore` carry `--no-password` so libpq fails immediately naming the missing password
+  rather than prompting on a non-TTY. Correcting only the wrong field leaves the next mismatch — a
+  changed port, a renamed user — producing the identical misleading message, and the diagnosis is
+  done again from nothing. The flag costs one argv entry and converts "looks like a wrong password"
+  into "says no password was supplied".
+- **A parameter that is right for one caller and wrong for another is an ASYMMETRY to assert, not
+  an inconsistency to unify.** `backup_nightly_job` passes the production database to
+  `write_pgpass` and `restore_test_monthly_job` passes `"*"`, because one connects to a single
+  known database and the other also connects to a database whose name is generated per run. Two
+  tests assert the two callers separately, **in opposite directions**, so "tidying" them into
+  agreement goes red. Narrower is right wherever it is achievable; a widening is a concession one
+  path needs, recorded where the next reader will look for it — in the helper's own docstring,
+  because the narrow-looking version is the one that reads as careful.

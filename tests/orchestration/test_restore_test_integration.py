@@ -15,6 +15,7 @@ connected database's name), but it is worth knowing before pointing DATABASE_URL
 precious.
 """
 
+import os
 import subprocess
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -447,3 +448,269 @@ def test_restore_test_integration_succeeds_with_multiple_owners(multi_owner_arch
         assert owner is not None and owner[0] == SECOND_OWNER, (
             f"second_owned is owned by {owner!r} in the restored database, not by {SECOND_OWNER!r}"
         )
+
+
+# ---------------------------------------------------------------------------------------------
+# The test that would have caught the 2026-08-18 pgpass defect
+# ---------------------------------------------------------------------------------------------
+#
+# WHY THE REST OF THIS TIER MISSED IT, WHICH IS THE WHOLE POINT OF THIS SECTION.
+#
+# Every fixture above runs against a server started with `POSTGRES_HOST_AUTH_METHOD=trust` -
+# measured on the project's own test container, whose pg_hba.conf is `host all all all trust`.
+# `_with_password` at the top of this file exists only to satisfy the URL parser, and its
+# placeholder is literally spelled `trust-auth-ignores-this`. On a trust server libpq never
+# consults the pgpass file at all, so EVERY assertion in this tier is blind to what is in it.
+#
+# `test_restore_test_mark_verified_visible_from_new_connection` in
+# test_orchestration_write_paths_commit.py already drives the real `restore_test_monthly_job` end
+# to end, so the broken line WAS executed on every run - and stayed green, because the connection
+# it authenticated was never asked for a password.
+#
+# So the test below has to satisfy BOTH conditions at once, and neither alone is sufficient:
+#
+#   1. a server that REQUIRES a password (not trust), and
+#   2. a target database whose name DIFFERS from the dump's origin.
+#
+# Condition 2 is already true everywhere - the throwaway is always `dws_restore_test_<suffix>` -
+# which is exactly why condition 1 was the one that hid this.
+
+PASSWORD_SERVER_DB = "dwspwtest"
+PASSWORD_SERVER_USER = "dwspwtest"
+# A URI-safe password (CLAUDE.md § 5): `/` and `+` from base64 break DATABASE_URL parsing and
+# surface as host and port errors rather than as authentication failures.
+PASSWORD_SERVER_PASSWORD = "b6f1c0a94d2e7d5183ab0f4c9e2d7a61"
+
+
+def _server_requires_a_password(url: str) -> bool:
+    """Does this server actually refuse a wrong password? Measured, never assumed.
+
+    THE CONFIGURATION IS NOT THE PROPERTY. A container started with the right environment variable
+    can still come up trust - a reused volume keeps the pg_hba.conf written at first init - and a
+    test that trusted `-e POSTGRES_HOST_AUTH_METHOD=scram-sha-256` would then assert nothing while
+    reporting a pass. That is CLAUDE.md § 2's theme 2, in the fixture guarding against theme 2.
+
+    So the check crosses the boundary the defect lives at: connect with a deliberately wrong
+    password and see whether the server lets it through.
+    """
+    parts = urlsplit(url)
+    wrong = urlunsplit((
+        parts.scheme,
+        f"{parts.username}:definitely-not-the-password@{parts.hostname}:{parts.port}",
+        parts.path, parts.query, parts.fragment,
+    ))
+    try:
+        with db.connection(wrong) as conn:
+            conn.execute("SELECT 1")
+    except Exception:
+        return True
+    return False
+
+
+@pytest.fixture(scope="session")
+def password_required_database_url():
+    """A Postgres that demands a password, at the same major as the local client.
+
+    `PASSWORD_DATABASE_URL` is honoured if set, for a machine with no Docker. Otherwise a
+    container is started here and removed afterwards. This is a TEST-TIER container started from
+    the developer's own machine - it is not the Docker socket inside the scheduler container that
+    CLAUDE.md § 22 forbids, and nothing in app/ gains a dependency on it.
+
+    The image major is taken from the local `pg_dump`, so this server can never be the
+    client/server mismatch that `matching_pg_client` exists to skip on.
+
+    SKIPS LOUDLY, WITH THE REASON, whenever it cannot produce such a server - including when the
+    server it was handed turns out to accept any password. A skip is visible in the report; the
+    alternative is a test that quietly measures nothing, which is the failure this whole file is
+    about.
+    """
+    import shutil as _shutil
+    import time
+
+    from tests.orchestration.conftest import local_client_major
+
+    provided = os.environ.get("PASSWORD_DATABASE_URL", "").strip()
+    if provided:
+        if not _server_requires_a_password(provided):
+            pytest.skip(
+                "PASSWORD_DATABASE_URL points at a server that accepts ANY password, so it cannot "
+                "demonstrate a pgpass lookup failing. That is the trust configuration this test "
+                "exists because of - point it at a scram-sha-256 server."
+            )
+        yield provided
+        return
+
+    if _shutil.which("docker") is None:
+        pytest.skip(
+            "no docker on PATH and PASSWORD_DATABASE_URL is unset, so there is no "
+            "password-requiring server to test against. NOTHING BELOW HAS BEEN VERIFIED: the rest "
+            "of this tier runs against a trust server, where the pgpass file is never consulted."
+        )
+
+    major = local_client_major()
+    if major is None:
+        pytest.skip("no pg_dump on PATH: the dump and restore are invoked directly")
+
+    image = f"timescale/timescaledb:latest-pg{major}"
+    container = subprocess.run(
+        [
+            "docker", "run", "--detach", "--rm",
+            # NO POSTGRES_HOST_AUTH_METHOD=trust. That variable is what the project's ordinary
+            # test container sets, and setting it here would reproduce the blindness exactly.
+            "--env", "POSTGRES_HOST_AUTH_METHOD=scram-sha-256",
+            "--env", f"POSTGRES_PASSWORD={PASSWORD_SERVER_PASSWORD}",
+            "--env", f"POSTGRES_USER={PASSWORD_SERVER_USER}",
+            "--env", f"POSTGRES_DB={PASSWORD_SERVER_DB}",
+            "--publish", "127.0.0.1::5432",
+            image,
+        ],
+        capture_output=True, text=True,
+    )
+    if container.returncode != 0:
+        pytest.skip(f"could not start {image}: {container.stderr.strip()[:400]}")
+    container_id = container.stdout.strip()
+
+    try:
+        published = subprocess.run(
+            ["docker", "port", container_id, "5432/tcp"],
+            capture_output=True, text=True,
+        )
+        port = published.stdout.strip().splitlines()[0].rsplit(":", 1)[-1]
+        url = (
+            f"postgresql://{PASSWORD_SERVER_USER}:{PASSWORD_SERVER_PASSWORD}"
+            f"@127.0.0.1:{port}/{PASSWORD_SERVER_DB}"
+        )
+
+        deadline = time.time() + 90
+        last = None
+        while time.time() < deadline:
+            try:
+                with db.connection(url) as conn:
+                    conn.execute("SELECT 1")
+                break
+            except Exception as exc:  # noqa: BLE001 - the reason is reported on timeout
+                last = exc
+                time.sleep(1)
+        else:
+            pytest.skip(f"{image} never became ready: {last}")
+
+        if not _server_requires_a_password(url):
+            pytest.skip(
+                f"{image} came up accepting any password despite "
+                f"POSTGRES_HOST_AUTH_METHOD=scram-sha-256, so it cannot demonstrate a pgpass "
+                f"lookup failing."
+            )
+
+        yield url
+    finally:
+        subprocess.run(["docker", "rm", "--force", container_id], capture_output=True)
+
+
+@pytest.fixture
+def password_required_stack(password_required_database_url):
+    """The password-requiring server, migrated, with `apscheduler_jobs` present and non-empty.
+
+    Non-empty on purpose: the backup asserts its `--exclude-table-data` target EXISTS before
+    dumping, and the restore comparison asserts the restored copy has zero rows. An absent table
+    fails the job for an unrelated reason and would read as this test finding something.
+
+    DELIBERATELY NOT `matching_pg_client`. That fixture compares the local client against the
+    server DATABASE_URL points at, which is a different server from this one - so on a machine
+    whose client does not match the ordinary test database this test would skip for a reason that
+    has nothing to do with the server it actually uses. The major agreement that matters here is
+    guaranteed by construction, because the image tag above is chosen FROM the client's major, and
+    it is asserted below rather than assumed.
+    """
+    from app.orchestration import migrate
+
+    from tests.orchestration.conftest import local_client_major
+
+    with db.connection(password_required_database_url) as conn:
+        server = int(conn.execute("SHOW server_version_num").fetchone()[0]) // 10000
+    client = local_client_major()
+    assert client == server, (
+        f"the password-requiring server is major {server} and the local client is major "
+        f"{client}. The fixture derives the image tag from the client, so these can only differ "
+        f"if PASSWORD_DATABASE_URL was pointed somewhere else - and a major mismatch fails the "
+        f"job on the version pin rather than on the pgpass entry this test is about."
+    )
+
+    migrate.run(Path(__file__).resolve().parents[2] / "migrations", url=password_required_database_url)
+
+    with db.connection(password_required_database_url, autocommit=True) as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS apscheduler_jobs ("
+            "  id varchar(191) NOT NULL PRIMARY KEY,"
+            "  next_run_time double precision,"
+            "  job_state bytea NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO apscheduler_jobs (id, next_run_time, job_state) "
+            "VALUES ('heartbeat', 1, '\\x00'::bytea) ON CONFLICT (id) DO NOTHING"
+        )
+    return password_required_database_url
+
+
+def test_restore_test_integration_authenticates_against_a_password_required_server(
+    tmp_path, password_required_stack, monkeypatch
+):
+    """THE TEST THAT WOULD HAVE CAUGHT IT. Drives the real job against a real password.
+
+    It runs the nightly backup and then the monthly restore test, both through their real
+    entrypoints, so the pgpass file under test is the one `restore_test_monthly_job` writes at its
+    own call site - not one this test constructed, which would be a fixture asserting itself.
+
+    The failure it reproduces is one wrong field out of five. libpq matches a pgpass line on host,
+    port, database, user AND password, and it does not error when nothing matches: it prompts. On
+    a non-TTY the prompt is answered with nothing, and the job dies with
+
+        Password:
+        FATAL:  password authentication failed for user "waterway"
+
+    which is a message about the credential for a defect in the lookup. Reaching the assertions
+    below at all is most of the result.
+    """
+    from tests.orchestration.test_orchestration_write_paths_commit import RoundTripS3
+
+    url = password_required_stack
+
+    # THE @job DECORATOR'S BOOKKEEPING CONNECTION TAKES DATABASE_URL FROM THE ENVIRONMENT. It has
+    # to point at this server too, or the `job_runs` rows for these two runs land on a different
+    # database from the work they describe - which would fail here for a reason that is not the
+    # one under test.
+    monkeypatch.setenv("DATABASE_URL", url)
+
+    staging = tmp_path / "backups"
+    staging.mkdir()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    s3 = RoundTripS3(tmp_path / "bucket")
+
+    backup.backup_nightly_job(url, bucket="test-bucket", staging_dir=staging, s3=s3)
+    restore_test.restore_test_monthly_job(url, scratch_dir=scratch, s3=s3)
+
+    assert s3.downloaded, (
+        "the restore test read no object from the bucket, so it never reached pg_restore and this "
+        "test cannot have exercised the pgpass entry"
+    )
+
+    with db.connection(url) as conn:
+        row = conn.execute(
+            "SELECT restore_verified_at, restore_notes FROM backups ORDER BY started_at DESC "
+            "LIMIT 1"
+        ).fetchone()
+
+    assert row is not None, "the nightly job left no backups row to verify"
+    verified_at, notes = row
+    assert verified_at is not None, (
+        f"the restore test did not mark the backup verified against a password-requiring server. "
+        f"notes={notes!r}"
+    )
+
+    # THE THROWAWAY'S NAME IS THE OTHER HALF OF THE CONDITION. If it equalled the production
+    # database, a pgpass entry keyed on production would match and this test would pass over the
+    # defect - so the assertion states the condition it depends on rather than assuming it.
+    assert "dws_restore_test" not in url, "the job ran against a throwaway, not against production"
+    assert notes and "tables compared" in notes, (
+        f"the verification note does not describe a comparison: {notes!r}"
+    )

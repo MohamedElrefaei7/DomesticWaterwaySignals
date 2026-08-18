@@ -364,6 +364,45 @@ def write_pgpass(path: Path, *, host: str, port: int, database: str, user: str, 
     listing of the daemon's children, which makes the database password readable by anything that
     can talk to the Docker socket - and § 22 already establishes that the socket is effectively
     root on the host.
+
+    LIBPQ MATCHES A LINE ON ALL FIVE FIELDS - host, port, database, user, password - AND A
+    NON-MATCHING FILE IS NOT AN ERROR. libpq falls through to PROMPTING for a password, so a file
+    that exists, is mode 0600, and is correctly pointed at by PGPASSFILE still ends in an
+    authentication failure. This cost the restore test's first ever run (2026-08-18): the caller
+    passed the PRODUCTION database while `pg_restore` connects to the per-run throwaway.
+
+    WHAT THE FAILURE LOOKS LIKE DEPENDS ON WHAT ANSWERS THE PROMPT, and both spellings blame the
+    credential. Measured 2026-08-18 against a scram-sha-256 server:
+
+        on the instance, under `docker compose exec` with a TTY:
+            Password:
+            FATAL:  password authentication failed for user "waterway"
+
+        under a non-TTY, where libpq reads EOF or an empty line:
+            Password:
+            connection to server ... failed: fe_sendauth: no password supplied
+
+    The first is server-side and requires a non-empty password to have been sent; the second is
+    libpq refusing locally. Same root cause, one wrong field out of five, and the field is nowhere
+    in either message. `--no-password` removes the branch by removing the prompt.
+
+    SO THE TWO CALLERS PASS DIFFERENT THINGS ON PURPOSE, AND THAT ASYMMETRY IS THE CONTRACT:
+
+      * `backup_nightly_job` passes `parts["database"]`. The dump connects to production and only
+        to production, so the specific entry is correct and strictly narrower.
+      * `restore_test_monthly_job` passes `"*"`. It connects to production to CREATE and DROP the
+        throwaway, and to the throwaway - whose name is GENERATED PER RUN - to restore into it. No
+        literal database name can match both, and the throwaway's name does not exist at the
+        moment this file is written.
+
+    `database="*"` reads as the careless choice and is not one, which is why it is written down
+    here: without the reason recorded it gets "tidied" back to a specific name and the restore
+    test starts prompting again. The wildcard is scoped by the other four fields - one host, one
+    port, one user - in a file only this uid can read.
+
+    Both callers additionally pass `--no-password` to the client (see `dump_command` and
+    `restore_test.restore_command`), which turns any future version of this mistake from a prompt
+    into a message that names the missing password.
     """
     if not password:
         raise BackupError(
@@ -412,6 +451,13 @@ def dump_command(
         f"--exclude-table-data={EXCLUDED_DATA_TABLE}",
         # -f TO A FILE. Never stdout: a broken pipe with a zero exit is the truncation incident.
         "--file", str(archive_path),
+        # NEVER PROMPT. Without this, a pgpass file that fails to match - a wrong database field, a
+        # changed port, a renamed user - makes libpq ask for a password, and the failure that
+        # follows names the CREDENTIAL whatever answers the prompt. With it, libpq fails
+        # immediately saying no password was supplied, which points at the pgpass file instead.
+        # This job runs unattended under APScheduler, where there is no terminal to prompt at.
+        # See `write_pgpass` for the matching rules and the two spellings measured.
+        "--no-password",
     ]
 
 

@@ -1316,3 +1316,95 @@ reddened the write-all test and `test_the_repos_own_files_pass_the_image_gate`; 
 mutation also reddened `test_every_failure_reports_an_observed_value`. In every case the **named**
 test failed on the assertion the row is about, which is what `CLAUDE.md § 0` requires. Extra reds
 mean the property is guarded in more than one place, not that the guard is confused.
+
+---
+
+### The restore test's pgpass entry was keyed on the wrong database — 2026-08-18
+
+**`restore_test_monthly`'s first ever run failed, and the cause was one argument.**
+`app/orchestration/restore_test.py` wrote the pgpass entry with `database=production_database`
+while `pg_restore` connects to the per-run throwaway, `dws_restore_test_<suffix>`.
+
+**libpq matches a pgpass line on all five fields — host, port, database, user, password — and a
+non-matching file is not an error.** It falls through to prompting. That is the whole finding: the
+failure surfaces two layers away from its cause.
+
+| | |
+|---|---|
+| What was wrong | one field of five in a pgpass entry |
+| What the operator saw | `Password: ` then `FATAL: password authentication failed for user "waterway"` |
+| What that message points at | the credential |
+| What was actually wrong with the credential | nothing — file present, mode 0600, `PGPASSFILE` exported correctly |
+
+**The job's own behaviour was correct throughout.** Evidence kept, throwaway not dropped, failure
+recorded in `job_runs`, no retry, cleanup commands printed. Nothing in the failure-handling path
+needed changing.
+
+**Measured, reproducing the failure against a scram-sha-256 server:**
+
+| state | pg_restore's output |
+|---|---|
+| defect + no `--no-password` (what the instance ran) | `Password: ` <br> `connection to server ... failed: fe_sendauth: no password supplied` |
+| defect + `--no-password` | `connection to server ... failed: fe_sendauth: no password supplied` |
+| `database="*"` (the fix) | exit 0 |
+
+**A refinement of the account, measured rather than assumed.** The exact downstream message depends
+on what the prompt is answered with. Where libpq gets EOF or an empty line it refuses
+**client-side** with `fe_sendauth: no password supplied` — reproduced above under both a pytest
+harness and an explicit `echo "" |`. The instance saw the **server-side** `password authentication
+failed`, which requires a non-empty password to have been sent, consistent with `docker compose
+exec`'s TTY feeding the prompt. **Same root cause, and the branch is in what answers the prompt.**
+This is precisely why `--no-password` is the durable half: it removes the branch by removing the
+prompt, so the message is the same on a TTY and off one.
+
+#### WHY THE INTEGRATION TIER MISSED IT — the finding behind the finding
+
+**The tier authenticates against `POSTGRES_HOST_AUTH_METHOD=trust`.** Read off the project's own
+test container: `pg_hba.conf` is `host all all all trust`. The helper that gives a URL a password
+so the parser accepts it spells its placeholder **`trust-auth-ignores-this`**, which is an accurate
+name and, read as documentation, was the standing notice that this tier cannot see a pgpass defect.
+
+**On a trust server libpq never consults the pgpass file.** So every assertion the tier makes about
+that file was vacuous — not skipped, not weak: vacuous.
+
+**The broken line was executed on every test run.**
+`test_restore_test_mark_verified_visible_from_new_connection` drives the real
+`restore_test_monthly_job` end to end and reads back on a fresh connection; it was written for the
+Phase 11 rollback defect and it does reach line 712. **Measured as mutation 6: with the defect
+reapplied and the harness pointed at a trust server, it passes.** That is the direct evidence that
+auth mode, not test coverage, is what hid this.
+
+**The two conditions are independent and either alone stays green.** A server that requires a
+password, AND a target database whose name differs from the dump's origin. Condition 2 was already
+true everywhere — the throwaway is always `dws_restore_test_<suffix>` — which is exactly why
+condition 1 was the one that hid it.
+
+`test_restore_test_integration_authenticates_against_a_password_required_server` supplies condition
+1 by starting its own scram-sha-256 container at the **local client's major** (so it can never be
+the client/server mismatch `matching_pg_client` skips on), and it **connects with a deliberately
+wrong password and requires the server to refuse** before running anything — because a reused
+volume keeps the `pg_hba.conf` written at first init, so the environment variable can be set and
+silently ignored. Pointed at a trust server it **skips with the reason stated**.
+
+#### Mutation confirmation — six rows, 2026-08-18
+
+Each mutation applied, `__pycache__` cleared, the named test run, then restored from a snapshot and
+the suite re-run green. **Note: `git checkout -- <file>` is not a mutation-restore mechanism** — it
+reverts the commit's own changes along with the mutation. It did exactly that once during this
+session and the fix had to be re-applied.
+
+| # | Mutation | Named test | Actual failure |
+|---|---|---|---|
+| 1 | restore caller → `database=production_database` | `test_restore_test_integration_authenticates_against_a_password_required_server` | `RestoreTestError: pg_restore exited 1: connection to server at "127.0.0.1", port 53904 failed: fe_sendauth: no password supplied` |
+| 2 | same, unit level | `test_restore_pgpass_entry_matches_any_database` | `assert 'production_database' == "'*'"` |
+| 3 | backup caller → `database="*"` | `test_backup_pgpass_entry_names_the_production_database` | `assert "'*'" != "'*'"` |
+| 4 | drop `--no-password` from `pg_restore` | `test_pg_restore_invocation_carries_no_password_flag` | `assert ({'--no-password', '-w'} & {...})` over the full argv |
+| 5 | drop `--no-password` from `pg_dump` | `test_pg_dump_invocation_carries_no_password_flag` | `assert ({'--no-password', '-w'} & {...})` over the full argv |
+| 6 | **diagnostic** — mutation 1 on a trust server | `test_restore_test_mark_verified_visible_from_new_connection` | **passed** — 1 passed in 1.31s |
+
+**Row 6 is the one to read.** It is not protective and it did not go red; it is the measurement
+behind the claim above, and it is the reason rows 1–5 were not enough on their own.
+
+**A seventh, diagnostic run** applied mutations 1 and 4 together — the exact state the instance was
+in — and produced `Password: ` followed by `fe_sendauth: no password supplied`, which is what
+isolates the prompt as the mechanism rather than the credential.

@@ -585,6 +585,59 @@ equality check compares zero to zero, the view is repointed at a table nobody re
 migration passes without exercising one line of what it is for. The fixture asserts its own
 precondition (`> 50` chunks before) so the after-assertion cannot pass vacuously.
 
+### Part 3 — the restore test's first run failed on one argument
+
+**`restore_test_monthly` ran for the first time on 2026-08-18 and failed.** The job itself behaved
+exactly as designed throughout: evidence kept, nothing dropped, the failure recorded in `job_runs`,
+no retry, and the cleanup commands printed for a human. **The defect was one argument.**
+
+`app/orchestration/restore_test.py` wrote the pgpass entry with `database=production_database`
+while `pg_restore` connects to the throwaway, `dws_restore_test_<suffix>`. **libpq matches a pgpass
+line on all five fields**, so no line matched.
+
+**The symptom is the diagnostic key, and it points at the wrong layer.** libpq does not error on a
+non-matching entry — it falls through to **prompting**. The observed output was a bare `Password: `
+followed by `FATAL: password authentication failed for user "waterway"`, which reads as a wrong
+password. It was a wrong *database field*. The file existed, was mode 0600, and `PGPASSFILE` was
+correctly exported. Nothing about the credential was wrong.
+
+**The fix is `database="*"`, not the throwaway's name.** The throwaway does not exist when the
+pgpass is written — it is created inside the `try` that follows. Naming it would mean moving the
+write inside that `try`, reshaping the `finally` that unlinks the file and opening a window where a
+0600 credential outlives a failure path. A `*` in the database field of a 0600 file already scoped
+to one host, one port and one user says "this password, for this user, on this server", which is
+exactly true and is what this job needs: it authenticates to production (to `CREATE` and `DROP`)
+and to the throwaway (to restore) with the same credential.
+
+**`backup.py`'s caller was deliberately NOT changed to match.** The dump connects only to
+production, so its specific entry is correct and strictly narrower. Two tests assert the two
+callers separately, in opposite directions, so unifying them goes red.
+
+**The durable half is `--no-password` on both clients.** `pg_dump` did **not** already carry it.
+With it, libpq fails immediately naming the missing password instead of prompting on a non-TTY —
+converting this whole class from "looks like a wrong password" into "says no password was
+supplied". Without it, the next mismatch (a changed port, a renamed user) produces the identical
+misleading message and the diagnosis starts from nothing. `verify_archive` and `roles_in_archive`
+do **not** get the flag: neither passes `--dbname`, so neither opens a connection.
+
+**Why the integration tier missed it, which is the finding worth keeping.** The tier runs against
+`POSTGRES_HOST_AUTH_METHOD=trust` — the test container's `pg_hba.conf` is `host all all all trust`,
+and the helper that gives the URL a password spells its placeholder `trust-auth-ignores-this`. **On
+a trust server libpq never consults the pgpass file at all**, so every assertion in that tier was
+blind to its contents. `test_restore_test_mark_verified_visible_from_new_connection` already drove
+the real `restore_test_monthly_job` end to end, so the broken line executed on every run and stayed
+green. **Measured: with the defect reapplied, that test still passes on a trust server.**
+
+The new test satisfies **both** conditions at once — a server that *requires* a password and a
+target database whose name *differs* from the dump's origin — by starting its own scram-sha-256
+container at the local client's major, and it **verifies the server really refuses a wrong password
+rather than trusting the environment variable**. Pointed at a trust server it **skips with the
+reason stated**, which is better than the green pass the old tier gave: a skip is visible in the
+report.
+
+**This is the third occurrence of one shape in three consecutive commits** — a correct mechanism
+keyed on a wrong parameter — now written down as `CLAUDE.md § 25`.
+
 ## § Up Next
 
 **THE DEPLOYMENT RUNBOOK IS `docs/runbooks/phase-11.md`, IN THE REPO AND VERSIONED.** It executes

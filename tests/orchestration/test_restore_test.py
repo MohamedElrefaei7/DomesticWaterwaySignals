@@ -943,3 +943,103 @@ def test_roles_in_archive_raises_when_the_render_is_empty(tmp_path):
         restore_test.roles_in_archive(archive, run=_RenderedArchive(""))
 
     assert "no SQL" in str(raised.value), f"unhelpful message: {raised.value}"
+
+
+# ---------------------------------------------------------------------------------------------
+# The pgpass entry, and the flag that makes the next mistake of this shape legible
+# ---------------------------------------------------------------------------------------------
+#
+# 2026-08-18, the job's first ever run. `write_pgpass` was called with
+# `database=production_database` while `pg_restore` connects to `dws_restore_test_<suffix>`, so no
+# line matched. libpq does not error on a non-matching pgpass - it PROMPTS - and the prompt on a
+# non-TTY produced `FATAL: password authentication failed for user "waterway"`. The file existed,
+# was 0600, and PGPASSFILE was exported correctly. One wrong field out of five, reported as a
+# wrong password.
+#
+# THE CALL SITE IS THE INVARIANT, so these two read source (CLAUDE.md § 23's legitimate kind: not
+# a proxy for behaviour, but the property itself). They walk the AST rather than grepping, because
+# the prose above names both spellings and a regex would match its own explanation (§ 24). The
+# behavioural half is
+# `test_restore_test_integration_authenticates_against_a_password_required_server`.
+
+
+def _write_pgpass_database_argument(module_path: Path, function_name: str) -> str:
+    """The `database=` keyword of the `write_pgpass` call inside `function_name`, unparsed.
+
+    Raises rather than returning a default if the call is not found: a helper that answers "no
+    call" with an empty string turns both tests below into assertions about nothing.
+    """
+    import ast
+
+    tree = ast.parse(module_path.read_text(encoding="utf-8"))
+    function = next(
+        (node for node in ast.walk(tree)
+         if isinstance(node, ast.FunctionDef) and node.name == function_name),
+        None,
+    )
+    assert function is not None, f"{function_name} does not exist in {module_path}"
+
+    calls = [
+        node for node in ast.walk(function)
+        if isinstance(node, ast.Call)
+        and (getattr(node.func, "attr", None) == "write_pgpass"
+             or getattr(node.func, "id", None) == "write_pgpass")
+    ]
+    assert len(calls) == 1, (
+        f"expected exactly one write_pgpass call in {function_name}, found {len(calls)}. Two "
+        f"callers in one job means one of them is unasserted."
+    )
+
+    keywords = [kw for kw in calls[0].keywords if kw.arg == "database"]
+    assert len(keywords) == 1, (
+        f"write_pgpass in {function_name} does not pass `database=` by keyword: "
+        f"{ast.unparse(calls[0])}"
+    )
+    return ast.unparse(keywords[0].value)
+
+
+def test_restore_pgpass_entry_matches_any_database():
+    """`database="*"`, because the throwaway's name is generated per run.
+
+    THE WILDCARD IS THE FIX, NOT THE SLOPPY VERSION OF ONE. libpq matches a pgpass line on all
+    five fields, and this job authenticates to TWO databases with one credential: production, to
+    CREATE and DROP the throwaway, and the throwaway itself, to restore into. No literal name can
+    match both - and the throwaway's name does not exist yet when the file is written, so naming
+    it would mean moving the write inside the `try` and reshaping the `finally` that unlinks it.
+
+    The widening is bounded by the other four fields: one host, one port, one user, in a 0600 file.
+    """
+    observed = _write_pgpass_database_argument(
+        Path(restore_test.__file__), "restore_test_monthly_job"
+    )
+
+    assert observed == "'*'", (
+        f"the restore test's pgpass entry is keyed on {observed}, not on the wildcard. libpq "
+        f"matches on all five fields and pg_restore connects to `dws_restore_test_<suffix>`, so "
+        f"this entry matches nothing - and libpq does not error on that, it PROMPTS. The job "
+        f"fails with `password authentication failed`, which points at the credential and not at "
+        f"this line. That is exactly what happened on 2026-08-18."
+    )
+
+
+def test_pg_restore_invocation_carries_no_password_flag():
+    """`--no-password`, so a future mismatch says what it is instead of prompting.
+
+    THE DURABLE HALF OF THE FIX. Correcting the database field alone leaves the next credential
+    mismatch - a changed port, a renamed user - producing the identical misleading message, and
+    the diagnosis has to be done again from nothing. With the flag, libpq refuses immediately and
+    names the missing password, which points at the pgpass file rather than at the password in it.
+    """
+    argv = restore_test.restore_command(
+        archive_path=Path("/mnt/data/restore-test/x.dump"), host="timescaledb", port=5432,
+        database="dws_restore_test_abc123", user="waterway",
+    )
+
+    assert {"-w", "--no-password"} & set(argv), (
+        f"pg_restore may prompt for a password: {argv}. On a non-TTY the prompt is answered with "
+        f"nothing, so a pgpass entry that fails to match surfaces as `password authentication "
+        f"failed` - a message about the credential, for a defect in the lookup."
+    )
+    assert not ({"-W", "--password"} & set(argv)), (
+        f"pg_restore is being told to force a prompt, which is the opposite of the intent: {argv}"
+    )

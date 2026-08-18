@@ -18,6 +18,7 @@ archive and lives in test_backup_integration.py.
 import ast
 import contextlib
 import json
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -841,3 +842,84 @@ def test_backup_snapshot_dataclass_carries_counts_and_chunks():
 
     payload = json.dumps(snapshot.row_counts)
     assert json.loads(payload) == {"public.a": 0, "public.b": 3}
+
+
+# ---------------------------------------------------------------------------------------------
+# The pgpass entry's database field, and why this caller's is NOT the restore test's
+# ---------------------------------------------------------------------------------------------
+
+
+def test_backup_pgpass_entry_names_the_production_database():
+    """THE INVERSE OF `test_restore_pgpass_entry_matches_any_database`, and it guards the asymmetry.
+
+    The restore test passes `database="*"` because it authenticates to production AND to a
+    throwaway whose name is generated per run. The dump connects to production and only to
+    production, so its entry names that database and is strictly narrower.
+
+    The temptation this exists to catch is UNIFYING THEM. Two callers of one helper passing
+    different things reads as an inconsistency somebody forgot to clean up; widening this one to
+    `"*"` would be a one-character change with no visible effect on any run, because a wildcard
+    matches production perfectly well. Narrower is right wherever it is achievable - the wildcard
+    is a concession the restore path needs and this path does not - and the only thing that keeps
+    that decision from eroding is a test that goes red when the two are made to agree.
+    """
+    from tests.orchestration.test_restore_test import _write_pgpass_database_argument
+
+    observed = _write_pgpass_database_argument(
+        Path(backup.__file__), "backup_nightly_job"
+    )
+
+    assert observed != "'*'", (
+        "the backup's pgpass entry was widened to the wildcard to match the restore test's. The "
+        "dump connects to exactly one database, whose name is known when the file is written, so "
+        "there is nothing here for a wildcard to solve - see write_pgpass for the asymmetry."
+    )
+    assert observed in ("parts['database']", 'parts["database"]'), (
+        f"the backup's pgpass entry is keyed on {observed}, which is neither the connection's own "
+        f"database nor a spelling this test knows. If this was a deliberate refactor, update this "
+        f"assertion and state why the entry is still no wider than one database."
+    )
+
+
+def test_pg_dump_invocation_carries_no_password_flag():
+    """`--no-password`, for the same reason `pg_restore` carries it.
+
+    The dump's own entry has always been correct, so this flag changes nothing about today's
+    behaviour - which is the point. It is what makes a FUTURE mismatch on this path legible: a
+    changed port or a renamed user would otherwise make libpq prompt, and a prompt on a non-TTY is
+    reported as `password authentication failed`, sending the reader to check a password that is
+    not the problem.
+    """
+    argv = _dump_argv()
+
+    assert {"-w", "--no-password"} & set(argv), (
+        f"pg_dump may prompt for a password: {argv}. The nightly job runs unattended under "
+        f"APScheduler, where there is no terminal to prompt at and the failure arrives as a "
+        f"message about the credential."
+    )
+    assert not ({"-W", "--password"} & set(argv)), (
+        f"pg_dump is being told to force a prompt: {argv}"
+    )
+
+
+def test_write_pgpass_still_refuses_an_empty_password():
+    """RE-ASSERTED BECAUSE THIS COMMIT TOUCHES write_pgpass.
+
+    Only the docstring changed, and that is precisely when a behavioural re-assertion is worth its
+    lines: the function's refusal is invisible in the diff, so nothing else in this commit would
+    notice if it had been lost. An empty entry writes `host:port:*:user:` - a syntactically valid
+    line libpq will happily match and supply an empty password from, which produces an
+    authentication failure pointing at nothing.
+    """
+    path = Path(tempfile.mkdtemp()) / ".pgpass"
+
+    with pytest.raises(backup.BackupError) as raised:
+        backup.write_pgpass(
+            path, host="timescaledb", port=5432, database="*", user="waterway", password=""
+        )
+
+    assert "empty pgpass entry" in str(raised.value), f"unhelpful refusal: {raised.value}"
+    assert not path.exists(), (
+        f"the refusal still wrote {path}. A file that exists is a file a later run may match "
+        f"against, so the refusal has to leave nothing behind."
+    )

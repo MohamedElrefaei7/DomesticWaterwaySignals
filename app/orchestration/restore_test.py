@@ -421,6 +421,17 @@ def restore_command(*, archive_path: Path, host: str, port: int, database: str, 
         # Exit non-zero if anything at all failed, rather than restoring what it can and reporting
         # success - which is the whole failure mode this job exists to detect.
         "--exit-on-error",
+        # NEVER PROMPT, and this is the DURABLE half of the 2026-08-18 pgpass fix rather than a
+        # tidy-up beside it. libpq prompts when no pgpass line matches, so this job's first run
+        # printed a bare `Password: ` and then, on the instance's TTY, `password authentication
+        # failed for user "waterway"` - a message that sends the reader to check the credential
+        # when the credential was right and one FIELD of the pgpass entry was wrong.
+        # `--no-password` makes libpq fail immediately naming the missing password instead, which
+        # converts this whole class from "looks like a wrong password" into "says no password was
+        # supplied" - and makes it say that identically on a TTY and off one. Without it the next
+        # mismatch - a changed port, a renamed user - is diagnosed from scratch. See
+        # `backup.write_pgpass` for the matching rules and both measured spellings.
+        "--no-password",
         str(archive_path),
     ]
 
@@ -708,10 +719,35 @@ def restore_test_monthly_job(
 
     # The pgpass file for pg_restore, written beside the archive at 0600, removed in the finally.
     # Same shape as the dump's, and never PGPASSWORD (CLAUDE.md § 3).
+    #
+    # `database="*"`, AND THE WILDCARD IS THE FIX RATHER THAN THE SLOPPY VERSION OF ONE.
+    #
+    # This read `database=production_database` and that is what broke the job's first ever run.
+    # libpq matches a pgpass line on ALL FIVE FIELDS, and pg_restore connects to the THROWAWAY -
+    # `dws_restore_test_<suffix>` - so the entry matched nothing. libpq does not error on a
+    # non-matching file; it falls through to PROMPTING, so the observed failure was a bare
+    # `Password: ` on stdout and then `FATAL: password authentication failed for user
+    # "waterway"`. That reads as a wrong password and it was a wrong DATABASE FIELD.
+    #
+    # NOT the throwaway's name, which is the other obvious repair: the throwaway does not exist
+    # yet. It is created below, inside the `try`, and moving this write in after it would change
+    # the shape of the `finally` that unlinks the file - opening a window where a failure between
+    # the two leaves a 0600 credential behind. The wildcard needs no reordering.
+    #
+    # The widening is not meaningful. The file is 0600 and still pinned to one host, one port and
+    # one user, so it says "this password, for this user, on this server" - which is exactly true,
+    # and is what this job needs, because it authenticates to the PRODUCTION database (to CREATE
+    # and DROP) and to the THROWAWAY (to restore) with the same credential.
+    #
+    # THE BACKUP JOB'S OWN ENTRY STAYS NARROW at `parts["database"]` and must not be "unified"
+    # with this one: the dump connects only to production, so its specific entry is correct and
+    # strictly narrower. Narrower is right wherever it is achievable; the wildcard is a concession
+    # this path needs and that one does not. A test asserts each caller separately, in opposite
+    # directions, so unifying them goes red.
     pgpass_path = scratch_dir / ".pgpass-restore-test"
     backup.write_pgpass(
         pgpass_path,
-        host=parts["host"], port=parts["port"], database=production_database,
+        host=parts["host"], port=parts["port"], database="*",
         user=parts["user"], password=parts["password"],
     )
 
