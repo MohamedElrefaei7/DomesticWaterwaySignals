@@ -526,9 +526,64 @@ both mutations for the wrong reason and proves nothing — the prompt specified 
 mutation table did not hold against it; corrected, and both mutations now go red for their own
 reason.
 
-### Part 2 — the chunk interval and the 986 existing chunks
+### Part 2 — the chunk interval, and the 986 existing chunks
 
-See the phase log for the migration and its verification.
+`0027_gauge_readings_iv_chunk_interval.sql`. `gauge_readings_iv` moves from a 7-day chunk interval
+to 365 days, and the existing chunks are consolidated by rewrite.
+
+**7 days was not a silly choice.** It was right for a table expected to hold recent instantaneous
+readings. It became wrong when Phase 3.5 measured that the daily endpoint carries 35 years and the
+backfill loaded them — a table sized for weeks holding 18.9 years.
+
+**`set_chunk_time_interval` alone is the trap, and it is a one-statement trap.** It affects only
+chunks created *after* it runs. A migration containing just that call applies cleanly, reports
+success, changes the catalog in a way that reads correct in every later inspection, and leaves
+every historical query exactly as broken. Confirmed by mutation: replacing the rewrite with a bare
+`set_chunk_time_interval` leaves **312 chunks of 312** and turns six integration tests red.
+
+**THE PART THE PROMPT DID NOT ANTICIPATE, AND IT WOULD HAVE BEEN SILENT.** `gauge_series` (0010)
+is a **view over `gauge_readings_iv`**, and Postgres binds view dependencies **by OID**. So
+`ALTER TABLE gauge_readings_iv RENAME TO ..._archived_...` does not break the view — it quietly
+repoints it at the archive, which stops receiving writes the moment the migration commits. Every
+feature build and every analog lookup reads that view. A stale series is harder to notice than a
+missing one (§ 17), and reading rows would not have caught it: immediately after the migration the
+archive holds identical data, so the view returns identical results and diverges only on the next
+ingest. **The dependency is the property, so the dependency is what is asserted** — and the
+migration's own check enumerates `pg_depend`/`pg_rewrite` rather than trusting its author to have
+listed every dependent (§ 22).
+
+Everything else referencing the table does so by name and re-resolves correctly: `usgs_ingest`,
+`backfill`, `rollup.ROLLUP_SQL`, `heartbeat`.
+
+**The concurrent writer: an advisory lock is the wrong mechanism and was rejected, not deferred.**
+An advisory lock only detects a party that also takes it, and `usgs_ingest` takes none — a
+`pg_try_advisory_lock` would be acquired against a running ingest and report the coast clear. What
+is used instead: a `job_runs` check that refuses **with a sentence naming the job**, plus
+`LOCK TABLE … ACCESS EXCLUSIVE` under a 30-second `lock_timeout`, held for the whole transaction.
+Verified behaviourally — the migration refuses **before any change is made** (the archive does not
+exist afterwards), and a *finished* `usgs_ingest` row does not block it. Both halves, because one
+wrong implementation satisfies either alone.
+
+**Not claimed:** whether a writer that blocks on the table lock and resumes after commit lands in
+the new table or the archive. That depends on Postgres re-resolving the relation name after lock
+acquisition; it was not measured, so it is not relied on. **Stopping the scheduler is required.**
+
+**The archive costs storage and that is stated rather than discovered.**
+`gauge_readings_iv_archived_20260818` roughly doubles the table's footprint, appears in every
+nightly backup and in the restore test's per-table `row_counts`, and **only a human may drop it**
+(§ 3). Carried below under standing items.
+
+**Two existing tests asserted the 7-day interval and were updated**, not deleted:
+`tests/ingest/test_compression.py` at the standalone interval assertion and at the
+survives-the-rename one. `verify/phase11/stage_f.py`'s `EXPECTED_MIGRATIONS` went 26 → 27 — the
+pin going red is the pin working. Its companion test now reads the constant rather than repeating
+the literal four times.
+
+**The integration fixture stages the migrations in two passes with rows in between**, because
+running every migration in one pass applies 0027 to an *empty* table: the copy moves zero rows, the
+equality check compares zero to zero, the view is repointed at a table nobody reads, and the
+migration passes without exercising one line of what it is for. The fixture asserts its own
+precondition (`> 50` chunks before) so the after-assertion cannot pass vacuously.
 
 ## § Up Next
 

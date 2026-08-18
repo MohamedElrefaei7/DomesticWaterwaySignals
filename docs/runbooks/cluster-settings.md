@@ -108,3 +108,52 @@ image digests.
 After a rebuild, run `--resolve-baseline` and read the diff. That is the whole purpose of the
 file: before it existed, a re-derivation that differed was silent.
 
+
+---
+
+## Migration 0027 — stop the scheduler first
+
+`0027_gauge_readings_iv_chunk_interval.sql` rewrites `gauge_readings_iv`: it archives the old
+986-chunk hypertable, creates a new one at a 365-day interval, and copies every row across.
+
+**Part 1 must be applied and verified first.** The copy queries and counts across all 986 chunks,
+which is the query that fails at the old lock ceiling.
+
+**Stopping the scheduler is required, not advisory.** `usgs_ingest` runs hourly and writes to this
+table; a write landing mid-copy goes into the archive and is lost from the live table — a few
+missing readings, with nothing reporting a problem.
+
+```sh
+docker compose stop scheduler
+set -a; . ./.env; set +a
+python3 -m app.orchestration.migrate --status
+python3 -m app.orchestration.migrate
+docker compose start scheduler
+docker compose exec scheduler python -m app.orchestration.run_once usgs_ingest
+```
+
+### What the migration guards, and what it does not
+
+| Guard | Catches | Does not catch |
+|---|---|---|
+| `job_runs` check, refuses with a sentence naming the job | an ingest that is **already** running — you forgot the stop | one that starts after the check |
+| `LOCK TABLE … ACCESS EXCLUSIVE` under `lock_timeout = 30s` | a writer holding a conflicting lock; fails in 30s rather than waiting | — |
+| Held for the whole transaction | any writer touching either table during the copy | — |
+
+**An advisory lock is deliberately not used.** An advisory lock only detects a party that also
+takes it, and `usgs_ingest` takes none — `pg_try_advisory_lock` would succeed against a running
+ingest and report the coast clear. That is a guard that reports correct while the thing it guards
+against is happening.
+
+**Not claimed:** whether a writer that *blocks* on the table lock and resumes after commit lands in
+the new table or the archive depends on Postgres re-resolving the relation name after acquiring the
+lock. That was not measured, so it is not relied on. Stop the scheduler.
+
+### The archived table
+
+`gauge_readings_iv_archived_20260818` is left in place — `CLAUDE.md § 3` archives rather than
+drops, and only a human runs a `DROP`. **It roughly doubles this table's footprint**, and it will
+appear in every nightly backup and in the restore test's per-table `row_counts` until dropped.
+Expect `backups.byte_size` to step up on the next run.
+
+Dropping it is a human decision and a human command. There is no migration that will do it.

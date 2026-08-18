@@ -250,21 +250,36 @@ def test_e_handles_both_compose_ps_json_shapes():
 # ---------------------------------------------------------------------------------------------
 
 
-def test_f_fails_when_migration_count_is_not_26():
-    low = stage_f.check_migration_count(25)
+def test_f_fails_when_migration_count_is_not_the_expected_one():
+    """Both directions, and the expected value is READ rather than repeated.
+
+    Written as `EXPECTED_MIGRATIONS - 1` and `+ 1` rather than as literals, because the literals
+    are what made this test go red for the right reason and the wrong work: bumping 26 to 27 in
+    the module meant editing four numbers here that only ever describe that one. The count on
+    disk is pinned by the test below; this one is about the check's SHAPE - too few and too many
+    both fail.
+    """
+    expected = stage_f.EXPECTED_MIGRATIONS
+
+    low = stage_f.check_migration_count(expected - 1)
     assert low.status == FAIL
-    assert "25 applied" in low.observed
+    assert f"{expected - 1} applied" in low.observed
     assert "migrations.run" in low.observed
 
-    assert stage_f.check_migration_count(27).status == FAIL
-    assert stage_f.check_migration_count(26).status == PASS
+    assert stage_f.check_migration_count(expected + 1).status == FAIL
+    assert stage_f.check_migration_count(expected).status == PASS
 
 
 def test_f_migration_count_matches_the_files_on_disk():
-    """26 is a fact about this repo, not a number somebody remembered."""
+    """27 is a fact about this repo, not a number somebody remembered.
+
+    It went 26 -> 27 with migration 0027 (the chunk-interval consolidation), and this test going
+    red is the pin working: a hardcoded count that nobody has to update is a count that has
+    stopped describing anything.
+    """
     on_disk = sorted((REPO_ROOT / "migrations").glob("[0-9][0-9][0-9][0-9]_*.sql"))
     assert len(on_disk) == stage_f.EXPECTED_MIGRATIONS, [p.name for p in on_disk]
-    assert on_disk[-1].name.startswith("0026_")
+    assert on_disk[-1].name.startswith("0027_")
 
 
 def test_f_asserts_trigger_exists_without_attempting_a_write():

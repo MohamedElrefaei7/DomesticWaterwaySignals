@@ -21,7 +21,13 @@ TABLE = "gauge_readings_iv"
 
 
 def test_hypertable_exists_with_the_expected_chunk_interval(migrated_db):
-    """gauge_readings_iv is a hypertable partitioned on ts, in 7-day chunks.
+    """gauge_readings_iv is a hypertable partitioned on ts, in 365-day chunks SINCE 0027.
+
+    IT WAS 7 DAYS UNTIL 2026-08-18 AND THAT IS WORTH STATING RATHER THAN OVERWRITING. 7 days was
+    correct for a table expected to hold recent instantaneous readings; it became wrong when
+    Phase 3.5 measured that the daily endpoint carries 35 years and the backfill loaded them. The
+    result was 986 chunks for 258,739 rows, ~2,000 lock slots for a full-table query, and
+    `out of shared memory` on a bare count. See migration 0027.
 
     If create_hypertable never ran, this is an ordinary Postgres table: every query still works,
     every insert still succeeds, and nothing anywhere reports a problem - it is simply not
@@ -46,9 +52,10 @@ def test_hypertable_exists_with_the_expected_chunk_interval(migrated_db):
 
     from datetime import timedelta
 
-    assert time_interval == timedelta(days=7), (
-        f"chunk interval is {time_interval}, not 7 days. Smaller chunks compress and prune "
-        f"better than the default at this data volume (0005)."
+    assert time_interval == timedelta(days=365), (
+        f"chunk interval is {time_interval}, not 365 days (migration 0027). At 7 days this table "
+        f"reached 986 chunks and a full-table query exhausted the cluster's lock table. Note that "
+        f"TimescaleDB stores an interval YEAR as 360 days, so check 0027 does not say `1 year`."
     )
 
 
@@ -163,9 +170,10 @@ def test_iv_table_retains_its_hypertable_and_compression_settings_after_rename(m
         " WHERE hypertable_name = %s",
         (TABLE,),
     ).fetchall()
-    assert dimensions == [("ts", timedelta(days=7))], (
-        f"{TABLE} is not a 7-day hypertable on ts after the rename: {dimensions}. The rename "
-        f"lost the hypertable registration."
+    assert dimensions == [("ts", timedelta(days=365))], (
+        f"{TABLE} is not a 365-day hypertable on ts: {dimensions}. Either 0007's rename lost the "
+        f"hypertable registration, or 0027's rewrite did - both are the same silent failure, and "
+        f"0027 is now the more recent thing to have moved this table."
     )
 
     settings = usgs_ingest.compression_settings(migrated_db, TABLE)

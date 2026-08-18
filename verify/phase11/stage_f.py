@@ -29,7 +29,7 @@ from typing import Any, Sequence
 from verify.phase11 import readonly
 from verify.phase11.result import Check, CheckResult, failed, passed
 
-EXPECTED_MIGRATIONS = 26
+EXPECTED_MIGRATIONS = 27
 
 # migrations/0026_backups_table.sql
 EXPECTED_TRIGGERS = ("backups_forbid_delete", "backups_forbid_update")
