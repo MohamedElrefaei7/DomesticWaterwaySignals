@@ -117,13 +117,26 @@ is accepted because the drift is **detectable** - a preflight gate reads the fil
 check reads the running binary - **whereas the socket trades a detectable problem for an
 undetectable one.** Recorded as a contract in `CLAUDE.md § 3` and `§ 22`.
 
-**THE CLIENT VERSION IS AN UNRESOLVED PLACEHOLDER AND THE BUILD WILL FAIL UNTIL A HUMAN RESOLVES
-IT.** `postgresql-client-16=16.0-0.PLACEHOLDER.pgdg120+0` cannot resolve against PGDG, which is the
-point: it is the digest placeholder's discipline applied to a package (`CLAUDE.md § 12`). It must
-be resolved **on the instance**, never from a laptop, with the `apt-cache madison` command in
-`Dockerfile.scheduler`'s header, and **the resolved version recorded here**. Until then
-`verify/preflight.py` reports the new gate as FAIL - by value, not by form - naming the command.
-**Resolved version: NOT YET RESOLVED.**
+**THE CLIENT VERSION WAS AN UNRESOLVED PLACEHOLDER; RESOLVED ON THE INSTANCE 2026-08-18.**
+`postgresql-client-16=16.0-0.PLACEHOLDER.pgdg120+0` could not resolve against PGDG, which was the
+point: the digest placeholder's discipline applied to a package (`CLAUDE.md § 12`).
+**Resolved version: `16.15-1.pgdg13+2`.**
+
+**THE PLACEHOLDER ENCODED A WRONG ASSUMPTION, AND FAILING TO RESOLVE IS WHAT SURFACED IT.** The
+literal ended `pgdg120+0` - bookworm - but `python:3.12-slim@sha256:2c941e86...` is **Debian 13
+(trixie)**, so the correct suffix is `pgdg13+`. Both the placeholder and the note below assumed
+bookworm. Had the placeholder been a plausible bookworm version instead of an unresolvable one, the
+build would have failed with a package-not-found and sent the reader to the PGDG repository rather
+than to the base image. The resolve-on-the-instance rule held; following it is what showed that an
+assumption baked into two places was wrong.
+
+**Consequence for any future `apt` pin in any Dockerfile:** the codename is trixie, not bookworm.
+The resolve command derives `${VERSION_CODENAME}` from `/etc/os-release` inside the pinned image
+rather than hardcoding it, which is why it produced the right answer despite the surrounding prose
+being wrong.
+
+**The PGDG key fingerprint needed no change** - `B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8`, printed
+by the resolve command, already equalled the literal at `Dockerfile.scheduler:107`.
 
 **The PGDG signing key is verified by fingerprint** - `B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8`,
 the PostgreSQL Global Development Group's Debian repository key - against a literal in the
@@ -244,8 +257,14 @@ migrations applied:** 8 of 11 pass with an 18 client (3 skip as designed); **11 
 pg16 client**, including the three job-level tests - a real `pg_dump`, a real restore-to-`/dev/null`
 verification, a real `backups` row, `rows_written` NULL, and the staging directory left empty. The
 pg16 client came from a **throwaway image built in the scratchpad and never committed**; the client
-version it resolved (`16.15-1.pgdg13+2`) is **NOT the value to commit** - `§ 5` requires that
-resolution on the instance.
+version it resolved (`16.15-1.pgdg13+2`) was recorded here as **NOT the value to commit**, on the
+grounds that `§ 5` requires resolution on the instance.
+
+**CORRECTED 2026-08-18: the rule was right and the conclusion was wrong.** Resolving on the instance
+produced the identical string, because both machines derive the codename from the same pinned base
+digest and therefore see the same PGDG suite. `§ 5` still holds - it is what caused the resolution
+that confirmed the value rather than assumed it - but a scratchpad resolution against the same
+pinned digest is not, in fact, a different answer.
 
 ---
 

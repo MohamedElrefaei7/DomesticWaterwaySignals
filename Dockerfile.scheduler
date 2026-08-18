@@ -142,7 +142,7 @@ COPY --from=build /pgdg/pgdg.list /etc/apt/sources.list.d/pgdg.list
 # A literal rather than an `ARG`, for the reason above: an overridable pin is not a pin.
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends postgresql-client-16=16.0-0.PLACEHOLDER.pgdg120+0; \
+    apt-get install -y --no-install-recommends postgresql-client-16=16.15-1.pgdg13+2; \
     apt-mark hold postgresql-client-16; \
     rm -rf /var/lib/apt/lists/*; \
     pg_dump --version; \
