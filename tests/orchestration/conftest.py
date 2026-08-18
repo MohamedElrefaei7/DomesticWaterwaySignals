@@ -16,6 +16,9 @@ because of a row another test left behind.
 """
 
 import os
+import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -46,6 +49,73 @@ def database_url():
             "DATABASE_URL to run them."
         )
     return url
+
+
+# ---------------------------------------------------------------------------------------------
+# The postgres client, and why its major has to match the server under test
+# ---------------------------------------------------------------------------------------------
+#
+# From Phase 12 the dump and the restore invoke `pg_dump`/`pg_restore` DIRECTLY rather than
+# spawning a container off the server's pinned digest - the scheduler container has no Docker
+# socket, because mounting it is root-equivalent on the host. On the instance the client is pinned
+# to the server's major and `verify/preflight.py` gates the two; on a developer machine the client
+# is whatever is on PATH.
+#
+# MEASURED 2026-08-18, and it is the clearest possible demonstration of why the pin exists: a
+# pg18 `pg_restore` against the pg16 server emits
+#
+#     SET transaction_timeout = 0;
+#     ERROR:  unrecognized configuration parameter "transaction_timeout"
+#
+# because `transaction_timeout` arrived in PostgreSQL 17. The restore fails outright. That is the
+# loud end of "a client at a different major produces a subtly wrong archive"; the quiet end is
+# what the runtime check in backup.py refuses.
+#
+# So the tests that drive a real dump or a real restore SKIP, with the observed majors in the
+# reason, rather than failing. The alternative - stubbing the version check out - would make the
+# only tests that exercise the whole path stop exercising the guard that path depends on.
+
+
+def local_client_major():
+    """The major of the pg_dump on PATH, or None if there is not one."""
+    if shutil.which("pg_dump") is None:
+        return None
+    try:
+        completed = subprocess.run(
+            ["pg_dump", "--version"], capture_output=True, text=True, timeout=20
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    match = re.search(r"\(PostgreSQL\)\s+(\d+)", completed.stdout or "")
+    return int(match.group(1)) if match else None
+
+
+@pytest.fixture
+def matching_pg_client(database_url):
+    """Skip unless the local client's major equals the server's. Returns the major.
+
+    A RUN-TIME skip rather than a `skipif` decorator, because the server's major is a fact about
+    DATABASE_URL and does not exist at collection time. A SKIP with this reason is visible in the
+    report; it does not read as a pass (CLAUDE.md § 13).
+    """
+    client = local_client_major()
+    if client is None:
+        pytest.skip("no pg_dump on PATH: the dump and restore are invoked directly, not in a container")
+
+    with db.connection(database_url) as conn:
+        server = int(conn.execute("SHOW server_version_num").fetchone()[0]) // 10000
+
+    if client != server:
+        pytest.skip(
+            f"local pg_dump is major {client} and the server under test is major {server}. "
+            f"A pg17+ client emits `SET transaction_timeout = 0`, which a pg16 server rejects "
+            f"outright - so this is the mismatch the version pin exists to prevent, not a "
+            f"defect. It runs on the instance, where the scheduler image's client is pinned to "
+            f"the server's major."
+        )
+    return client
 
 
 # Drops everything this project's migrations create, and nothing an extension owns.

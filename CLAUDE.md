@@ -349,15 +349,24 @@ describes does not hold has already happened here.
 
 ## 6. Architecture — fixed
 
-Five containers on one EC2 instance, one Docker Compose stack, all `restart: unless-stopped`, brought
-up at boot by a single systemd unit.
+Five containers on one EC2 instance, one Docker Compose stack, brought up at boot by a single
+systemd unit.
 
-| Service | Contents | Exposed |
-|---|---|---|
-| `timescaledb` | Postgres 16 + TimescaleDB, volume-backed on a **separate** EBS volume | **no** — internal only |
-| `worker` | APScheduler running all jobs | no |
-| `api` | FastAPI + uvicorn | internal, proxied |
-| `caddy` | TLS termination, serves the built React bundle, proxies `/api` | 80, 443 |
+| Service | Contents | Exposed | Restart |
+|---|---|---|---|
+| `timescaledb` | Postgres 16 + TimescaleDB, volume-backed on a **separate** EBS volume | **no** — internal only | `unless-stopped` |
+| `scheduler` | APScheduler running all jobs, plus a pinned `postgresql-client` | no | `unless-stopped` |
+| `api` | FastAPI + uvicorn | internal, proxied | `unless-stopped` |
+| `frontend-build` | Pinned, containerized Vite build; writes the bundle into a volume and **exits** | no | `"no"` |
+| `caddy` | TLS termination, serves the built React bundle, proxies `/api` | 80, 443 | `unless-stopped` |
+
+**Two corrections this table carried until Phase 12, both of which the repo had already settled.**
+The scheduler service is named `scheduler`, not `worker` — and a table naming a service that does
+not exist is the kind of thing a reader builds a mental model on. And the blanket
+"all `restart: unless-stopped`" was never true of `frontend-build`, which exits by design: under
+that policy an exiting container is an infinite rebuild loop. The partition is the rule, not the
+blanket, and `tests/deploy/test_compose_shape.py` asserts it by exact set equality in both
+directions.
 
 **There is no streaming daemon. Everything is polled on a schedule.** This removes an entire category
 of failure the prior project fought: supervising a long-lived socket, cold-start state reconstruction,

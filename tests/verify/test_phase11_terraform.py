@@ -23,7 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from verify.phase11 import shell, stage_c, stage_d, tfjson  # noqa: E402
-from verify.phase11.protected import PROTECTED_ADDRESSES  # noqa: E402
+from verify.phase11.protected import PHASE_11_ADDRESSES, PROTECTED_ADDRESSES  # noqa: E402
 from verify.phase11.result import FAIL, PASS, Precondition  # noqa: E402
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -81,7 +81,17 @@ def test_a_no_changes_plan_is_not_an_empty_resource_changes_list():
     plan = fixture("c_post_no_changes.plan.json")
     changes = tfjson.resource_changes(plan)
 
-    assert len(changes) == len(PROTECTED_ADDRESSES) == 17
+    # SEVENTEEN, AND THE NUMBER IS DERIVED RATHER THAN WRITTEN DOWN AGAIN. This fixture is a Stage
+    # C plan - taken before Stage D's apply - so it predates the thirteen Phase 11 resources.
+    # PROTECTED_ADDRESSES is now the union of both sets, so the count this fixture should match is
+    # the difference, and expressing it that way is what keeps the two from drifting apart again:
+    # a literal 17 here went stale the moment protected.py grew, and the fixture was blamed.
+    stage_c_era = PROTECTED_ADDRESSES - PHASE_11_ADDRESSES
+    assert len(changes) == len(stage_c_era) == 17, (
+        f"{len(changes)} changes in the fixture, {len(stage_c_era)} addresses in "
+        f"PROTECTED_ADDRESSES - PHASE_11_ADDRESSES. The fixture is a pre-Stage-D plan and must "
+        f"carry one no-op entry per resource that existed then."
+    )
     assert all(tfjson.actions(entry) == ("no-op",) for entry in changes)
     assert plan["applyable"] is False
 
@@ -516,3 +526,164 @@ def test_the_command_walk_would_catch_a_plan_invocation():
 
     assert argvs == [["terraform", "plan", "-out=x"]], argvs
     assert shell.permitted_entry(argvs[0]) is None
+
+
+# ---------------------------------------------------------------------------------------------
+# d-pre after the apply — the shape the stage could not previously accept
+# ---------------------------------------------------------------------------------------------
+#
+# Stage D applied on 2026-08-18 and protected.py correctly folded the thirteen resources it
+# created into PROTECTED_ADDRESSES. That broke `d-pre` in FOUR checks at once, not one: the
+# creates it demanded can never happen again, the single bucket create can never happen again,
+# the thirteen it now protects are exactly the ones a pre-apply plan creates, and prior state now
+# holds thirty addresses rather than seventeen.
+#
+# A GUARD THAT GOES RED ON THE CORRECT STATE TRAINS ITS OWN REMOVAL, so the stage derives the
+# plan's shape from the plan and accepts both. These tests are what stop that becoming a stage
+# that accepts anything.
+
+
+def applied_plan(pre_apply: dict) -> dict:
+    """Turn a pre-apply plan fixture into what the SAME plan looks like after the apply.
+
+    DERIVED FROM THE PRE-APPLY FIXTURE RATHER THAN COMMITTED AS A SECOND ONE, and the derivation is
+    the point: two hand-built fixtures for two shapes of one plan drift, and the one nobody edits
+    is the one that stops describing anything. Every create becomes a no-op and the created
+    addresses join prior state - which is exactly what applying does.
+    """
+    applied = json.loads(json.dumps(pre_apply))
+
+    for entry in applied.get("resource_changes", []):
+        change = entry.setdefault("change", {})
+        if "create" in (change.get("actions") or []):
+            change["actions"] = ["no-op"]
+            change["before"] = change.get("after")
+
+    resources = (
+        applied.setdefault("prior_state", {})
+        .setdefault("values", {})
+        .setdefault("root_module", {})
+        .setdefault("resources", [])
+    )
+    known = {resource.get("address") for resource in resources}
+    for entry in applied.get("resource_changes", []):
+        address = entry.get("address")
+        if address in PHASE_11_ADDRESSES and address not in known:
+            resources.append({
+                "address": address,
+                "mode": "managed",
+                "type": entry.get("type"),
+                "name": entry.get("name"),
+                "values": {},
+            })
+    return applied
+
+
+def test_d_pre_passes_on_an_applied_plan(expected_plan):
+    """The ordinary plan today: nothing to do, everything already there.
+
+    Before this, three of the seven checks failed on it - on a correct account, with correct
+    infrastructure, from a plan saying "No changes". Whoever ran it next would have deleted the
+    stage rather than trusted it.
+    """
+    plan = applied_plan(expected_plan)
+
+    mode, detail = stage_d.plan_mode(plan)
+    assert mode == stage_d.APPLIED, f"{mode}: {detail}"
+
+    results = [
+        stage_d.check_protected_addresses_untouched(plan),
+        stage_d.check_state_matches_protected_list(plan),
+        stage_d.check_plan_creates_the_phase_11_set(plan),
+        stage_d.check_exactly_one_bucket_created(plan),
+        stage_d.check_iam_allows_no_delete(plan),
+        stage_d.check_iam_allows_no_wildcard(plan),
+        stage_d.check_iam_excludes_the_state_bucket(plan, STATE_BUCKET),
+    ]
+    assert [r.status for r in results] == [PASS] * 7, [
+        r.render() for r in results if r.status != PASS
+    ]
+
+
+def test_d_pre_still_refuses_a_plan_that_creates_nothing_and_has_nothing(expected_plan):
+    """THE ORIGINAL REASON THE CREATES CHECK EXISTS, and it survives the change intact.
+
+    Every refusal in this stage - no deletes, no wildcards, no state bucket - is satisfied by a
+    plan that changes nothing whatsoever. The creates check was the thing that made an empty plan
+    fail. Accepting "already applied" must not turn that into accepting "empty", and the two look
+    identical in `resource_changes`: no creates either way. What tells them apart is whether the
+    thirteen are IN STATE, which is what plan_mode reads.
+    """
+    empty = json.loads(json.dumps(expected_plan))
+    empty["resource_changes"] = [
+        entry for entry in empty["resource_changes"]
+        if entry.get("address") not in PHASE_11_ADDRESSES
+    ]
+
+    mode, detail = stage_d.plan_mode(empty)
+    assert mode is None, f"an empty plan with nothing in state was accepted as {mode!r}"
+    assert "PARTIAL APPLY" in detail or "neither" in detail
+
+    result = stage_d.check_plan_creates_the_phase_11_set(empty)
+    assert result.status == FAIL
+    assert "neither" in result.observed
+
+
+def test_d_pre_refuses_a_partial_apply(expected_plan):
+    """Some created, some already there: the state nobody has reasoned about.
+
+    An apply that failed halfway leaves exactly this, and it is the case where "accept both
+    shapes" would quietly become "accept anything". Neither shape's assertions hold over it - the
+    pre-apply one would report the settled resources as missing creates, the applied one would
+    report the pending ones as unprotected.
+    """
+    partial = applied_plan(expected_plan)
+    one = sorted(PHASE_11_ADDRESSES)[0]
+    for entry in partial["resource_changes"]:
+        if entry.get("address") == one:
+            entry["change"]["actions"] = ["create"]
+    partial["prior_state"]["values"]["root_module"]["resources"] = [
+        resource
+        for resource in partial["prior_state"]["values"]["root_module"]["resources"]
+        if resource.get("address") != one
+    ]
+
+    mode, detail = stage_d.plan_mode(partial)
+    assert mode is None, f"a partial apply was accepted as {mode!r}"
+    assert one in detail or "neither" in detail
+
+    for check in (
+        stage_d.check_protected_addresses_untouched,
+        stage_d.check_state_matches_protected_list,
+        stage_d.check_plan_creates_the_phase_11_set,
+    ):
+        assert check(partial).status == FAIL, f"{check.__name__} passed on a partial apply"
+
+
+def test_the_bucket_check_gets_its_presence_guarantee_from_the_phase_11_set(expected_plan):
+    """On an applied plan, "0 buckets created" only means something because the bucket is present.
+
+    "Zero created" is also what a plan against an account with NO bucket looks like, and those are
+    opposite situations. The applied-mode branch does not check presence separately: `plan_mode`
+    returns APPLIED only when every Phase 11 address is present and no-op, and the bucket is one of
+    them. That makes a second presence check a branch that cannot fire - so it is not written, and
+    the RELATIONSHIP it would have covered is asserted here instead.
+
+    If somebody ever removes the bucket from PHASE_11_ADDRESSES, the applied-mode bucket check
+    silently stops covering the bucket. This is the line that goes red.
+    """
+    assert "aws_s3_bucket.backups" in PHASE_11_ADDRESSES, (
+        "the backup bucket is not in PHASE_11_ADDRESSES, so applied-mode `plan_mode` no longer "
+        "guarantees it is present - and check_exactly_one_bucket_created's applied branch, which "
+        "asserts only that nothing was created, now passes over an account with no bucket at all."
+    )
+
+    # And the mode really does require presence: drop the bucket from the plan and the shape is
+    # no longer recognisable as applied, so no check passes over it.
+    plan = applied_plan(expected_plan)
+    plan["resource_changes"] = [
+        entry for entry in plan["resource_changes"]
+        if entry.get("address") != "aws_s3_bucket.backups"
+    ]
+    mode, _ = stage_d.plan_mode(plan)
+    assert mode is None, f"a plan with no backup bucket was accepted as {mode!r}"

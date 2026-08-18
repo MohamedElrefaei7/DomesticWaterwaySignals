@@ -15,8 +15,6 @@ connected database's name), but it is worth knowing before pointing DATABASE_URL
 precious.
 """
 
-import re
-import shutil
 import subprocess
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -28,29 +26,6 @@ from app import db
 from app.orchestration import backup, restore_test
 
 pytestmark = pytest.mark.integration
-
-
-def _client_major() -> int | None:
-    if shutil.which("pg_dump") is None:
-        return None
-    try:
-        completed = subprocess.run(
-            ["pg_dump", "--version"], capture_output=True, text=True, timeout=20
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if completed.returncode != 0:
-        return None
-    match = re.search(r"\(PostgreSQL\)\s+(\d+)", completed.stdout or "")
-    return int(match.group(1)) if match else None
-
-
-CLIENT_MAJOR = _client_major()
-
-requires_pg_client = pytest.mark.skipif(
-    CLIENT_MAJOR is None,
-    reason="no pg_dump/pg_restore on PATH; the restore is invoked directly, not in a container",
-)
 
 
 def _with_password(url: str) -> str:
@@ -88,7 +63,7 @@ def throwaway_for(database_url):
 
 
 @pytest.fixture
-def source_archive(tmp_path, migrated_db, database_url):
+def source_archive(tmp_path, migrated_db, database_url, matching_pg_client):
     """A real archive of the migrated database, with apscheduler_jobs present and non-empty."""
     with db.connection(database_url, autocommit=True) as conn:
         conn.execute(
@@ -165,7 +140,6 @@ def restored(source_archive, database_url):
                 restore_test.drop_throwaway(admin, throwaway)
 
 
-@requires_pg_client
 def test_restore_test_integration_passes_on_good_archive(restored):
     """The machinery runs end to end: ANALYZE, statistics, counts, compressed chunks."""
     throwaway, snapshot = restored
@@ -180,7 +154,6 @@ def test_restore_test_integration_passes_on_good_archive(restored):
         restore_test.compare_compressed_chunks(snapshot.compressed_chunks, conn)
 
 
-@requires_pg_client
 def test_restore_test_integration_expects_apscheduler_jobs_zero_rows(restored):
     """The excluded table's DDL survived and its DATA did not.
 
@@ -207,7 +180,6 @@ def test_restore_test_integration_expects_apscheduler_jobs_zero_rows(restored):
     )
 
 
-@requires_pg_client
 def test_restore_test_integration_fails_when_a_table_is_short(restored):
     """THE TEST THAT PROVES THE COMPARISON WOULD CATCH REAL LOSS.
 
@@ -252,7 +224,6 @@ def test_restore_test_integration_fails_when_a_table_is_short(restored):
     )
 
 
-@requires_pg_client
 def test_restore_test_integration_fails_on_corrupted_archive(source_archive, tmp_path, database_url):
     """Bytes flipped in the MIDDLE of a real archive, well past the table of contents."""
     archive_path, _, staging, pgpass = source_archive
@@ -276,7 +247,6 @@ def test_restore_test_integration_fails_on_corrupted_archive(source_archive, tmp
             )
 
 
-@requires_pg_client
 def test_restore_test_integration_pre_restore_is_what_makes_it_work(source_archive, database_url):
     """The wrapper is not ceremony: a restore without it is materially different.
 
@@ -325,7 +295,6 @@ def test_restore_test_integration_pre_restore_is_what_makes_it_work(source_archi
     )
 
 
-@requires_pg_client
 def test_restore_test_integration_read_only_role_cannot_delete(restored):
     """The security property is IN THE BACKUP, not only in production.
 
@@ -360,7 +329,7 @@ SECOND_OWNER = "Second-Owner"
 
 
 @pytest.fixture
-def multi_owner_archive(tmp_path, migrated_db, database_url):
+def multi_owner_archive(tmp_path, migrated_db, database_url, matching_pg_client):
     """An archive whose objects carry MORE THAN ONE owner, one of them mixed-case.
 
     THIS IS THE CASE THAT FAILED. `create_roles` created only `waterway_api`, and the restore died
@@ -429,7 +398,6 @@ def multi_owner_archive(tmp_path, migrated_db, database_url):
         conn.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(SECOND_OWNER)))
 
 
-@requires_pg_client
 def test_restore_test_integration_succeeds_with_multiple_owners(multi_owner_archive, database_url):
     """A real archive with two owners restores, with every role discovered FROM THE ARCHIVE.
 

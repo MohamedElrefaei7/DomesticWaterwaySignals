@@ -40,6 +40,38 @@ does not change that.
 
 ---
 
+## PHASE 12 CHANGED HOW THREE OF THESE STEPS ARE RUN — READ THIS FIRST
+
+This runbook was written when the scheduler ran from a host venv and the backup spawned containers.
+Phase 12 made the scheduler the fifth Compose service, so:
+
+| was | is now |
+|---|---|
+| `python3 -m migrations.run` | `python3 -m app.orchestration.migrate` |
+| `python3 -m app.orchestration.run_once <job>` | `docker compose exec scheduler python -m app.orchestration.run_once <job>` |
+| a throwaway restore CONTAINER | a throwaway DATABASE, `dws_restore_test_<suffix>` |
+
+**The host venv is still needed, and still needs activating** — the migration runner and every
+`verify.phase11` stage connect from the host, and the runner cannot move into a container because
+the images deliberately do not contain `migrations/` (`CLAUDE.md § 3`). What no longer needs it is
+the JOBS: they run inside the scheduler container, where `boto3` is installed by the image.
+
+**Two things must be done once on the instance before any job runs**, and both are new:
+
+```
+sudo install -d -o 10001 -g 10001 -m 0750 /mnt/data/backups /mnt/data/restore-test
+```
+The scheduler container runs as uid 10001 and Docker creates a missing bind-mount source as
+`root:root`, so an absent directory silently becomes an unwritable one. The backup asserts
+writability at job start, so this fails cleanly rather than after `pg_dump` — but it does fail.
+
+**And `Dockerfile.scheduler`'s `postgresql-client-16` version is a placeholder that cannot
+resolve.** Resolve it on the instance with the `apt-cache madison` command in that file's header,
+write it into the pin, record it in `CONTEXT.md`, and only then `docker compose build scheduler`.
+`verify/preflight.py` refuses the placeholder by value until you do.
+
+---
+
 ## The six human actions
 
 Everything else in this document is a verifier call or a human reading a plan. These six are yours
@@ -50,8 +82,8 @@ that omits `apply`, `init`, `plan` and every `docker` verb that changes anything
 2. **C2** — `terraform init -migrate-state`, moving state into that bucket.
 3. **D3** — `terraform apply` for the Phase 11 resources.
 4. **D5** — clicking the SNS subscription confirmation link in your email.
-5. **G2** — `python3 -m app.orchestration.run_once backup_nightly`.
-6. **H2** — `python3 -m app.orchestration.run_once restore_test_monthly`.
+5. **G2** — `docker compose exec scheduler python -m app.orchestration.run_once backup_nightly`.
+6. **H2** — `docker compose exec scheduler python -m app.orchestration.run_once restore_test_monthly`.
 
 ---
 
@@ -115,6 +147,12 @@ Two things worth knowing about that middle assertion, both measured against Terr
 - **`c-post` needs a plan file and cannot use `terraform show -json` alone.** That emits a *state*
   document, which has no `resource_changes` key at all, so "assert there are no changes" over it is
   true on every input forever.
+- **Do not try to eyeball this with `terraform show <planfile> | grep '^Plan:'`. IT PRINTS
+  NOTHING.** The `Plan: N to add, ...` summary is emitted by `terraform plan` as it runs; `show`
+  renders the saved plan's contents and has no such line. A grep for it therefore returns empty on
+  a plan that adds thirteen resources and on a plan that adds none, which reads as "no changes"
+  either way. Read the plan by eye, or let the verifier read the JSON — those are the two checks
+  that can tell the difference.
 
 **Stop if `exit != 0`.** A plan that wants to create anything that already exists means applying
 would build a second copy of running infrastructure.
@@ -137,11 +175,27 @@ terraform show -json <planfile> > <plan-json>
 ```
 python3 -m verify.phase11 d-pre <plan-json>
 ```
-Seven checks, in order: no mutating action against any of the 17 protected addresses; the state
-contains exactly those 17 (so a resource added later and not written down cannot be silently
-unprotected); the plan creates exactly the 13 Phase 11 resources; **exactly one** `aws_s3_bucket`,
-not "at least one"; no IAM Allow grants `s3:Delete*`; no IAM Allow grants `s3:*`, `*` or a
-`NotAction`; no IAM Allow resource reaches the state bucket.
+Seven checks, in order: no mutating action against the protected addresses; the state contains
+exactly them (so a resource added later and not written down cannot be silently unprotected); the
+13 Phase 11 resources are all created or all already present; **exactly one** `aws_s3_bucket`, not
+"at least one"; no IAM Allow grants `s3:Delete*`; no IAM Allow grants `s3:*`, `*` or a `NotAction`;
+no IAM Allow resource reaches the state bucket.
+
+**`d-pre` ACCEPTS TWO PLAN SHAPES AND DERIVES WHICH ONE IT IS FROM THE PLAN.** Stage D applied on
+2026-08-18 and its thirteen resources joined `protected.py`, which broke four of these checks at
+once: the creates can never happen again, the single bucket create can never happen again, the
+thirteen it now protects are exactly the ones a rebuild plan creates, and prior state now holds
+thirty addresses rather than seventeen. A guard that goes red on the correct state trains its own
+removal, so:
+
+- **pre-apply** — the thirteen are all being created and none is in state. This is a REBUILD, which
+  is not hypothetical for a project whose backup and restore-test apparatus exists so the stack
+  *can* be rebuilt.
+- **applied** — the thirteen are all present and all no-op. This is what a plan looks like today.
+
+**Anything else is a hard failure**, and that is the half worth having: a plan where some of the
+thirteen exist and others do not is a partial apply, and an empty plan whose thirteen are simply
+absent from state still fails — which was the original reason the creates check existed.
 
 The IAM checks **parse the policy JSON** and are scoped to `aws_iam_policy` resources and to
 `Effect: Allow`. Both narrowings matter: `aws_s3_bucket_policy.backups` legitimately carries
@@ -192,21 +246,30 @@ source .venv/bin/activate
 set -a; . ./.env; set +a
 ```
 
-**The activation is load-bearing and its absence does not look like a missing venv.** The jobs run
-from a host venv, and `boto3` is installed only there — a bare `python3 -m app.orchestration.run_once
-backup_nightly` reaches the system interpreter and dies on `ModuleNotFoundError: boto3`. That names a
-Python package rather than an interpreter, so it reads as a missing dependency in the backup job, and
-the fix somebody reaches for is `pip install boto3`, which succeeds on the system interpreter and
-moves the failure one import further down.
+**The activation is still load-bearing, but for the migration runner and the verifiers rather than
+for the jobs.** Both connect from the host; the runner cannot move into a container because the
+images deliberately do not contain `migrations/`. The JOBS no longer need it — from Phase 12 they
+run inside the scheduler container, which carries `boto3` and a pinned `postgresql-client`.
+
+The failure the old note described is worth keeping because it still applies to anything you run on
+the host: a bare `python3 -m ...` reaches the system interpreter and dies on `ModuleNotFoundError:
+boto3`, which names a Python package rather than an interpreter — so it reads as a missing
+dependency and the fix somebody reaches for is `pip install boto3`, which succeeds and moves the
+failure one import further down.
 
 **E1.**
 ```
 python3 -m verify.phase11 e
 ```
-Asserts: preflight enumerates **six image references across three files** (parsed from preflight's
-own output, not recounted here — two implementations of one fact drift); no running container's
-resolved digest differs from the digest `docker-compose.yml` pins; a free-space baseline is written
-to `/mnt/data/phase11-verify-baseline.json`.
+Asserts: preflight enumerates **eight image references across four files** (parsed from
+preflight's own output, not recounted here — two implementations of one fact drift); no running
+container's resolved digest differs from the digest `docker-compose.yml` pins; a free-space baseline
+is written to `/mnt/data/phase11-verify-baseline.json`.
+
+**Eight across four as of Phase 12** — `Dockerfile.scheduler` added two `FROM` lines. It was six
+across three. `verify/preflight.py` also gained a gate asserting the client and server postgres
+majors agree, derived from the compose tag and the package pin with neither hardcoded; **it fails
+until the client version placeholder is resolved**, by value, naming the command that resolves it.
 
 A digest mismatch means the pin did not hold, which means `verify/preflight.py` gate 1 did not catch
 it — worth surfacing loudly rather than shrugging at.
@@ -220,7 +283,12 @@ a tmpfs sized from RAM; a baseline that vanishes leaves the later stages compari
 
 ## Stage F — migration 0026
 
-**F1. HUMAN.** `python3 -m migrations.run` — one pending file, `0026`.
+**F1. HUMAN.** `python3 -m app.orchestration.migrate` — one pending file, `0026`.
+
+**The module path in the first version of this runbook was wrong.** `migrations.run` does not
+exist; the runner is `app/orchestration/migrate.py` and `python3 -m migrations.run` fails with
+`No module named migrations`. Run it from the host venv, not the container: the images deliberately
+do not contain `migrations/`, so there is nothing for a container to run.
 
 **F2.**
 ```
@@ -285,9 +353,18 @@ read-only (`CLAUDE.md` § 20).
 
 **G2. HUMAN ACTION.**
 ```
-python3 -m app.orchestration.run_once backup_nightly
+docker compose exec scheduler python -m app.orchestration.run_once backup_nightly
 ```
 Exit `0` succeeded, `1` the job failed (recorded in `job_runs`), `2` usage.
+
+**Inside the container, not on the host.** `pg_dump` lives in the scheduler image now — the
+container has no Docker socket to spawn a matched one-shot container with, because mounting it is
+root-equivalent on the host. The job asserts `pg_dump --version`'s major equals the server's before
+it dumps anything, so a stale image fails here rather than producing an archive nobody has reason
+to trust.
+
+**`docker compose exec`, not `run`.** `run` starts a second container; `exec` uses the one that is
+already up, which is the one whose environment and mounts you verified.
 
 **G3.**
 ```
@@ -307,31 +384,48 @@ job, a verified archive in S3, and no row, with every layer agreeing with itself
 
 ## Stage H — the first restore test
 
-**H1.** Note the free space before: the restore test downloads the archive and starts a throwaway
-container, both on the root disk.
+**H1.** Note the free space before: the restore test downloads the archive **and creates a
+throwaway database on the production server**, both on `/mnt/data` — the same volume production's
+own data files are on.
 
 **H2. HUMAN ACTION.**
 ```
-python3 -m app.orchestration.run_once restore_test_monthly
+docker compose exec scheduler python -m app.orchestration.run_once restore_test_monthly
 ```
 This one takes minutes. It downloads the archive **from S3** — never from local staging — creates a
-throwaway container, restores into it, and makes the read-only role attempt a `DELETE` that must be
-refused.
+database named `dws_restore_test_<suffix>` `TEMPLATE template0`, creates the timescaledb extension
+in it, restores into it, and makes the read-only role attempt a `DELETE` that must be refused.
+
+**A THROWAWAY DATABASE, NOT A CONTAINER, AS OF PHASE 12**, because spawning a container from inside
+the scheduler container would need the host's Docker socket. The name guard that bounds the single
+`DROP` this system performs is asserted twice — at creation and again immediately before the drop —
+with two independent conditions (`CLAUDE.md § 3`).
+
+**ON FAILURE THE THROWAWAY IS KEPT, DELIBERATELY, and the error names it.** It is the only state
+that can say why a restore failed. Read the error, then remove it by hand:
+```
+SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '<name>';
+DROP DATABASE <name>;
+```
 
 **H3.**
 ```
 python3 -m verify.phase11 h
 ```
-Five checks: no `dws-restore-test-*` container survives anywhere on the host; exactly
-`{timescaledb, api, caddy}` running and exactly those plus `frontend-build` present; `frontend-build`
-exited `0`; `restore_test_monthly` has a success row with `rows_written` NULL;
+Five checks: no `dws_restore_test_*` **database** survives; exactly
+`{timescaledb, api, caddy, scheduler}` running and exactly those plus `frontend-build` present;
+`frontend-build` exited `0`; `restore_test_monthly` has a success row with `rows_written` NULL;
 `restore_verified_at` is set on the **most recent real backup** and on **no** probe row, with
 `restore_verified_counts` beside it.
 
 `frontend-build` exits by design (`restart: "no"`, gated by `service_completed_successfully`), which
-is why the running set is three and the present set is four. A leaked throwaway is looked for across
-every container on the host — it is created outside Compose, so `docker compose ps` cannot see it,
-and it holds a restored copy of the production database on the root disk.
+is why the running set is one smaller than the present set. `scheduler` joined the running set in
+Phase 12 — a stack without it looks entirely healthy from the outside and does no work at all.
+
+A leaked throwaway is looked for in `pg_database`, not among containers. **A survivor is not
+automatically a bug**: on failure the job keeps it on purpose. Either it is that evidence, or a run
+was killed before its `finally` — and those send you to two different places, so the check reports
+the name rather than guessing.
 
 **Stop if `exit != 0`.**
 

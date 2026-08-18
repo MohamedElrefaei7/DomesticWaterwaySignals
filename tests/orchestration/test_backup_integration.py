@@ -59,32 +59,6 @@ requires_pg_client = pytest.mark.skipif(
 )
 
 
-def skip_unless_client_matches_server(database_url: str) -> int:
-    """Skip, at RUN time, when the local client's major differs from the server under test.
-
-    ONLY THE JOB-LEVEL TESTS NEED THIS, and the distinction is worth stating. The archive-shape
-    tests are about what pg_restore does to a truncated file, which any recent client answers the
-    same way. The job-level tests drive the real entrypoint, and the real job REFUSES a major
-    mismatch on purpose - so on a machine whose client is a different major they must skip rather
-    than pass, and they must not stub the version check out. Stubbing it would make the only tests
-    that exercise the whole path stop exercising the guard that path now depends on.
-
-    A run-time skip rather than a `skipif` decorator because the server's major is a fact about
-    DATABASE_URL, which does not exist at collection time. A SKIP with this reason is visible in
-    the report; it does not read as a pass (CLAUDE.md § 13).
-    """
-    with db.connection(database_url) as conn:
-        server = backup.server_major(conn)
-    if CLIENT_MAJOR != server:
-        pytest.skip(
-            f"local pg_dump is major {CLIENT_MAJOR} and the server under test is major {server}; "
-            f"the job refuses a mismatch by design (CLAUDE.md § 3), so this path cannot be "
-            f"exercised here. It runs on the instance, where the scheduler image's client is "
-            f"pinned to the server's major."
-        )
-    return server
-
-
 @pytest.fixture
 def scheduler_table(migrated_db, database_url):
     """Create `apscheduler_jobs` the way the scheduler does.
@@ -425,14 +399,12 @@ def _with_password(url: str) -> str:
 
 
 @requires_pg_client
-def test_backup_integration_end_to_end(tmp_path, scheduler_table, database_url):
+def test_backup_integration_end_to_end(tmp_path, scheduler_table, database_url, matching_pg_client):
     """A real dump, really verified, "uploaded", and recorded.
 
     Asserts the two things only a job-level test can see: `rows_written` is NULL in job_runs, and
     the `backups` row's `row_counts` keys equal the source's public-schema table set exactly.
     """
-    skip_unless_client_matches_server(database_url)
-
     staging = tmp_path / "backups"
     staging.mkdir()
     s3 = RecordingS3()
@@ -491,11 +463,9 @@ def test_backup_integration_end_to_end(tmp_path, scheduler_table, database_url):
 
 @requires_pg_client
 def test_backup_integration_keeps_local_file_when_upload_verification_fails(
-    tmp_path, scheduler_table, database_url
+    tmp_path, scheduler_table, database_url, matching_pg_client
 ):
     """A failed upload verification KEEPS the archive - it is the only copy known to restore."""
-    skip_unless_client_matches_server(database_url)
-
     staging = tmp_path / "backups"
     staging.mkdir()
     s3 = RecordingS3(content_length=1)  # S3 reports a one-byte object
@@ -519,11 +489,9 @@ def test_backup_integration_keeps_local_file_when_upload_verification_fails(
 
 @requires_pg_client
 def test_backup_integration_copies_to_monthly_on_first_of_month(
-    tmp_path, scheduler_table, database_url
+    tmp_path, scheduler_table, database_url, matching_pg_client
 ):
     """Server-side copy on the first, and NOT on any other day."""
-    skip_unless_client_matches_server(database_url)
-
     staging = tmp_path / "backups"
     staging.mkdir()
 

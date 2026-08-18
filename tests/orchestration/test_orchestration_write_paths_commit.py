@@ -34,15 +34,14 @@ from app.orchestration import backup, restore_test
 pytestmark = pytest.mark.integration
 
 
-# RENAMED AND RE-REASONED IN PHASE 12. It was `requires_docker`, skipping because the dump and the
-# throwaway restore both ran in containers. Neither does: the scheduler container has no Docker
-# socket, so pg_dump/pg_restore come from the image and the throwaway is a database. A skip whose
-# stated reason has stopped being true is worse than no skip - it reads as a considered exclusion
-# while quietly not running the tests on a machine that could run them (CLAUDE.md § 13).
-requires_pg_client = pytest.mark.skipif(
-    shutil.which("pg_dump") is None or shutil.which("pg_restore") is None,
-    reason="no pg_dump/pg_restore on PATH: the dump and the restore are invoked directly",
-)
+# THE PRECONDITION IS THE `matching_pg_client` FIXTURE, not a decorator here.
+#
+# It was `requires_docker`, skipping because the dump and the throwaway restore both ran in
+# containers. Neither does as of Phase 12. The replacement briefly checked only that a client
+# EXISTS, which is not enough: both tests below drive the real job entrypoints, and the real
+# backup job refuses a client/server MAJOR MISMATCH on purpose - so on a machine with a pg18
+# client and a pg16 server they failed on the project's own guard rather than skipping. The
+# fixture in conftest.py compares the majors and skips with both of them in the reason.
 
 
 @pytest.fixture
@@ -123,8 +122,9 @@ class RoundTripS3:
         shutil.copy2(self._path(bucket, key), destination)
 
 
-@requires_pg_client
-def test_backup_rows_visible_from_new_connection(tmp_path, scheduler_table, database_url):
+def test_backup_rows_visible_from_new_connection(
+    tmp_path, scheduler_table, database_url, matching_pg_client
+):
     """`backup_nightly_job`'s `backups` row must outlive the connection that inserted it.
 
     THE REGRESSION TEST FOR THE PHASE 11 DEFECT, named for the property rather than for the
@@ -154,9 +154,8 @@ def test_backup_rows_visible_from_new_connection(tmp_path, scheduler_table, data
     assert rows[0][1] is True, "the recorded backup is not marked verified"
 
 
-@requires_pg_client
 def test_restore_test_mark_verified_visible_from_new_connection(
-    tmp_path, scheduler_table, database_url
+    tmp_path, scheduler_table, database_url, matching_pg_client
 ):
     """`restore_test_monthly_job`'s verification mark must outlive its connection.
 

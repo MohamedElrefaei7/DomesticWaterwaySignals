@@ -25,6 +25,73 @@ from verify.phase11.result import Check, CheckResult, failed, passed
 
 WHAT = "d-pre plan"
 
+# ---------------------------------------------------------------------------------------------
+# THE TWO PLAN SHAPES THIS STAGE ACCEPTS, AND WHY IT HAS TO ACCEPT BOTH
+# ---------------------------------------------------------------------------------------------
+#
+# Stage D applied on 2026-08-18, and `protected.py` correctly folded the thirteen resources it
+# created into PROTECTED_ADDRESSES - they are existing infrastructure now. That broke this stage
+# for its original purpose in three places at once: the creates it demanded can never happen
+# again, the single bucket create can never happen again, and the thirteen addresses it now
+# protects are exactly the ones the pre-apply plan CREATES, so `no mutating action` fails on the
+# plan the stage was written to bless.
+#
+# A GUARD THAT GOES RED ON THE CORRECT STATE TRAINS ITS OWN REMOVAL. Whoever hits it next reads
+# three red checks against a healthy account and deletes the stage.
+#
+# So the shape is DERIVED FROM THE PLAN rather than passed in as a flag:
+#
+#   PRE_APPLY  the thirteen are all being created and none is in prior state.
+#              This is a rebuild - which is not hypothetical for a project whose whole backup and
+#              restore-test apparatus exists so the stack CAN be rebuilt.
+#   APPLIED    the thirteen are all present and all no-op. This is what a plan looks like today.
+#
+# ANYTHING ELSE IS A HARD FAILURE, and that is the half that keeps the guard worth having. A plan
+# where some of the thirteen are being created and others already exist is a partial apply, which
+# is the state nobody has reasoned about. And critically: AN EMPTY PLAN WITH THE THIRTEEN ABSENT
+# FROM STATE STILL FAILS - that was the original reason for the creates check ("every check above
+# passes on a plan that changes nothing whatsoever"), and it survives intact.
+
+PRE_APPLY = "pre-apply"
+APPLIED = "applied"
+
+
+def plan_mode(plan: dict[str, Any]) -> tuple[str | None, str]:
+    """`(mode, detail)` for the Phase 11 resources, read out of the plan itself.
+
+    Returns `(None, why)` when the plan is neither shape, so every caller reports the same
+    observation rather than three checks each guessing separately.
+    """
+    managed = {
+        entry["address"]: entry
+        for entry in tfjson.resource_changes(plan)
+        if entry.get("mode") == "managed" and entry.get("address")
+    }
+    creating = {
+        address for address, entry in managed.items() if "create" in tfjson.actions(entry)
+    }
+    settled = {
+        address for address in PHASE_11_ADDRESSES
+        if address in managed and tfjson.is_no_op(managed[address])
+    }
+
+    phase_11_creating = PHASE_11_ADDRESSES & creating
+
+    if phase_11_creating == PHASE_11_ADDRESSES and not settled:
+        return PRE_APPLY, f"all {len(PHASE_11_ADDRESSES)} Phase 11 addresses are being created"
+    if not phase_11_creating and settled == PHASE_11_ADDRESSES:
+        return APPLIED, f"all {len(PHASE_11_ADDRESSES)} Phase 11 addresses are in state and no-op"
+
+    absent = sorted(PHASE_11_ADDRESSES - phase_11_creating - settled)
+    return None, (
+        f"the plan is neither shape: {len(phase_11_creating)} of "
+        f"{len(PHASE_11_ADDRESSES)} Phase 11 addresses are being created, {len(settled)} are "
+        f"present and no-op, and {len(absent)} are neither: {absent}.\n"
+        f"         A plan where some already exist and others do not is a PARTIAL APPLY. An empty "
+        f"plan whose Phase 11 addresses are simply absent from state lands here too, which is the "
+        f"case this refusal has always existed for."
+    )
+
 # Actions no policy attached to the instance role may ALLOW. The instance writes backups and reads
 # them back; retention is a bucket lifecycle rule S3 executes itself (backups.tf), so a delete
 # grant would let anything holding the instance role erase every backup.
@@ -40,16 +107,26 @@ def check_protected_addresses_untouched(plan: dict[str, Any]) -> CheckResult:
     purpose is to add a bucket and a health check should contain, and "it was only an update" is
     how a forced replacement gets waved through.
     """
+    name = "no mutating action against existing infrastructure"
+    mode, detail = plan_mode(plan)
+    if mode is None:
+        return failed(name, "a pre-apply or an applied plan", detail)
+
+    # ON A PRE-APPLY PLAN THE THIRTEEN ARE NOT YET EXISTING INFRASTRUCTURE, so creating them is
+    # not a mutation of anything. They are in PROTECTED_ADDRESSES because they exist TODAY; a
+    # rebuild plan is a plan taken when they do not, and holding it to today's inventory would
+    # report the correct plan as destroying things.
+    protected = PROTECTED_ADDRESSES - (PHASE_11_ADDRESSES if mode == PRE_APPLY else frozenset())
+
     offenders = [
         tfjson.describe(entry)
         for entry in tfjson.resource_changes(plan)
-        if entry.get("address") in PROTECTED_ADDRESSES and not tfjson.is_no_op(entry)
+        if entry.get("address") in protected and not tfjson.is_no_op(entry)
     ]
-    name = "no mutating action against existing infrastructure"
-    expected = f"all {len(PROTECTED_ADDRESSES)} protected addresses planned as ['no-op']"
+    expected = f"all {len(protected)} protected addresses planned as ['no-op'] ({mode})"
     if offenders:
         return failed(name, expected, f"{len(offenders)} mutated: {'; '.join(sorted(offenders))}")
-    return passed(name, expected, f"{len(PROTECTED_ADDRESSES)} protected addresses, all no-op")
+    return passed(name, expected, f"{len(protected)} protected addresses, all no-op; {detail}")
 
 
 def check_state_matches_protected_list(plan: dict[str, Any]) -> CheckResult:
@@ -60,14 +137,27 @@ def check_state_matches_protected_list(plan: dict[str, Any]) -> CheckResult:
     state but not in the list is unprotected infrastructure, and an address in the list but not in
     state is a resource that has already gone.
     """
+    name = "state contains exactly the protected address list"
+    mode, detail = plan_mode(plan)
+    if mode is None:
+        return failed(name, "a pre-apply or an applied plan", detail)
+
     state = tfjson.prior_state(plan, what=WHAT)
     observed = tfjson.managed_addresses(state)
 
-    unprotected = sorted(observed - PROTECTED_ADDRESSES)
-    missing = sorted(PROTECTED_ADDRESSES - observed)
+    # ON A PRE-APPLY PLAN THE THIRTEEN ARE NOT IN STATE YET - that is what makes it a pre-apply
+    # plan. Comparing against today's inventory would report every one of them as "protected but
+    # ABSENT from state", which is thirteen alarming lines about a plan that is exactly right.
+    expected_addresses = (
+        PROTECTED_ADDRESSES - PHASE_11_ADDRESSES if mode == PRE_APPLY else PROTECTED_ADDRESSES
+    )
 
-    name = "state contains exactly the protected address list"
-    expected = f"{len(PROTECTED_ADDRESSES)} addresses, equal to verify/phase11/protected.py"
+    unprotected = sorted(observed - expected_addresses)
+    missing = sorted(expected_addresses - observed)
+
+    expected = (
+        f"{len(expected_addresses)} addresses, equal to verify/phase11/protected.py ({mode})"
+    )
     if unprotected or missing:
         parts = []
         if unprotected:
@@ -90,10 +180,30 @@ def check_exactly_one_bucket_created(plan: dict[str, Any]) -> CheckResult:
     arrives looking like an extra resource rather than like a mistake.
     """
     addresses = tfjson.created(plan, "aws_s3_bucket")
-    name = "exactly one S3 bucket is created"
+    name = "exactly one S3 bucket is created, or none and it is already there"
+    mode, detail = plan_mode(plan)
+
+    if mode == APPLIED:
+        # NOTHING MAY BE CREATED, AND THAT IS THE WHOLE ASSERTION HERE.
+        #
+        # "Zero buckets created" is also what a plan against an account with no bucket at all
+        # looks like, and those are opposite situations - so this needs the bucket's PRESENCE too.
+        # It does not check that separately, because `mode == APPLIED` already carries it:
+        # plan_mode returns APPLIED only when every one of PHASE_11_ADDRESSES is present and
+        # no-op, and `aws_s3_bucket.backups` is one of them. A second presence check here would
+        # be a branch that cannot fire, and dead code with a plausible use case is the code that
+        # comes back. The relationship it depends on is asserted in
+        # tests/verify/test_phase11_terraform.py rather than assumed.
+        expected = "0 aws_s3_bucket creates; presence carried by the applied-mode check above"
+        if addresses:
+            return failed(
+                name, expected, f"{len(addresses)} created on an applied plan: {addresses}"
+            )
+        return passed(name, expected, f"0 created; {detail}")
+
     expected = "exactly 1 aws_s3_bucket with a create action"
     if len(addresses) != 1:
-        return failed(name, expected, f"{len(addresses)}: {addresses}")
+        return failed(name, expected, f"{len(addresses)}: {addresses} ({mode} plan)")
     return passed(name, expected, f"1: {addresses[0]}")
 
 
@@ -194,32 +304,41 @@ def check_iam_excludes_the_state_bucket(
 
 
 def check_plan_creates_the_phase_11_set(plan: dict[str, Any]) -> CheckResult:
-    """The plan creates the Phase 11 resources, and only those.
+    """The Phase 11 resources are either all being created, or all already there.
 
-    Without this, every check above passes on a plan that changes nothing whatsoever - all the
-    refusals are satisfied by an empty plan. It also catches the opposite: a plan carrying
-    something nobody expected, which is the case where reading the plan by eye goes wrong.
+    THE ORIGINAL REASON SURVIVES: without this, every refusal above is satisfied by a plan that
+    changes nothing whatsoever. That is still true, and an empty plan whose Phase 11 addresses are
+    absent from state still fails here - `plan_mode` puts it in neither shape.
+
+    What changed is that "creates nothing" is no longer automatically wrong. Stage D applied, so
+    the ordinary plan today creates nothing and every one of the thirteen is a no-op in state.
+    Demanding creates would make this check red forever on the correct account, and a guard that
+    goes red on the correct state trains its own removal.
+
+    It also still catches the opposite: a create nobody expected, which is the case where reading
+    a plan by eye goes wrong.
     """
+    name = "the Phase 11 resources are all created or all in state"
+    mode, detail = plan_mode(plan)
+    expected = (
+        f"either {len(PHASE_11_ADDRESSES)} creates equal to PHASE_11_ADDRESSES, or 0 creates with "
+        f"all {len(PHASE_11_ADDRESSES)} present and no-op"
+    )
+    if mode is None:
+        return failed(name, expected, detail)
+
     creating = {
         entry["address"]
         for entry in tfjson.resource_changes(plan)
         if entry.get("mode") == "managed" and "create" in tfjson.actions(entry)
     }
     unexpected = sorted(creating - PHASE_11_ADDRESSES)
-    absent = sorted(PHASE_11_ADDRESSES - creating)
-
-    name = "the plan creates exactly the Phase 11 resources"
-    expected = f"{len(PHASE_11_ADDRESSES)} creates, equal to PHASE_11_ADDRESSES"
-    if unexpected or absent:
-        parts = []
-        if unexpected:
-            parts.append(f"{len(unexpected)} unexpected creates: {unexpected}")
-            if absent:
-                parts.append(f"{len(absent)} expected creates absent: {absent}")
-        elif absent:
-            parts.append(f"{len(absent)} expected creates absent: {absent}")
-        return failed(name, expected, "; ".join(parts))
-    return passed(name, expected, f"{len(creating)} creates, sets equal")
+    if unexpected:
+        return failed(
+            name, expected,
+            f"{len(unexpected)} create(s) nobody expected: {unexpected} ({mode} plan)",
+        )
+    return passed(name, expected, f"{mode}: {detail}")
 
 
 def checks(planfile: str, state_bucket: str | None = None) -> Sequence[Check]:

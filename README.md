@@ -35,7 +35,7 @@ Every number in this file is reproducible from a query.
 
 ## Architecture
 
-Four containers on one EC2 instance, one Docker Compose stack, brought up at boot by a single
+Five containers on one EC2 instance, one Docker Compose stack, brought up at boot by a single
 systemd unit. Everything is polled on a schedule; there is no streaming daemon and reintroducing
 one is out of scope by contract.
 
@@ -43,12 +43,19 @@ one is out of scope by contract.
 |---|---|---|
 | `timescaledb` | Postgres 16 + TimescaleDB, on a **separate** EBS volume | no |
 | `api` | FastAPI + uvicorn, read-only, single worker | no — proxied |
+| `scheduler` | APScheduler, every scheduled job, a pinned `postgresql-client` | no |
 | `frontend-build` | Pinned, containerized Vite build; emits a static bundle | no |
 | `caddy` | TLS termination, serves the bundle, proxies `/api` | 80, 443 |
 
 Every image is pinned by digest, resolved on the machine that runs it. `verify/preflight.py`
-enumerates all six references across the Compose file and both Dockerfiles and fails on any that
-is unpinned, untagged, or interpolated.
+enumerates all eight references across the Compose file and all three Dockerfiles and fails on any
+that is unpinned, untagged, or interpolated.
+
+**No container is given the Docker socket.** Mounting `/var/run/docker.sock` is root-equivalent on
+the host, so the backup's `pg_dump` lives inside the scheduler image instead of spawning a
+container off the server's digest. The cost is a version pin in two files; it is accepted because
+that drift is detectable — a preflight gate compares what the files say and the job compares what
+is installed — and the socket's blast radius is not.
 
 ---
 
@@ -148,6 +155,38 @@ An external Route53 health check string-matches **`"degraded":false`** in the re
 status code, and a CloudWatch alarm on it notifies an SNS topic. `insufficient_data_actions` fires
 the same topic, because an alarm stuck in INSUFFICIENT_DATA is indistinguishable from a healthy one
 on a dashboard.
+
+### The thing the monitor found, recorded because it is the point
+
+**The scheduler had never run in production.** Through Phase 11 `job_runs` held two probe rows
+written by verification harnesses and nothing else, `apscheduler_jobs` held zero rows, and every
+row of ingested data in the database had arrived by a human running a backfill CLI by hand. The
+scheduled jobs existed, were tested, and had never fired.
+
+**The system said so, correctly, the whole time.** `/api/health` reported `degraded: true` from
+Phase 8 onward, for the correct reason, in the correct field. What was missing was anybody reading
+it — which is what Phase 11's external health check and alarm added, and Phase 12 is the fix it
+prompted.
+
+It is written here rather than only in a commit message because the honest version of this project
+is more useful than a clean one: the failure mode that this codebase is organised around — a layer
+reporting success while the thing downstream of it receives nothing — happened to the codebase
+itself, and the layer that caught it was the one built for the purpose.
+
+### Known limitations of the restore test
+
+- **Roles are cluster-wide**, so the read-only role already exists in the throwaway database the
+  monthly restore test creates. The code that recreates roles from the archive is exercised by
+  unit tests and is a **no-op in production runs**; its production path is untested.
+- **The restore test no longer proves a fresh-cluster restore.** It restores into a throwaway
+  database on the existing server, so a dump depending on some cluster-level object would restore
+  cleanly here and fail on a real rebuild. It answers "does this archive restore into this
+  server", not "into a new one". Both losses are the price of not mounting the Docker socket.
+- **`apscheduler_jobs` sits outside the migration and checksum regime.** It is created by the job
+  store's own DDL on the scheduler's first start, so a library upgrade can change its shape with
+  nothing noticing. The operational consequence: the backup asserts that table exists before
+  dumping, so **on a rebuilt instance the scheduler must start once before the first backup**, or
+  the backup refuses with an error about an excluded table that says nothing about ordering.
 
 ---
 

@@ -380,6 +380,70 @@ It now filters to rows that represent the function having actually been called.
 
 ---
 
+### Part 6 — documentation, and four things that were quietly wrong
+
+**THE SCHEDULER HAD NEVER RUN IN PRODUCTION, AND THE MONITOR IS WHAT FOUND IT.** `job_runs` held
+two probe rows from 2026-08-11 written by `verify/` harnesses; `apscheduler_jobs` held zero rows;
+there was no `dws-scheduler.service`; every ingest row arrived by manual backfill. **The system
+reported `degraded: true` correctly from Phase 8 onward and nobody was watching until Phase 11's
+health check existed.** That is a better story than a clean record and it belongs here and in the
+README rather than only in a commit message.
+
+**`d-pre` WAS BROKEN IN FOUR CHECKS, NOT ONE.** `a11216f` correctly folded Stage D's thirteen
+resources into `PROTECTED_ADDRESSES`, and that made the stage red against a correct account:
+the creates it demanded can never happen again, the single bucket create can never happen again,
+the thirteen it now protects are exactly the ones a rebuild plan creates, and prior state now holds
+thirty addresses rather than seventeen. **It also left three tests failing at `a11216f` — the repo
+was not green when Phase 12 began.** The stage now derives the plan's shape from the plan and
+accepts **pre-apply** (a rebuild) or **applied** (today), and refuses anything else — a partial
+apply, or an empty plan whose thirteen are simply absent, which was the original reason the creates
+check existed.
+
+**`terraform show <planfile> | grep '^Plan:'` PRINTS NOTHING.** The `Plan: N to add` summary comes
+from `terraform plan` as it runs; `show` renders the saved plan and has no such line. The grep
+returns empty on a plan that adds thirteen resources and on one that adds none, which reads as "no
+changes" either way. Recorded in the runbook as a trap rather than a step.
+
+**Two coverage losses from Part 4, OPEN and not resolved:** roles are cluster-wide, so
+`create_roles`-from-archive is a no-op in production runs and its production path is untested; and
+the fresh-cluster property is gone, so a dump depending on a cluster-level object would restore
+cleanly and fail on a real rebuild.
+
+**`apscheduler_jobs` sits outside the migration and checksum regime**, created by
+`SQLAlchemyJobStore`'s own DDL on the scheduler's first start. A library upgrade can change its
+shape with nothing here noticing — no migration to review, no checksum to mismatch, no version row.
+The operational consequence is the one that bites: **the backup job asserts the
+`--exclude-table-data` target exists before dumping, so on a rebuilt instance where the backup runs
+before the scheduler has ever started, it refuses** — correctly, with an error about an excluded
+table that says nothing about scheduler startup ordering.
+
+**THE VERSION PIN EARNED ITSELF DURING PART 6, ON A REAL MISMATCH NOBODY STAGED.** Running the
+integration tier on a laptop with a **pg18** client against the **pg16** server produced:
+
+```
+pg_restore: error: could not execute query: ERROR:  unrecognized configuration parameter "transaction_timeout"
+Command was: SET transaction_timeout = 0;
+```
+
+`transaction_timeout` arrived in PostgreSQL 17, so a 17+ client emits it and a 16 server rejects it
+and the restore fails outright. That is the LOUD end of "a client at a different major produces a
+subtly wrong archive" - the quiet end is what `assert_client_server_majors_agree` refuses. It also
+showed the guard working: two tests that drive the real job entrypoints failed on **this project's
+own refusal message** rather than on a corrupt result.
+
+The tests that dump or restore for real now take a **`matching_pg_client`** fixture
+(`tests/orchestration/conftest.py`) which compares the majors and skips with both of them in the
+reason. One place, used by three files; an earlier version checked only that a client EXISTED,
+which is not the same precondition and let these through.
+
+**The transient `OutOfMemory` on the health endpoint's freshness query, observed before the Stage E
+rebuild and absent after it, is recorded as OBSERVED AND NOT REPRODUCED.** Not explained, not
+attributed to the rebuild — one occurrence, one absence, and no mechanism. Writing down a cause
+would be the more comfortable entry and the less true one; if it returns, this line is what says it
+is not the first time.
+
+---
+
 ## § Up Next
 
 **THE DEPLOYMENT RUNBOOK IS `docs/runbooks/phase-11.md`, IN THE REPO AND VERSIONED.** It executes
@@ -405,29 +469,23 @@ The pending human steps are listed under each part below and gathered here:
 5. Confirm the SNS subscription and check the ARN is **not** `PendingConfirmation`.
 6. Force a degraded health response, wait ~3 minutes, confirm the Route53 check fails and an email
    arrives. **This step is the whole point of the monitoring part.**
-7. `python -m migrations.run` — one pending file, `0026`.
-8. **Start the scheduler once**, if this instance has never run it, *before* step 9. `apscheduler_jobs`
-   is created by APScheduler's own DDL on first start, not by a migration, and the backup asserts
-   it exists before dumping — so on a fresh instance the first backup otherwise refuses with an
-   error about an excluded table that says nothing about ordering.
-9. The two jobs, one at a time, through the real runner Stage B added:
+7. `python3 -m app.orchestration.migrate` — one pending file, `0026`. **Not `migrations.run`**, which does not exist; run it from the host venv, because the images deliberately do not contain `migrations/`.
+8. **Start the scheduler once**, if this instance has never run it, *before* step 9. From Phase 12
+   that is `docker compose up -d scheduler`. `apscheduler_jobs` is created by APScheduler's own DDL
+   on first start, not by a migration, and the backup asserts it exists before dumping — so on a
+   fresh instance the first backup otherwise refuses with an error about an excluded table that
+   says nothing about ordering.
+9. The two jobs, one at a time, **inside the scheduler container** (Phase 12):
    ```
    cd /opt/inland-waterway-signals
-   source .venv/bin/activate          # NOT optional — see below
-   set -a; . ./.env; set +a
-   python3 -m app.orchestration.run_once backup_nightly
-   python3 -m app.orchestration.run_once restore_test_monthly
+   docker compose exec scheduler python -m app.orchestration.run_once backup_nightly
+   docker compose exec scheduler python -m app.orchestration.run_once restore_test_monthly
    ```
-   **The activation is load-bearing and its absence does not look like a missing venv.** The jobs
-   run from a host venv, not a container (§ Scheduler and jobs), and `boto3` is installed only
-   there — so a bare `python3 -m app.orchestration.run_once backup_nightly` reaches the system
-   interpreter and dies on `ModuleNotFoundError: boto3`. **Measured against the source, not
-   assumed:** `backup.py:479` imports boto3 inside `backup_nightly`, above the `mkdir` and the
-   dump, so the failure is early and nothing is left in staging — but the error names a Python
-   package rather than an interpreter, so it reads as a missing dependency in the backup job. The
-   fix somebody reaches for is `pip install boto3`, which on the system interpreter succeeds and
-   moves the failure one import further down.
    Exit `0` succeeded, `1` the job failed (recorded in `job_runs`), `2` usage.
+   **`exec`, not `run`:** `run` starts a second container, while `exec` uses the one already up —
+   the one whose environment and mounts were verified. The host venv is no longer involved in
+   these two; `boto3` and a pinned `postgresql-client` are in the image. It is still needed for
+   the migration runner and every `verify.phase11` stage, which connect from the host.
 10. Burst `/api/conclusion` from a laptop, not the instance.
 11. `docker compose down && docker compose up -d`, then `docker compose ps` — **three times**. The
     API must not report started before `timescaledb` reports healthy. Stage B replaced the
