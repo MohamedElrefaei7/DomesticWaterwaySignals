@@ -28,10 +28,12 @@ enters state with the Phase 11 apply and is re-read on every plan; it is not inf
 destruction matters, and including it would make this set flip for a reason that is not a change to
 anything real.
 
-THE PHASE 11 RESOURCES ARE NOT IN THIS LIST BY DESIGN. They do not exist yet: `d-pre` runs against
-a plan that CREATES them, so listing them here would make their creation look like a violation.
-After Stage D's apply, this list is 17 + 13 + the caller-identity data source, and updating it is
-part of the writeback commit rather than something the verifier does for itself.
+THE PHASE 11 RESOURCES WERE NOT IN THIS LIST UNTIL STAGE D'S APPLY. Before it, `d-pre` ran against
+a plan that CREATED them, so listing them would have made their creation look like a violation.
+Stage D applied on 2026-08-18 (13 added, 0 changed, 0 destroyed), so they are now existing
+infrastructure and PROTECTED_ADDRESSES is the union of the original seventeen and those thirteen.
+PHASE_11_ADDRESSES is retained as the record of what that apply created, and is the source of the
+thirteen merged below rather than a second hand-typed list.
 """
 
 from __future__ import annotations
@@ -90,3 +92,8 @@ PHASE_11_ADDRESSES: frozenset[str] = frozenset(
         "aws_budgets_budget.monthly",
     }
 )
+
+# After Stage D's apply the Phase 11 resources are existing infrastructure, so they are protected
+# on the same terms as everything else. Unioned rather than re-listed: two hand-typed copies of the
+# same thirteen addresses would drift, and the drift would be silent in the direction that matters.
+PROTECTED_ADDRESSES = PROTECTED_ADDRESSES | PHASE_11_ADDRESSES
