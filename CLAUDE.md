@@ -115,7 +115,17 @@ describes does not hold has already happened here.
 - A migration that must run outside a transaction (e.g. `CREATE INDEX CONCURRENTLY`) is marked with a
   first-line `-- migrate:no-transaction` comment that the runner honours.
 - **Destructive operations are archived, never dropped:** `ALTER TABLE … RENAME TO …_archived_YYYYMMDD`.
-  Only a human runs an actual `DROP`.
+  Only a human runs an actual `DROP`. **One exception: the monthly restore test creates a database
+  named `dws_restore_test_<suffix>` and drops it. The exception is bounded by a name guard asserted
+  twice — at creation and again immediately before the `DROP` — that refuses any name not matching
+  the prefix and refuses the production database name explicitly. The alternative was mounting the
+  Docker socket into the scheduler container, which is root-equivalent on the host; this exception
+  is the narrower risk and is recorded here so it is a decision, not an erosion.** The second
+  assertion is the one that matters and the one that looks redundant: checking at creation guards
+  against a bad name, while checking again before the drop guards against the variable being
+  reassigned, shadowed, or read from a different scope in between. The two conditions are
+  independent — prefix AND inequality with the connected database's own name — because a prefix
+  check alone fails open if the prefix is ever empty.
 - **A dump is verified by `pg_restore -f /dev/null <file>` completing with no stderr output.**
   `pg_restore --list` is *not* verification — it reads only the archive's table of contents. A dump
   that was one-third its correct size once passed `--list` cleanly, matched its own SHA-256 across
@@ -224,6 +234,12 @@ describes does not hold has already happened here.
   hardcoded list omits the object OWNER, and the restore then fails on `ALTER SCHEMA … OWNER TO`.
   After restoring, the read-only role is made to attempt a `DELETE` and must be refused: that is
   the only assertion proving the security property is in the backup rather than only in production.
+  **The switch to that role is `SET ROLE` and its EFFECT is asserted — `current_user` is read back
+  before the `DELETE` is attempted.** `SET LOCAL ROLE` is scoped to the enclosing transaction, and
+  on an autocommit connection there is none, so the setting is discarded and the `DELETE` runs as
+  the OWNER. Measured on 2026-08-17: `current_user` stayed `waterway` and the `DELETE` succeeded,
+  which this check reports as "the restored read-only role was permitted to write" — a false
+  failure accusing the backup's grants, with the real cause one layer away in session scoping.
 - **Restored counts must equal recorded counts EXACTLY, with key sets compared in BOTH
   directions, and every mismatch reported.** No tolerance of any size — a tolerance is a tolerance
   for exactly the loss the test exists to detect. Comparing only the intersection hides a dropped
@@ -232,10 +248,29 @@ describes does not hold has already happened here.
   exclusion worked rather than assuming it.
 - **`ANALYZE`'s EFFECT is asserted, not its invocation.** A step that runs `ANALYZE` and never
   checks it ran is a step that quietly stops running.
-- **A throwaway restore container carries a random-suffixed name, publishes only on loopback, and
-  is torn down with `docker rm -f` from a `finally`** that survives `KeyboardInterrupt`. Its logs
-  are captured before removal on failure. Readiness is confirmed by a real query from outside, not
-  by `pg_isready` — the official image runs a temporary server during `initdb` that answers yes.
+- **The restore test restores into a throwaway DATABASE on the existing server**, carrying a
+  random-suffixed name, created `TEMPLATE template0`, and dropped from a `finally` that survives
+  `KeyboardInterrupt` — after terminating that database's own backends, or the `DROP` fails on an
+  open connection and the throwaway leaks onto the same volume as production. **On failure it is
+  NOT dropped and the error names it:** evidence at the moment it becomes useful is worth more than
+  a clean server. `template0`, never `template1`, which may carry local additions.
+- **What that trades away is stated rather than discovered later, and neither loss is closed.**
+  It was a throwaway CONTAINER off the pinned server digest until Phase 12, when putting the
+  scheduler in a container made spawning one require the Docker socket (§ 22). **(1) Roles are
+  cluster-wide**, so the read-only role already exists in the throwaway and the
+  create-roles-from-archive path becomes a no-op in production runs — the code and its tests stay,
+  the idempotent guard makes the no-op correct, and its production path is now untested. **(2) The
+  fresh-cluster property is gone:** a dump depending on some cluster-level object would restore
+  cleanly here and fail on a real rebuild. The test now answers "does this archive restore into
+  this server", not "does it restore into a new one".
+- **`timescaledb_pre_restore()` DOES NOT EXIST in a database created from `template0`, so the
+  extension is created first.** Measured against 2.26.2 on 2026-08-17: `SELECT
+  timescaledb_pre_restore()` in a pristine database fails with `function ... does not exist`, and
+  the sequence that works is `CREATE EXTENSION timescaledb` → `timescaledb_pre_restore()` →
+  `pg_restore --exit-on-error` → `timescaledb_post_restore()`. Pre-creating does not collide with
+  the archive, which emits `CREATE EXTENSION IF NOT EXISTS timescaledb WITH SCHEMA public`. This
+  was previously invisible because the `timescale/timescaledb` image's own init scripts create the
+  extension in `POSTGRES_DB`, so the throwaway container always had it.
 - **Migrations never run on container start.** A restart loop would become a migration loop.
 
 ---

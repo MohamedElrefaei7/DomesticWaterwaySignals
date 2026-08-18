@@ -24,12 +24,16 @@ from pathlib import Path
 import pytest
 
 from app.orchestration import backup
+from tests.source_scan import scan_for
+
+# The repo root, resolved from THIS file rather than from a constant in the module under test.
+# `backup.REPO_ROOT` existed only to locate docker-compose.yml for the container invocation and
+# went with it; a test reaching into the module for a path it can work out itself is a coupling
+# that breaks for reasons unrelated to what the test is about, which is what just happened.
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 NOW = datetime(2026, 8, 17, 2, 0, 0, tzinfo=timezone.utc)
 FIRST_OF_MONTH = datetime(2026, 9, 1, 2, 0, 0, tzinfo=timezone.utc)
-
-DIGEST = "sha256:" + "33" * 32
-IMAGE = f"timescale/timescaledb:2.26.2-pg16@{DIGEST}"
 
 
 class Completed:
@@ -118,51 +122,28 @@ def version_runner(version_line, *, returncode=0):
 # ---------------------------------------------------------------------------------------------
 
 
-def docker_string_literals(source: str) -> list[str]:
-    """Every string literal in `source` that names the docker CLI, DOCSTRINGS EXCLUDED.
+def names_the_docker_cli(value: str) -> bool:
+    """`"docker"` as an argv element, `/usr/bin/docker`, or a shell string starting with it.
 
-    AN AST WALK, NOT A REGEX, AND CLAUDE.md § 23 NAMES THIS EXACT CASE: "the modules this guard
-    covers contain the forbidden call in their own docstrings, in the sentences explaining why it
-    is forbidden; a regex matches its own explanation, fails permanently, and the fix somebody
-    reaches for is a weaker pattern."
-
-    That is not hypothetical here. app/orchestration/backup.py's module docstring says the job
-    "cannot `docker run` without the host's Docker socket", and a line-based scan that stripped
-    `#` comments matched that sentence and failed on a correct file. Stripping docstrings too, by
-    line, is the weaker pattern - it works until somebody writes the word in a different shape.
-
-    THIS IS THE LEGITIMATE KIND OF SOURCE TEST (§ 23's other half): the call site IS the
-    invariant. A `["docker", "run", ...]` list that is never executed is exactly as much of a
-    violation as one that is, because what is forbidden is the code path existing at all.
+    NOT `docker-compose.yml`, which is a filename this project legitimately reads - measured as a
+    false positive from a `docker-` prefix match, and repaired by narrowing what counts as a
+    command rather than by loosening what counts as a finding.
     """
-    tree = ast.parse(source)
+    return value == "docker" or value.endswith("/docker") or value.startswith("docker ")
 
-    docstrings = set()
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-            doc = ast.get_docstring(node, clean=False)
-            if doc is not None:
-                body = node.body[0]
-                if isinstance(body, ast.Expr) and isinstance(body.value, ast.Constant):
-                    docstrings.add(id(body.value))
 
-    constants = [
-        node for node in ast.walk(tree)
-        if isinstance(node, ast.Constant) and isinstance(node.value, str)
-    ]
-    assert constants, "the AST walk found no string constants at all - it parsed the wrong thing"
+def docker_string_literals(source: str) -> list[str]:
+    """Every non-docstring literal in `source` that names the docker CLI.
 
-    def names_the_cli(value: str) -> bool:
-        # `"docker"` as an argv element, `/usr/bin/docker` as an absolute one, or a shell string
-        # beginning with the command. NOT `docker-compose.yml`, which is a filename this module
-        # legitimately reads and which a `docker-` prefix match flags - measured, on this file.
-        return value == "docker" or value.endswith("/docker") or value.startswith("docker ")
+    AN AST WALK, NOT A REGEX - see tests/source_scan.py, which records the three times in this
+    phase alone that a line-based scan matched a module's own explanation of why the thing it was
+    looking for is forbidden.
 
-    return [
-        f"line {node.lineno}: {node.value!r}"
-        for node in constants
-        if id(node) not in docstrings and names_the_cli(node.value)
-    ]
+    THIS IS THE LEGITIMATE KIND OF SOURCE TEST (CLAUDE.md § 23): the call site IS the invariant. A
+    `["docker", "run", ...]` list that is never executed is exactly as much of a violation as one
+    that is, because what is forbidden is the code path existing at all.
+    """
+    return scan_for(source, names_the_docker_cli)
 
 
 def test_the_docker_scanner_ignores_prose_and_still_catches_code():
@@ -197,12 +178,18 @@ def g():
     found = docker_string_literals(with_code)
     assert len(found) == 1 and "'docker'" in found[0], found
 
-    # AND A FILENAME IS NOT A COMMAND. `docker-compose.yml` is a path this module reads; a
+    # AND A FILENAME IS NOT A COMMAND. `docker-compose.yml` is a path this project reads; a
     # `docker-` prefix match flags it, which is a false positive measured on the real file and
     # repaired here rather than by loosening what counts as a finding.
     assert docker_string_literals('x = "docker-compose.yml"\ny = "/usr/bin/docker"\n') == [
         "line 2: '/usr/bin/docker'"
     ]
+
+    # AND A WALK THAT RESOLVED NOTHING RAISES rather than reporting a clean file. "No findings"
+    # and "nothing was read" are the same value to the caller's `== []`, and the second is the
+    # vacuous pass this project has shipped twice (CLAUDE.md § 21).
+    with pytest.raises(AssertionError, match="no string literals"):
+        docker_string_literals("x = 1\n")
 
 
 def test_backup_invokes_pg_dump_directly_not_docker():
@@ -461,20 +448,17 @@ def test_backup_job_checks_the_version_before_dumping(tmp_path, monkeypatch):
     assert "major 15" in str(raised) and "major 16" in str(raised), str(raised)
 
 
-def test_backup_refuses_an_undigested_compose_image(tmp_path):
-    """A floating tag on the server image is a hard failure, not a shrug.
-
-    `timescaledb_image()` NO LONGER HAS A CALLER IN THIS MODULE as of Phase 12 - the dump and the
-    verification both invoke the in-image client. It survives this commit only because
-    app/orchestration/restore_test.py still calls it, and it goes when that does.
-    """
-    compose = tmp_path / "docker-compose.yml"
-    compose.write_text(
-        "services:\n  timescaledb:\n    image: timescale/timescaledb:2.26.2-pg16\n",
-        encoding="utf-8",
-    )
-    with pytest.raises(backup.BackupError, match="no digest"):
-        backup.timescaledb_image(compose)
+# REMOVED: test_backup_refuses_an_undigested_compose_image.
+#
+# It asserted that `timescaledb_image()` raised on a compose file whose server image carried no
+# digest. That function is gone: nothing spawns a container off the pinned digest any more, so it
+# had no caller, and it could not have run inside the container anyway - it read
+# REPO_ROOT/docker-compose.yml, and the image copies `app/` only.
+#
+# Deleting the test with the code rather than leaving it is the point. A test for a function
+# nobody calls is a green check that teaches the next reader the system still works that way, and
+# the digest it was about is still gated - by verify/preflight.py, over every reference in the
+# stack rather than this one.
 
 
 # ---------------------------------------------------------------------------------------------
@@ -780,7 +764,7 @@ def test_backup_prefixes_match_the_terraform_lifecycle_rules():
     reading as configured.
     """
     hcl = (
-        Path(backup.REPO_ROOT) / "infra" / "terraform" / "backups.tf"
+        REPO_ROOT / "infra" / "terraform" / "backups.tf"
     ).read_text(encoding="utf-8")
 
     for prefix in (backup.DAILY_PREFIX, backup.MONTHLY_PREFIX):

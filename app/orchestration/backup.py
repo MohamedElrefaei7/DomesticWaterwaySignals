@@ -53,9 +53,6 @@ logger = logging.getLogger(__name__)
 
 JOB_NAME = "backup_nightly"
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-COMPOSE_PATH = REPO_ROOT / "docker-compose.yml"
-
 # STAGING IS ON /mnt/data, NEVER /tmp OR THE ROOT VOLUME. A dump that fills root takes the instance
 # down; a dump that fills /mnt/data is bad but recoverable and does not stop the stack from booting.
 STAGING_DIR = Path("/mnt/data/backups")
@@ -79,9 +76,6 @@ SIZE_FLOOR_FRACTION = 0.5
 # Refuse before dumping if free space is below this multiple of the last successful archive.
 # A pre-flight refusal is a clean failure; a partial dump that fills the volume is an outage.
 FREE_SPACE_MULTIPLE = 2.0
-
-_IMAGE_RE = re.compile(r"^\s*image:\s*(?P<reference>\S+)\s*$")
-_SERVICE_RE = re.compile(r"^  (?P<name>[A-Za-z0-9_-]+):\s*$")
 
 # The client binaries, by bare name, resolved on PATH inside the scheduler image. Not absolute
 # paths: Debian puts them under /usr/lib/postgresql/NN/bin with symlinks in /usr/bin, and writing
@@ -108,41 +102,22 @@ class Snapshot:
 
 
 # ---------------------------------------------------------------------------------------------
-# The pinned image
+# REMOVED: timescaledb_image(), which read the `timescaledb` service's pinned tag@digest out of
+# docker-compose.yml.
+#
+# It existed so the dump could run in a one-shot container off the SAME digest as the server, which
+# made the client and server versions match mechanically. Nothing spawns a container any more - the
+# client is in this image and the majors are checked - so it had no caller left.
+#
+# IT WOULD ALSO NOT HAVE WORKED. It read REPO_ROOT/docker-compose.yml, and REPO_ROOT is
+# `parents[2]` of this file: /srv inside the container, where the image copies `app/` and nothing
+# else. Any in-container call would have raised FileNotFoundError from a function whose name reads
+# like it consults a pin.
+#
+# Deleted rather than left unused, for the reason the docker invocation itself was deleted rather
+# than flagged off: dead code with a plausible use case is the code that comes back. The compose
+# file's digest is still gated - by `verify/preflight.py`, which is where reading it belongs.
 # ---------------------------------------------------------------------------------------------
-
-
-def timescaledb_image(compose_path: Path = COMPOSE_PATH) -> str:
-    """The `timescaledb` service's pinned `tag@digest`, read from the Compose file.
-
-    READ, NEVER HARDCODED. The digest is already written down once and gated by
-    `verify/preflight.py`'s gate 1; a second copy here is a second thing to update and the copy is
-    what goes stale. When it does, the dump runs against a different server version than
-    production and the failure looks like data corruption.
-    """
-    text = compose_path.read_text(encoding="utf-8")
-
-    service = None
-    for line in text.splitlines():
-        service_match = _SERVICE_RE.match(line)
-        if service_match is not None:
-            service = service_match.group("name")
-            continue
-        image_match = _IMAGE_RE.match(line)
-        if image_match is not None and service == "timescaledb":
-            reference = image_match.group("reference")
-            if "@sha256:" not in reference:
-                raise BackupError(
-                    f"the timescaledb image in {compose_path} is {reference!r}, which carries no "
-                    f"digest. The dump would run against whatever the tag resolves to today, "
-                    f"which is the version-mismatch failure this reads the digest to avoid."
-                )
-            return reference
-
-    raise BackupError(
-        f"no `image:` found for the timescaledb service in {compose_path}. Without it there is no "
-        f"way to match the dump's client version to the server's."
-    )
 
 
 # ---------------------------------------------------------------------------------------------

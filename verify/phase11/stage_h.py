@@ -23,11 +23,19 @@ An exited-nonzero `frontend-build` is its own failure: caddy's `service_complete
 gate means the bundle is what it served, so a build that failed and a build that never ran look
 identical from the outside - a 404 from a correctly-running site.
 
-THE THROWAWAY IS LOOKED FOR ACROSS EVERY CONTAINER ON THE HOST, not just Compose's. It is created
-by `docker run` with a random-suffixed name (`app/orchestration/restore_test.py`'s
-`dws-restore-test-`), so it is not a Compose service and `docker compose ps` cannot see it. A
-leaked one holds a copy of the production database on the root disk under a name nobody will
-recognise in a month.
+THE THROWAWAY IS A DATABASE NOW, NOT A CONTAINER, AND THIS STAGE LOOKS FOR THE RIGHT THING.
+
+Through Phase 11 it was a `docker run` container with a random-suffixed name, invisible to
+`docker compose ps`, and this stage swept every container on the host for it. Phase 12 put the
+scheduler in a container, and spawning a container from inside one requires the host's Docker
+socket - root-equivalent on the host - so the restore test now creates a database named
+`dws_restore_test_<suffix>` on the production server and drops it.
+
+So the leak this stage hunts is a DATABASE in `pg_database`. A survivor means the job failed and
+DELIBERATELY kept it as evidence, or was killed before its `finally` ran; either way it holds a
+restored copy of production on the same volume as production. **A container sweep would now pass
+over a host where nothing can create such a container, which is a green check watching nothing** -
+so it is replaced rather than kept alongside.
 
 THE VERIFICATION MARK IS CHECKED ON THE RIGHT ROW, and checking the wrong row is the failure this
 stage catches. Stage F's F3 step has a human insert a probe row into `backups` and watch the update
@@ -42,14 +50,17 @@ from __future__ import annotations
 import json
 from typing import Any, Sequence
 
+from app.orchestration import restore_test
+
 from verify.phase11 import readonly, shell
 from verify.phase11.result import Check, CheckResult, Precondition, failed, passed
 from verify.phase11.stage_g import RETAINED_PREFIX
 
 RESTORE_JOB = "restore_test_monthly"
 
-# app/orchestration/restore_test.py:59
-THROWAWAY_PREFIX = "dws-restore-test-"
+# Read from the job that creates them, never remembered: two copies of one string drift, and this
+# one decides which databases a leak check looks at.
+THROWAWAY_PREFIX = restore_test.THROWAWAY_PREFIX
 
 # docker-compose.yml. `frontend-build` is deliberately in one set and not the other; see the
 # module docstring.
@@ -58,25 +69,34 @@ ONE_SHOT_SERVICES = frozenset({"frontend-build"})
 ALL_SERVICES = RUNNING_SERVICES | ONE_SHOT_SERVICES
 
 
-def check_throwaway_is_gone(container_names: Sequence[str]) -> CheckResult:
-    """No `dws-restore-test-*` container survives, running or exited.
+def check_throwaway_is_gone(database_names: Sequence[str]) -> CheckResult:
+    """No `dws_restore_test_*` database survives a SUCCESSFUL run.
 
-    `docker rm -f` runs from a `finally` that survives KeyboardInterrupt (§ 3), so a survivor means
-    that path did not run - and the container holds a restored copy of the production database on
-    the root disk.
+    The drop runs from a `finally` that survives KeyboardInterrupt, but ONLY under the success
+    flag: on failure the throwaway is kept deliberately, because a restore that failed halfway is
+    the one thing that can say why. So a survivor here is not automatically a bug - it is either
+    that deliberate evidence or a job killed mid-flight, and both mean a restored copy of
+    production is holding disk on the same volume as production.
+
+    The message says so rather than asserting which: the operator's next step differs, and a check
+    that guessed would send half of them to the wrong one.
     """
-    leaked = sorted(name for name in container_names if name.startswith(THROWAWAY_PREFIX))
-    name = "no restore-test throwaway container remains"
-    expected = f"0 containers named {THROWAWAY_PREFIX}*"
+    leaked = sorted(name for name in database_names if name.startswith(THROWAWAY_PREFIX))
+    name = "no restore-test throwaway database remains"
+    expected = f"0 databases named {THROWAWAY_PREFIX}*"
     if leaked:
         return failed(
             name,
             expected,
             f"{len(leaked)} still present: {leaked}. Each holds a restored copy of the production "
-            f"database on the ROOT disk. The teardown is a `finally` that survives "
-            f"KeyboardInterrupt, so a survivor means that path did not run.",
+            f"database ON THE SAME VOLUME as production. Either the last run FAILED and kept it as "
+            f"evidence on purpose - read the job_runs error and the scheduler log before removing "
+            f"it - or a run was killed before its `finally`. To remove one by hand:\n"
+            f"             SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+            f"WHERE datname = '<name>';\n"
+            f"             DROP DATABASE <name>;",
         )
-    return passed(name, expected, f"0 of {len(container_names)} containers match")
+    return passed(name, expected, f"0 of {len(database_names)} databases match")
 
 
 def check_service_sets(running: Sequence[str], present: Sequence[str]) -> CheckResult:
@@ -289,14 +309,28 @@ def read(conn) -> dict[str, Any]:
     return {"rows": rows, "job_rows": job_rows}
 
 
+def _throwaway_databases(conn) -> list[str]:
+    """Every database whose name carries the throwaway prefix.
+
+    Read from `pg_database` over the READ-ONLY role's connection, like everything else this
+    package reads (CLAUDE.md § 13). Listing databases needs no privilege beyond connecting.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT datname FROM pg_database WHERE datname LIKE %s ORDER BY datname",
+            (f"{THROWAWAY_PREFIX}%",),
+        )
+        return [row[0] for row in cur.fetchall()]
+
+
 def checks() -> Sequence[Check]:
-    containers = _all_container_names()
     running, present, exits = _compose_services()
     with readonly.connection() as conn:
         state = read(conn)
+        throwaways = _throwaway_databases(conn)
 
     return [
-        lambda: check_throwaway_is_gone(containers),
+        lambda: check_throwaway_is_gone(throwaways),
         lambda: check_service_sets(running, present),
         lambda: check_one_shot_exited_cleanly(exits),
         lambda: check_restore_job_succeeded(state["job_rows"]),

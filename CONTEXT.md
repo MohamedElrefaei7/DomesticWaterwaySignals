@@ -249,6 +249,77 @@ resolution on the instance.
 
 ---
 
+### Part 4 — the restore test uses a throwaway DATABASE
+
+The contract amendment is in the same commit and came first (`CLAUDE.md § 3`): one `DROP` is
+permitted, bounded by a name guard asserted **twice** - at creation and again immediately before
+the `DROP` - with **two independent conditions**, prefix AND inequality with the connected
+database's own name, because a prefix check alone fails open if the prefix is ever empty.
+
+**THE `pre_restore` SEQUENCE, MEASURED RATHER THAN ASSUMED (2026-08-17, TimescaleDB 2.26.2):**
+
+1. In a database created `TEMPLATE template0`, `SELECT timescaledb_pre_restore()` fails with
+   **`ERROR: function timescaledb_pre_restore() does not exist`**. The function is owned by the
+   extension. **`CREATE EXTENSION timescaledb` must come first.**
+2. Doing so installs 2.26.2 - the cluster's own version - so there is no version to reconcile.
+3. **Pre-creating does not collide with the archive**: `pg_dump` emits `CREATE EXTENSION IF NOT
+   EXISTS timescaledb WITH SCHEMA public`, verified against this project's own dump.
+4. The working sequence is `CREATE EXTENSION` -> `pre_restore` -> `pg_restore --exit-on-error` ->
+   `post_restore`, and a full round trip compared 17 public tables on both sides.
+5. `DROP DATABASE` with one idle session attached returns **`ERROR: database "..." is being
+   accessed by other users`** - so `pg_terminate_backend`, scoped to that `datname` and excluding
+   this backend, is required rather than defensive.
+
+**This was invisible until now because the `timescale/timescaledb` image's own init scripts create
+the extension in `POSTGRES_DB`**, so the throwaway CONTAINER always had it and this code never had
+to.
+
+**A REAL DEFECT FOUND WHILE PRESERVING "EVERYTHING ELSE UNCHANGED", AND IT WOULD HAVE FAILED EVERY
+RUN.** `assert_read_only_role_cannot_delete` used `SET LOCAL ROLE` on an **autocommit** connection.
+`SET LOCAL` is scoped to the enclosing transaction and there is none, so the setting is discarded
+at the end of the statement that set it. Measured against a real server: `current_user` stayed
+`waterway` and the `DELETE` **succeeded** - which this function reports as *"the restored
+`waterway_api` role was permitted to DELETE"*. So the monthly restore test would have failed every
+time, **accusing the backup's grants**, with the real cause one layer away in session scoping. A
+false failure pointing at the wrong layer. Now `SET ROLE`, with `current_user` **read back before
+the DELETE is attempted** - the effect asserted, not the invocation, exactly as
+`assert_statistics_exist` does for `ANALYZE`.
+
+**The two coverage losses, open rather than resolved:**
+
+1. **Roles are cluster-wide**, so `waterway_api` already exists in the throwaway and Stage B's
+   `create_roles`-from-archive work is a **no-op in production runs**. The code and its tests stay
+   - the idempotent guard makes the no-op correct - and **its production path is now untested.**
+2. **The fresh-cluster property is gone.** A dump depending on some cluster-level object would
+   restore cleanly here and fail on a real rebuild. The job now answers *"does this archive restore
+   into this server"*, not *"into a new one"*.
+
+**On failure the throwaway is NOT dropped and the error names it**, with the two statements to
+remove it by hand. This inverts the container version, which always tore down after capturing
+logs: a container's logs are its whole state, while a database's state IS the database.
+
+**`verify/phase11/stage_h.py` now sweeps `pg_database` for `dws_restore_test_*` rather than
+containers for `dws-restore-test-*`.** A container sweep would pass over a host where nothing can
+create such a container - green, and watching nothing. Its failure message deliberately does not
+assert *which* cause a survivor is: deliberate evidence and a killed run send an operator to two
+different places.
+
+**`tests/orchestration/test_commit_helper.py`'s allow-list fired exactly as designed** -
+`restore_test_monthly_job` went from 2 raw connections to 4, and the per-function COUNTS are what
+said so. A function-name allow-list without counts would have absorbed both new ones in silence,
+and one of them issues the only `DROP DATABASE` in this system.
+
+**`tests/source_scan.py` is new**, because the same hazard bit three times in this phase: a
+source-scanning guard matching the module's own explanation of what it forbids. It is an AST walk
+that excludes docstrings, and it raises rather than returning `[]` when it resolved nothing.
+
+**RUN LOCALLY against the pinned pg16 server with a pg16 client: 145 passed, 2 skipped** (the two
+unwritability tests, which detect they are running as root). The restore-test integration tier
+restored into a real throwaway database, compared counts, watched the read-only role be refused,
+and left **no `dws_restore_test_*` database behind**.
+
+---
+
 ## § Up Next
 
 **THE DEPLOYMENT RUNBOOK IS `docs/runbooks/phase-11.md`, IN THE REPO AND VERSIONED.** It executes

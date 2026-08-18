@@ -1,12 +1,21 @@
-"""Integration tier — a real archive restored into a real throwaway container.
+"""Integration tier — a real archive restored into a real throwaway DATABASE.
 
 `test_restore_test_integration_fails_when_a_table_is_short` IS THE ONE THAT MATTERS. Passing on a
 good archive shows the machinery runs; it does not show the comparison would catch real loss. Only
 deleting rows from a restored table and watching the comparison name that table shows that.
 
-Requires DATABASE_URL and Docker. Skips with a stated reason when either is absent.
+THE THROWAWAY IS A DATABASE ON THE SERVER UNDER TEST, NOT A CONTAINER, as of Phase 12: spawning a
+container from inside the scheduler container would need the host's Docker socket, which is
+root-equivalent on the host. So this tier needs DATABASE_URL and a major-matching postgres client,
+and no longer needs Docker at all.
+
+IT CREATES AND DROPS DATABASES ON WHATEVER DATABASE_URL POINTS AT. That is the job's own behaviour
+and is bounded by the same name guard (`dws_restore_test_*`, plus an inequality against the
+connected database's name), but it is worth knowing before pointing DATABASE_URL at anything
+precious.
 """
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -21,19 +30,26 @@ from app.orchestration import backup, restore_test
 pytestmark = pytest.mark.integration
 
 
-def _docker_available() -> bool:
-    if shutil.which("docker") is None:
-        return False
+def _client_major() -> int | None:
+    if shutil.which("pg_dump") is None:
+        return None
     try:
-        return subprocess.run(
-            ["docker", "info"], capture_output=True, timeout=20
-        ).returncode == 0
+        completed = subprocess.run(
+            ["pg_dump", "--version"], capture_output=True, text=True, timeout=20
+        )
     except (OSError, subprocess.TimeoutExpired):
-        return False
+        return None
+    if completed.returncode != 0:
+        return None
+    match = re.search(r"\(PostgreSQL\)\s+(\d+)", completed.stdout or "")
+    return int(match.group(1)) if match else None
 
 
-requires_docker = pytest.mark.skipif(
-    not _docker_available(), reason="Docker is required to start the throwaway container"
+CLIENT_MAJOR = _client_major()
+
+requires_pg_client = pytest.mark.skipif(
+    CLIENT_MAJOR is None,
+    reason="no pg_dump/pg_restore on PATH; the restore is invoked directly, not in a container",
 )
 
 
@@ -47,13 +63,28 @@ def _with_password(url: str) -> str:
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
-def _reachable_run(argv, **kwargs):
-    """Rewrite the loopback host the container cannot reach, as in test_backup_integration."""
-    return subprocess.run(
-        ["host.docker.internal" if part == "127.0.0.1" and "--host" in argv else part
-         for part in argv],
-        **kwargs,
-    )
+import contextlib
+
+
+@contextlib.contextmanager
+def throwaway_for(database_url):
+    """Create a throwaway database, yield it, and DROP it whatever happens.
+
+    Unconditional, unlike the job, which keeps a failed throwaway as evidence. A fixture that kept
+    one would leak a database per failing run into whatever DATABASE_URL points at; the evidence a
+    test needs is in its assertion.
+    """
+    url = _with_password(database_url)
+    parts = backup.connection_parts(url)
+    throwaway = None
+    try:
+        with db.connection(url, autocommit=True) as admin:
+            throwaway = restore_test.create_throwaway(admin, url, parts["database"])
+        yield throwaway, parts
+    finally:
+        if throwaway is not None:
+            with db.connection(url, autocommit=True) as admin:
+                restore_test.drop_throwaway(admin, throwaway)
 
 
 @pytest.fixture
@@ -76,12 +107,10 @@ def source_archive(tmp_path, migrated_db, database_url):
             f"NOLOGIN; END IF; END $$"
         )
 
-    image = backup.timescaledb_image()
     parts = backup.connection_parts(_with_password(database_url))
 
     staging = tmp_path / "staging"
     staging.mkdir()
-    staging.chmod(0o777)
     archive_path = staging / "source.dump"
     pgpass = staging / ".pgpass"
     backup.write_pgpass(
@@ -93,40 +122,50 @@ def source_archive(tmp_path, migrated_db, database_url):
         snapshot = backup.export_snapshot(counting)
         completed = subprocess.run(
             backup.dump_command(
-                image=image, archive_path=archive_path, pgpass_path=pgpass,
-                snapshot_id=snapshot.snapshot_id, host="host.docker.internal",
-                port=parts["port"], database=parts["database"], user=parts["user"],
-                uid=0, gid=0, staging_dir=staging,
+                archive_path=archive_path, snapshot_id=snapshot.snapshot_id,
+                host=parts["host"], port=parts["port"],
+                database=parts["database"], user=parts["user"],
             ),
             capture_output=True, text=True,
+            env=backup.pgpass_environment(pgpass),
         )
         counting.execute("COMMIT")
 
     if completed.returncode != 0:
         pytest.skip(f"could not produce a source archive: {completed.stderr[:400]}")
 
-    return archive_path, snapshot, image, staging
+    return archive_path, snapshot, staging, pgpass
 
 
 @pytest.fixture
 def restored(source_archive, database_url):
-    """A throwaway container with the archive restored into it. Torn down whatever happens."""
-    archive_path, snapshot, image, staging = source_archive
-    roles = restore_test.roles_in_archive(archive_path, image)
+    """A throwaway DATABASE with the archive restored into it. Dropped whatever happens.
+
+    The fixture drops unconditionally, which is deliberately NOT what the job does - the job keeps
+    a failed throwaway as evidence. A test fixture that kept one would leak a database per failing
+    run into whatever DATABASE_URL points at, and the evidence a test needs is in the assertion,
+    not in the server.
+    """
+    archive_path, snapshot, staging, pgpass = source_archive
+    url = _with_password(database_url)
+    parts = backup.connection_parts(url)
+    roles = restore_test.roles_in_archive(archive_path)
 
     throwaway = None
     try:
-        throwaway = restore_test.start_throwaway(image, staging)
-        restore_test.wait_until_ready(throwaway)
+        with db.connection(url, autocommit=True) as admin:
+            throwaway = restore_test.create_throwaway(admin, url, parts["database"])
         restore_test.restore(
-            throwaway, image, archive_path, run=_reachable_run, roles=roles
+            throwaway, archive_path, parts=parts, pgpass_path=pgpass, roles=roles
         )
         yield throwaway, snapshot
     finally:
-        restore_test.teardown(throwaway)
+        if throwaway is not None:
+            with db.connection(url, autocommit=True) as admin:
+                restore_test.drop_throwaway(admin, throwaway)
 
 
-@requires_docker
+@requires_pg_client
 def test_restore_test_integration_passes_on_good_archive(restored):
     """The machinery runs end to end: ANALYZE, statistics, counts, compressed chunks."""
     throwaway, snapshot = restored
@@ -141,7 +180,7 @@ def test_restore_test_integration_passes_on_good_archive(restored):
         restore_test.compare_compressed_chunks(snapshot.compressed_chunks, conn)
 
 
-@requires_docker
+@requires_pg_client
 def test_restore_test_integration_expects_apscheduler_jobs_zero_rows(restored):
     """The excluded table's DDL survived and its DATA did not.
 
@@ -168,7 +207,7 @@ def test_restore_test_integration_expects_apscheduler_jobs_zero_rows(restored):
     )
 
 
-@requires_docker
+@requires_pg_client
 def test_restore_test_integration_fails_when_a_table_is_short(restored):
     """THE TEST THAT PROVES THE COMPARISON WOULD CATCH REAL LOSS.
 
@@ -213,10 +252,10 @@ def test_restore_test_integration_fails_when_a_table_is_short(restored):
     )
 
 
-@requires_docker
+@requires_pg_client
 def test_restore_test_integration_fails_on_corrupted_archive(source_archive, tmp_path, database_url):
     """Bytes flipped in the MIDDLE of a real archive, well past the table of contents."""
-    archive_path, _, image, staging = source_archive
+    archive_path, _, staging, pgpass = source_archive
     original = archive_path.read_bytes()
 
     corrupted = staging / "corrupted.dump"
@@ -226,37 +265,45 @@ def test_restore_test_integration_fails_on_corrupted_archive(source_archive, tmp
         payload[offset] ^= 0xFF
     corrupted.write_bytes(bytes(payload))
 
-    throwaway = None
-    try:
-        throwaway = restore_test.start_throwaway(image, staging)
-        restore_test.wait_until_ready(throwaway)
-        # From the GOOD archive: the corrupted one cannot be rendered, which is the point of
-        # the assertion below.
-        roles = restore_test.roles_in_archive(archive_path, image)
+    # From the GOOD archive: the corrupted one cannot be rendered, which is the point of the
+    # assertion below.
+    roles = restore_test.roles_in_archive(archive_path)
+
+    with throwaway_for(database_url) as (throwaway, parts):
         with pytest.raises(restore_test.RestoreTestError):
             restore_test.restore(
-                throwaway, image, corrupted, run=_reachable_run, roles=roles
+                throwaway, corrupted, parts=parts, pgpass_path=pgpass, roles=roles
             )
-    finally:
-        restore_test.teardown(throwaway)
 
 
-@requires_docker
+@requires_pg_client
 def test_restore_test_integration_pre_restore_is_what_makes_it_work(source_archive, database_url):
     """The wrapper is not ceremony: a restore without it is materially different.
 
     If TimescaleDB ever stops needing pre/post_restore this test says so by failing, rather than
     the project carrying a call nobody can justify.
     """
-    archive_path, snapshot, image, staging = source_archive
+    archive_path, snapshot, staging, pgpass = source_archive
+    roles = restore_test.roles_in_archive(archive_path)
 
-    throwaway = None
-    try:
-        throwaway = restore_test.start_throwaway(image, staging)
-        restore_test.wait_until_ready(throwaway)
-        roles = restore_test.roles_in_archive(archive_path, image)
+    with throwaway_for(database_url) as (throwaway, parts):
+        # THE EXTENSION DOES NOT EXIST IN A template0 DATABASE, so `timescaledb_pre_restore()`
+        # does not either. Measured against 2.26.2 on 2026-08-17:
+        #     ERROR:  function timescaledb_pre_restore() does not exist
+        # This is the assertion that would have caught it, and it runs BEFORE restore() creates
+        # the extension - so it is a statement about the database restore() is handed, not about
+        # what restore() leaves behind.
+        with db.connection(throwaway.url, autocommit=True) as conn:
+            pristine = conn.execute(
+                "SELECT count(*) FROM pg_extension WHERE extname = 'timescaledb'"
+            ).fetchone()[0]
+        assert pristine == 0, (
+            "the throwaway already has the timescaledb extension, so this test cannot show that "
+            "restore() is what creates it - which is the whole reason CREATE EXTENSION is there"
+        )
+
         restore_test.restore(
-            throwaway, image, archive_path, run=_reachable_run, roles=roles
+            throwaway, archive_path, parts=parts, pgpass_path=pgpass, roles=roles
         )
 
         with db.connection(throwaway.url, autocommit=True) as conn:
@@ -265,14 +312,20 @@ def test_restore_test_integration_pre_restore_is_what_makes_it_work(source_archi
             restored_hypertables = conn.execute(
                 "SELECT count(*) FROM timescaledb_information.hypertables"
             ).fetchone()[0]
-
-    finally:
-        restore_test.teardown(throwaway)
+            still_restoring = conn.execute(
+                "SELECT current_setting('timescaledb.restoring', true)"
+            ).fetchone()[0]
 
     assert isinstance(restored_hypertables, int)
+    # post_restore ran: the database must not be left in the restoring state. Unlike a container,
+    # this database is a real one on the production server for as long as it exists.
+    assert still_restoring in (None, "", "off", "false"), (
+        f"timescaledb.restoring is {still_restoring!r} after restore() returned - "
+        f"timescaledb_post_restore() did not run or did not take"
+    )
 
 
-@requires_docker
+@requires_pg_client
 def test_restore_test_integration_read_only_role_cannot_delete(restored):
     """The security property is IN THE BACKUP, not only in production.
 
@@ -342,12 +395,10 @@ def multi_owner_archive(tmp_path, migrated_db, database_url):
             )
         )
 
-    image = backup.timescaledb_image()
     parts = backup.connection_parts(_with_password(database_url))
 
     staging = tmp_path / "staging"
     staging.mkdir()
-    staging.chmod(0o777)
     archive_path = staging / "multi-owner.dump"
     pgpass = staging / ".pgpass"
     backup.write_pgpass(
@@ -359,27 +410,27 @@ def multi_owner_archive(tmp_path, migrated_db, database_url):
         snapshot = backup.export_snapshot(counting)
         completed = subprocess.run(
             backup.dump_command(
-                image=image, archive_path=archive_path, pgpass_path=pgpass,
-                snapshot_id=snapshot.snapshot_id, host="host.docker.internal",
-                port=parts["port"], database=parts["database"], user=parts["user"],
-                uid=0, gid=0, staging_dir=staging,
+                archive_path=archive_path, snapshot_id=snapshot.snapshot_id,
+                host=parts["host"], port=parts["port"],
+                database=parts["database"], user=parts["user"],
             ),
             capture_output=True, text=True,
+            env=backup.pgpass_environment(pgpass),
         )
         counting.execute("COMMIT")
 
     if completed.returncode != 0:
         pytest.skip(f"could not produce a multi-owner archive: {completed.stderr[:400]}")
 
-    yield archive_path, snapshot, image, staging
+    yield archive_path, snapshot, staging, pgpass
 
     with db.connection(database_url, autocommit=True) as conn:
         conn.execute("DROP TABLE IF EXISTS second_owned")
         conn.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(SECOND_OWNER)))
 
 
-@requires_docker
-def test_restore_test_integration_succeeds_with_multiple_owners(multi_owner_archive):
+@requires_pg_client
+def test_restore_test_integration_succeeds_with_multiple_owners(multi_owner_archive, database_url):
     """A real archive with two owners restores, with every role discovered FROM THE ARCHIVE.
 
     The assertion is that the restore completes at all - it raises on any pg_restore error, and
@@ -387,9 +438,9 @@ def test_restore_test_integration_succeeds_with_multiple_owners(multi_owner_arch
     throwaway under its exact name, which is what proves the quoting survived discovery, creation
     and restore rather than merely surviving a regex.
     """
-    archive_path, _snapshot, image, staging = multi_owner_archive
+    archive_path, _snapshot, staging, pgpass = multi_owner_archive
 
-    roles = restore_test.roles_in_archive(archive_path, image)
+    roles = restore_test.roles_in_archive(archive_path)
 
     assert SECOND_OWNER in roles, (
         f"the second owner was not discovered from the archive: {roles}. The restore will fail on "
@@ -399,15 +450,11 @@ def test_restore_test_integration_succeeds_with_multiple_owners(multi_owner_arch
         f"the read-only role - which owns nothing and only holds GRANTs - is missing: {roles}"
     )
 
-    throwaway = None
-    try:
-        throwaway = restore_test.start_throwaway(image, staging)
-        restore_test.wait_until_ready(throwaway)
-
+    with throwaway_for(database_url) as (throwaway, parts):
         # Raises RestoreTestError on any pg_restore failure. No assertion needed for the headline:
         # reaching the next line IS the result.
         restore_test.restore(
-            throwaway, image, archive_path, run=_reachable_run, roles=roles
+            throwaway, archive_path, parts=parts, pgpass_path=pgpass, roles=roles
         )
 
         with db.connection(throwaway.url, autocommit=True) as conn:
@@ -432,5 +479,3 @@ def test_restore_test_integration_succeeds_with_multiple_owners(multi_owner_arch
         assert owner is not None and owner[0] == SECOND_OWNER, (
             f"second_owned is owned by {owner!r} in the restored database, not by {SECOND_OWNER!r}"
         )
-    finally:
-        restore_test.teardown(throwaway)

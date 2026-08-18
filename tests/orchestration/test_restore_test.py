@@ -14,8 +14,11 @@ from pathlib import Path
 import pytest
 
 from app.orchestration import backup, restore_test
+from tests.orchestration.test_backup import names_the_docker_cli
+from tests.source_scan import scan_for
 
-IMAGE = "timescale/timescaledb:2.26.2-pg16@sha256:" + "33" * 32
+PRODUCTION_DB = "waterway"
+PRODUCTION_URL = "postgresql://waterway:secret@timescaledb:5432/waterway"
 
 
 class Completed:
@@ -26,22 +29,55 @@ class Completed:
 
 
 class RecordingRun:
-    """Captures every docker invocation, answering the ones the code reads output from."""
+    """Captures every subprocess invocation."""
 
-    def __init__(self, existing_container=""):
+    def __init__(self):
         self.calls = []
-        self.existing = existing_container
 
     def __call__(self, argv, **kwargs):
         self.calls.append(list(argv))
-        if argv[:3] == ["docker", "ps", "-a"]:
-            return Completed(0, self.existing)
-        if argv[:2] == ["docker", "port"]:
-            return Completed(0, "127.0.0.1:54999\n")
         return Completed(0)
 
     def argv_containing(self, needle):
         return [call for call in self.calls if any(needle in part for part in call)]
+
+
+class RecordingConn:
+    """An autocommit connection that records the SQL it was asked to run.
+
+    `psycopg.sql.Composed` objects are recorded by their `as_string(None)` rendering, which is what
+    would actually be sent - so a test asserting on `CREATE DATABASE ... TEMPLATE template0` is
+    reading the statement rather than the fragments it was built from.
+    """
+
+    def __init__(self, answers=None):
+        self.statements = []
+        self.answers = answers or {}
+
+    def execute(self, statement, params=None):
+        try:
+            text = statement.as_string(None)
+        except AttributeError:
+            text = str(statement)
+        self.statements.append(text)
+
+        answer = (0,)
+        for needle, value in self.answers.items():
+            if needle in text:
+                answer = value
+                break
+
+        class Cursor:
+            def fetchone(inner):
+                return answer
+
+            def fetchall(inner):
+                return []
+
+        return Cursor()
+
+    def issued(self, needle):
+        return [s for s in self.statements if needle in s]
 
 
 class FakeS3:
@@ -114,81 +150,159 @@ def test_restore_test_refuses_on_insufficient_free_space(tmp_path):
 # ---------------------------------------------------------------------------------------------
 
 
-def test_restore_test_uses_pinned_digest(tmp_path):
-    """Same digest as production.
+def test_restore_test_no_longer_spawns_a_container():
+    """NO `docker` ANYWHERE IN THIS MODULE. The throwaway is a DATABASE on the existing server.
 
-    Part 6's reason, plus one more: a TimescaleDB extension version mismatch on restore produces
-    errors that read like data corruption, so a restore test on a different version would report a
-    false failure in the one place a false failure is most expensive.
+    A container cannot spawn a container without /var/run/docker.sock, and mounting it is
+    root-equivalent on the host (CLAUDE.md § 22). What that trades away is real and is recorded in
+    the module docstring rather than discovered later: roles are cluster-wide, so `create_roles`
+    is a no-op in production runs, and the fresh-cluster property is gone.
+
+    An AST walk over string literals with docstrings excluded, for § 23's reason and this module's
+    own: it explains at length that the throwaway used to be a container, and a line-based scan
+    matches its explanation.
     """
-    run = RecordingRun()
-    restore_test.start_throwaway(IMAGE, tmp_path, run=run)
-
-    starts = [c for c in run.calls if c[:3] == ["docker", "run", "-d"]]
-    assert len(starts) == 1
-    assert IMAGE in starts[0], f"the throwaway does not run the pinned image: {starts[0]}"
-
-    # And the restore itself.
-    argv = restore_test.restore_command(
-        image=IMAGE, archive_path=tmp_path / "x.dump", port=5999, scratch=tmp_path
+    offenders = scan_for(
+        Path(restore_test.__file__).read_text(encoding="utf-8"), names_the_docker_cli
     )
-    assert IMAGE in argv
+    assert offenders == [], (
+        f"app/orchestration/restore_test.py still builds a docker invocation: {offenders}"
+    )
 
 
-def test_restore_test_container_name_collision_is_fatal():
-    """Never "reuse the existing one": that restores into whatever is already in it."""
-    run = RecordingRun(existing_container="dws-restore-test-abc123\n")
+def test_restore_test_creates_database_with_template0():
+    """`TEMPLATE template0`, never template1.
 
-    with pytest.raises(restore_test.RestoreTestError, match="already exists"):
-        restore_test.assert_no_such_container("dws-restore-test-abc123", run=run)
+    template1 is the DEFAULT, so this is a case where saying nothing is the wrong answer rather
+    than a neutral one. It may carry local additions - an extension, a table, anything a previous
+    operator installed into it - which would land in the throwaway and appear as tables the
+    recorded snapshot does not have. The comparison would then report an unexpected table and
+    accuse the archive. template0 is the pristine baseline.
+    """
+    conn = RecordingConn()
+    throwaway = restore_test.create_throwaway(conn, PRODUCTION_URL, PRODUCTION_DB)
+
+    creates = conn.issued("CREATE DATABASE")
+    assert len(creates) == 1, f"expected exactly one CREATE DATABASE: {conn.statements}"
+    assert "TEMPLATE template0" in creates[0], creates[0]
+    assert "template1" not in creates[0], creates[0]
+    assert throwaway.name in creates[0]
+
+    # And the throwaway's URL is the production DSN pointed at the new database, nothing else.
+    assert throwaway.url.endswith(f"/{throwaway.name}")
+    assert "@timescaledb:5432/" in throwaway.url
 
 
-def test_restore_test_container_name_is_unique_and_not_a_production_name():
-    names = {restore_test.container_name() for _ in range(50)}
-    assert len(names) == 50, "container names collide"
+def test_restore_test_name_is_unique_and_prefixed():
+    names = {restore_test.throwaway_name() for _ in range(50)}
+    assert len(names) == 50, "throwaway database names collide"
     for name in names:
-        assert name.startswith(restore_test.CONTAINER_PREFIX)
-        assert name not in {"timescaledb", "api", "caddy", "frontend-build", "worker"}
+        assert name.startswith(restore_test.THROWAWAY_PREFIX)
 
 
-def test_restore_test_publishes_only_on_loopback(tmp_path):
-    """No published port on a public interface. The throwaway holds a copy of production data."""
-    run = RecordingRun()
-    restore_test.start_throwaway(IMAGE, tmp_path, run=run)
+def test_restore_test_name_guard_refuses_non_prefixed_name():
+    """The first of two independent conditions."""
+    restore_test.assert_safe_to_drop("dws_restore_test_abc123", PRODUCTION_DB)  # no raise
 
-    (start,) = [c for c in run.calls if c[:3] == ["docker", "run", "-d"]]
-    published = [start[i + 1] for i, part in enumerate(start) if part == "-p"]
-    assert published, f"no port mapping in {start}"
-    for mapping in published:
-        assert mapping.startswith("127.0.0.1:"), (
-            f"the throwaway publishes {mapping!r}, which is reachable off the host"
+    for name in ("waterway", "postgres", "template1", "dws_restore", "restore_test_abc"):
+        with pytest.raises(restore_test.RestoreTestError, match="does not start with"):
+            restore_test.assert_safe_to_drop(name, PRODUCTION_DB)
+
+
+def test_restore_test_name_guard_refuses_production_db_name():
+    """The SECOND condition, which does not depend on the prefix being anything in particular.
+
+    A prefix check alone FAILS OPEN if the prefix is ever empty: `"waterway".startswith("")` is
+    True, so an empty prefix turns the guard into a permission to drop the production database.
+    This test makes that concrete by emptying the prefix and requiring a refusal anyway.
+    """
+    with pytest.raises(restore_test.RestoreTestError, match="IS the production database"):
+        restore_test.assert_safe_to_drop(
+            f"{restore_test.THROWAWAY_PREFIX}x", f"{restore_test.THROWAWAY_PREFIX}x"
         )
 
 
-def test_restore_test_container_torn_down_on_exception(tmp_path):
-    """`docker rm -f` in a `finally`, and the logs are captured BEFORE removal.
+def test_restore_test_name_guard_survives_an_empty_prefix():
+    """An empty prefix is refused outright rather than silently matching everything."""
+    original = restore_test.THROWAWAY_PREFIX
+    restore_test.THROWAWAY_PREFIX = ""
+    try:
+        with pytest.raises(restore_test.RestoreTestError, match="matches every database name"):
+            restore_test.assert_safe_to_drop("waterway", PRODUCTION_DB)
+    finally:
+        restore_test.THROWAWAY_PREFIX = original
 
-    Tearing down the evidence at the moment it becomes useful is a small tragedy that recurs.
+
+def test_restore_test_name_guard_asserted_again_before_drop():
+    """THE SECOND ASSERTION, which is the one that matters and the one that looks redundant.
+
+    Checking at creation guards against a bad name. Checking again immediately before the DROP
+    guards against the name being REASSIGNED between the two - which is the only way this could
+    ever go wrong, because by then it has travelled through a restore, a comparison, and a
+    `finally`.
+
+    Modelled by mutating the name on the object after creation, which is exactly what a reassigned
+    variable, a shadowed one, or one read from a different scope would look like from here.
     """
-    run = RecordingRun()
-    throwaway = restore_test.Throwaway(name="dws-restore-test-x", port=1, scratch=tmp_path)
+    conn = RecordingConn()
+    throwaway = restore_test.create_throwaway(conn, PRODUCTION_URL, PRODUCTION_DB)
 
-    restore_test.teardown(throwaway, run=run, keep_logs=True)
+    tampered = restore_test.Throwaway(
+        name=PRODUCTION_DB, url=throwaway.url, production_database=PRODUCTION_DB
+    )
+    with pytest.raises(restore_test.RestoreTestError):
+        restore_test.drop_throwaway(conn, tampered)
 
-    removals = [c for c in run.calls if c[:3] == ["docker", "rm", "-f"]]
-    assert removals, f"no `docker rm -f` was issued: {run.calls}"
-    assert removals[0][3] == "dws-restore-test-x"
-
-    logs_index = next(i for i, c in enumerate(run.calls) if c[:2] == ["docker", "logs"])
-    rm_index = next(i for i, c in enumerate(run.calls) if c[:3] == ["docker", "rm", "-f"])
-    assert logs_index < rm_index, "the container was removed before its logs were captured"
+    assert conn.issued("DROP DATABASE") == [], (
+        f"a DROP was issued for the production database: {conn.statements}"
+    )
 
 
-def test_restore_test_teardown_is_in_a_finally_block():
-    """Asserted on the source's STRUCTURE, via the AST, not by grepping for the word.
+def test_restore_test_terminates_backends_before_drop():
+    """Or the DROP fails on an open connection and the throwaway LEAKS.
 
-    A `finally` is the only construct that survives KeyboardInterrupt, and a throwaway container
-    that survives a Ctrl-C holds a database's worth of disk on the same volume as production.
+    Measured 2026-08-17 against a real server: with one idle session attached, `DROP DATABASE`
+    returns `ERROR: database "..." is being accessed by other users`. A leaked throwaway holds a
+    database's worth of disk on the same volume as production, under a name nobody recognises.
+
+    THE TERMINATION IS SCOPED TO THAT datname AND EXCLUDES THIS BACKEND. An unscoped
+    pg_terminate_backend sweep is how a maintenance job takes production offline.
+    """
+    conn = RecordingConn()
+    throwaway = restore_test.create_throwaway(conn, PRODUCTION_URL, PRODUCTION_DB)
+    restore_test.drop_throwaway(conn, throwaway)
+
+    terminations = conn.issued("pg_terminate_backend")
+    drops = conn.issued("DROP DATABASE")
+    assert terminations, f"no backends were terminated before the drop: {conn.statements}"
+    assert drops, f"no DROP DATABASE was issued: {conn.statements}"
+
+    assert conn.statements.index(terminations[0]) < conn.statements.index(drops[0]), (
+        "the DROP was issued before the backends were terminated"
+    )
+    assert "datname = %s" in terminations[0], (
+        f"the termination is not scoped to one database: {terminations[0]}"
+    )
+    assert "pid <> pg_backend_pid()" in terminations[0], (
+        f"the termination does not exclude this connection: {terminations[0]}"
+    )
+
+
+def test_restore_test_does_not_drop_on_failure():
+    """ON FAILURE THE THROWAWAY IS KEPT AND NAMED. Asserted on the job's STRUCTURE via the AST.
+
+    Evidence at the moment it becomes useful is worth more than a clean server: a restore that
+    failed halfway is the one thing that can say why, and dropping it destroys the only copy of
+    that state.
+
+    This inverts the container version, which always tore down. The difference is what "the
+    evidence" is: a container's logs are its whole state and were captured before removal, while a
+    database's state IS the database.
+
+    THE GUARD IS THAT THE DROP IS REACHED ONLY UNDER A SUCCESS CONDITION. Asserting that
+    `drop_throwaway` appears in a `finally` is not enough - it appears there in both the correct
+    and the incorrect version. What distinguishes them is whether the call sits inside an `if`
+    that tests the success flag.
     """
     import ast
 
@@ -200,16 +314,57 @@ def test_restore_test_teardown_is_in_a_finally_block():
     tries = [node for node in ast.walk(job_func) if isinstance(node, ast.Try) and node.finalbody]
     assert tries, "restore_test_monthly_job has no try/finally at all"
 
-    finally_calls = [
-        node.func.id
-        for t in tries
-        for node in ast.walk(ast.Module(body=t.finalbody, type_ignores=[]))
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-    ]
-    assert "teardown" in finally_calls, (
-        f"teardown() is not called from a finally block; calls found: {finally_calls}. Outside a "
-        f"finally it does not run on KeyboardInterrupt."
+    def calls_drop(node) -> bool:
+        return any(
+            isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Name)
+            and inner.func.id == "drop_throwaway"
+            for inner in ast.walk(node)
+        )
+
+    total_drop_calls = sum(calls_drop(ast.Module(body=t_.finalbody, type_ignores=[]))
+                           for t_ in tries)
+    assert total_drop_calls, (
+        "drop_throwaway() is not called from any finally block. Outside a finally it does not run "
+        "on KeyboardInterrupt, and the throwaway survives holding a database's worth of disk."
     )
+
+    # Every drop must sit under an `if` whose condition mentions the success flag. Counting the
+    # drops reachable that way against ALL of them is what distinguishes "guarded" from "present
+    # in a finally", which is the mutation this test is for.
+    guarded = 0
+    for try_node in tries:
+        for branch in ast.walk(ast.Module(body=try_node.finalbody, type_ignores=[])):
+            if not isinstance(branch, ast.If):
+                continue
+            names = {n.id for n in ast.walk(branch.test) if isinstance(n, ast.Name)}
+            if "succeeded" not in names:
+                continue
+            guarded += sum(
+                calls_drop(ast.Module(body=branch.body, type_ignores=[]))
+                for _ in (1,)
+            )
+
+    assert guarded, (
+        "drop_throwaway() is in a finally block but NOT under a condition testing the success "
+        "flag, so it runs on failure too - destroying the one piece of state that can say why a "
+        "restore failed. On failure the throwaway must be KEPT and named in the error."
+    )
+
+
+def test_restore_test_refuses_on_insufficient_free_space(tmp_path):
+    """The archive AND the restored database land on /mnt/data, beside production's own files."""
+
+    class Usage:
+        def __init__(self, free):
+            self.free = free
+
+    with pytest.raises(restore_test.RestoreTestError, match="refusing to start"):
+        restore_test.check_free_space(tmp_path, 1_000_000, usage=lambda _: Usage(2_000_000))
+
+    assert restore_test.check_free_space(
+        tmp_path, 1_000_000, usage=lambda _: Usage(3_000_000)
+    ) == 3_000_000
 
 
 # ---------------------------------------------------------------------------------------------
@@ -220,7 +375,8 @@ def test_restore_test_teardown_is_in_a_finally_block():
 def test_restore_test_does_not_pass_no_privileges(tmp_path):
     """`--no-owner --no-privileges` makes any restore succeed by discarding what is worth checking."""
     argv = restore_test.restore_command(
-        image=IMAGE, archive_path=tmp_path / "x.dump", port=5999, scratch=tmp_path
+        archive_path=tmp_path / "x.dump", host="timescaledb", port=5432,
+        database="dws_restore_test_abc123", user="waterway",
     )
     joined = " ".join(argv)
 
@@ -420,32 +576,92 @@ def test_restore_test_asserts_compressed_chunk_count_matches():
         restore_test.compare_compressed_chunks(17, Conn(4))
 
 
+class RoleConn:
+    """A connection that reports a `current_user`, and optionally refuses DELETE."""
+
+    def __init__(self, *, current_user, refuses):
+        self.current_user = current_user
+        self.refuses = refuses
+        self.statements = []
+
+    def execute(self, sql, params=None):
+        self.statements.append(sql)
+        if sql.startswith("DELETE") and self.refuses:
+            raise PermissionError("permission denied for table gauges")
+
+        user = self.current_user
+
+        class Cursor:
+            def fetchone(inner):
+                return (user,)
+
+        return Cursor()
+
+
 def test_restore_test_asserts_read_only_role_cannot_delete():
     """The only assertion proving the security property is IN THE BACKUP."""
-
-    class RefusingConn:
-        def __init__(self):
-            self.statements = []
-
-        def execute(self, sql, params=None):
-            self.statements.append(sql)
-            if sql.startswith("DELETE"):
-                raise PermissionError("permission denied for table gauges")
-
-    conn = RefusingConn()
+    conn = RoleConn(current_user=restore_test.READ_ONLY_ROLE, refuses=True)
     restore_test.assert_read_only_role_cannot_delete(conn, "public.gauges")
-    assert any("SET LOCAL ROLE" in s for s in conn.statements)
+
+    assert any(s.startswith("SET ROLE") for s in conn.statements)
     assert any(s.startswith("DELETE") for s in conn.statements), (
         "no DELETE was attempted, so nothing was proven about the role"
     )
     assert any("RESET ROLE" in s for s in conn.statements)
 
-    class PermissiveConn:
-        def execute(self, sql, params=None):
-            return None
-
+    permissive = RoleConn(current_user=restore_test.READ_ONLY_ROLE, refuses=False)
     with pytest.raises(restore_test.RestoreTestError, match="permitted to DELETE"):
-        restore_test.assert_read_only_role_cannot_delete(PermissiveConn(), "public.gauges")
+        restore_test.assert_read_only_role_cannot_delete(permissive, "public.gauges")
+
+
+def test_restore_test_role_switch_effect_is_asserted_not_its_invocation():
+    """`SET ROLE`, NOT `SET LOCAL ROLE`, AND `current_user` IS READ BACK BEFORE THE DELETE.
+
+    THIS WAS A REAL DEFECT AND IT SHIPPED. `SET LOCAL ROLE` is scoped to the enclosing
+    transaction, and the connection this runs on is AUTOCOMMIT, so there is no enclosing
+    transaction and the setting is discarded at the end of the statement that set it. Measured
+    2026-08-17 against a real server: `current_user` after `SET LOCAL ROLE probe_ro` was still
+    `waterway`, and the `DELETE` that followed ran as the OWNER and succeeded.
+
+    THE DIRECTION THAT FAILURE TAKES IS WHAT MAKES IT EXPENSIVE. It does not pass silently - it
+    raises "the restored role was permitted to DELETE", so the monthly restore test would have
+    failed every single time, ACCUSING THE BACKUP'S GRANTS, while the actual cause was a
+    session-scoping rule one layer away. A false failure pointing at the wrong layer.
+
+    So the guard is on the EFFECT, the same discipline `assert_statistics_exist` applies to
+    ANALYZE: a role switch that did not take must be caught HERE, where the message can say so,
+    rather than downstream where it looks like a finding about the archive.
+    """
+    # THE STATEMENT, NOT A MENTION OF IT. This function's own error message explains what
+    # `SET LOCAL ROLE` does on an autocommit connection, and a substring scan flags that sentence
+    # - the third time in this phase that a guard matched its own justification (see
+    # tests/source_scan.py). What is forbidden is EXECUTING it, so the predicate is `startswith`
+    # over non-docstring literals: a statement begins with the words, a sentence about one
+    # does not.
+    offenders = scan_for(
+        Path(restore_test.__file__).read_text(encoding="utf-8"),
+        lambda value: value.strip().upper().startswith("SET LOCAL"),
+    )
+    assert offenders == [], (
+        f"SET LOCAL ROLE is back: {offenders}. On an autocommit connection it is discarded, and "
+        f"the DELETE that follows runs as the owner - reported as the backup's grants being wrong."
+    )
+
+    # A connection where the switch silently did not take: current_user is still the owner.
+    not_switched = RoleConn(current_user="waterway", refuses=False)
+    with pytest.raises(restore_test.RestoreTestError, match="did not take") as raised:
+        restore_test.assert_read_only_role_cannot_delete(not_switched, "public.gauges")
+
+    assert "waterway" in str(raised.value), (
+        f"the refusal does not report the role it observed: {raised.value}"
+    )
+    assert not any(s.startswith("DELETE") for s in not_switched.statements), (
+        f"the DELETE was attempted despite the role switch not taking: {not_switched.statements}. "
+        f"It would have run as the owner and been reported as the backup missing its grants."
+    )
+    assert any("RESET ROLE" in s for s in not_switched.statements), (
+        "the role was not reset on the failure path"
+    )
 
 
 # ---------------------------------------------------------------------------------------------
@@ -591,7 +807,7 @@ def test_create_roles_discovers_from_archive_not_live_db(tmp_path):
     archive.write_bytes(b"not really an archive; the render is stubbed")
     run = _RenderedArchive(REAL_RENDER)
 
-    roles = restore_test.roles_in_archive(archive, "timescale/timescaledb:test", run=run)
+    roles = restore_test.roles_in_archive(archive, run=run)
 
     assert run.calls, "roles_in_archive issued no command at all"
     argv = run.calls[0]
@@ -617,7 +833,7 @@ def test_create_roles_excludes_public_pseudo_role(tmp_path):
     archive.write_bytes(b"stub")
 
     roles = restore_test.roles_in_archive(
-        archive, "img", run=_RenderedArchive(REAL_RENDER)
+            archive, run=_RenderedArchive(REAL_RENDER)
     )
 
     assert not any(role.lower() == "public" for role in roles), (
@@ -646,7 +862,7 @@ def test_create_roles_preserves_quoted_mixed_case_names(tmp_path):
     archive.write_bytes(b"stub")
 
     roles = restore_test.roles_in_archive(
-        archive, "img", run=_RenderedArchive(REAL_RENDER)
+            archive, run=_RenderedArchive(REAL_RENDER)
     )
 
     assert "Mixed-Case_Owner" in roles, (
@@ -724,6 +940,6 @@ def test_roles_in_archive_raises_when_the_render_is_empty(tmp_path):
     archive.write_bytes(b"stub")
 
     with pytest.raises(restore_test.RestoreTestError) as raised:
-        restore_test.roles_in_archive(archive, "img", run=_RenderedArchive(""))
+        restore_test.roles_in_archive(archive, run=_RenderedArchive(""))
 
     assert "no SQL" in str(raised.value), f"unhelpful message: {raised.value}"

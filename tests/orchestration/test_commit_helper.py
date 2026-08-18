@@ -48,8 +48,10 @@ APP = pathlib.Path(__file__).resolve().parents[2] / "app"
 # the published-port set (§ 22): a new bare call fails until somebody writes down which kind it is,
 # and a REMOVED one fails too, so this list cannot rot into describing a codebase that has moved on.
 #
-# The counts matter. `backup_nightly_job` legitimately opens two and `restore_test_monthly_job` two;
-# without a count a third could appear inside either and nothing would notice.
+# The counts matter, and Phase 12 is the proof: `restore_test_monthly_job` went from two raw
+# connections to four when the throwaway became a DATABASE rather than a container, and this list
+# is what said so. A function-name allow-list without counts would have absorbed the two new ones
+# in silence, and one of them issues the only DROP DATABASE in this system.
 ALLOWED = {
     # ---- read-only paths -----------------------------------------------------------------
     # The API is read-only by contract and connects as a role that cannot write (§ 20). Routing it
@@ -61,10 +63,19 @@ ALLOWED = {
     ("orchestration/heartbeat.py", "heartbeat_job"): 1,
     # Reads the last verified backup and asserts the excluded table exists, before any dump.
     ("orchestration/backup.py", "backup_nightly_job"): 2,
-    # Reads the most recent verified row and the source's roles; the second is the throwaway.
-    ("orchestration/restore_test.py", "restore_test_monthly_job"): 2,
-    # A readiness probe against the throwaway container.
-    ("orchestration/restore_test.py", "wait_until_ready"): 1,
+    # FOUR, and every one is a transaction whose shape is the point (§ 23's third category):
+    #   1. reads the most recent verified `backups` row;
+    #   2. AUTOCOMMIT, on the production database, to CREATE DATABASE - which cannot run inside a
+    #      transaction block at all;
+    #   3. AUTOCOMMIT, on the throwaway, for the restore's assertions - `SET ROLE` and the
+    #      read-only DELETE probe depend on session rather than transaction scope;
+    #   4. AUTOCOMMIT, on the production database again, to DROP DATABASE in the `finally`.
+    # The write this job performs - the verification mark - goes through `session.writing`, which
+    # is why that one is not in this count.
+    ("orchestration/restore_test.py", "restore_test_monthly_job"): 4,
+    # pre_restore/CREATE EXTENSION, then post_restore, each on its own autocommit connection: the
+    # extension must not be left in the restoring state, so post_restore runs whatever happened.
+    ("orchestration/restore_test.py", "restore"): 2,
 
     # ---- the migration runner, whose transaction boundaries ARE its correctness argument ----
     # One transaction per file with the schema_migrations insert inside it (§ 3, § 12), and a

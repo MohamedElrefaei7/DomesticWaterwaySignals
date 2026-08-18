@@ -11,9 +11,21 @@ The decisions that carry the most weight, in order:
     nothing about what is in the bucket, and on a healthy instance the local file was deleted the
     moment its upload was verified. This is also the only thing that exercises the IAM READ path,
     which is otherwise untested until the day it matters.
-  - THE RESTORE IS WRAPPED IN timescaledb_pre_restore() / timescaledb_post_restore(). Without them
-    the restore APPEARS TO SUCCEED while hypertable and chunk metadata is wrong - CLAUDE.md § 2's
-    theme 1 exactly, surfacing much later as queries that return plausible partial results.
+  - THE RESTORE IS WRAPPED IN timescaledb_pre_restore() / timescaledb_post_restore(), AND THE
+    EXTENSION IS CREATED BEFORE EITHER. Without the wrapper the restore APPEARS TO SUCCEED while
+    hypertable and chunk metadata is wrong - CLAUDE.md § 2's theme 1 exactly, surfacing much later
+    as queries that return plausible partial results. The CREATE EXTENSION is new in Phase 12 and
+    is not optional: measured against 2.26.2, `timescaledb_pre_restore()` DOES NOT EXIST in a
+    database created from template0. It was invisible until now because the timescaledb image's
+    own init scripts create the extension in POSTGRES_DB, so the throwaway CONTAINER always had it.
+
+  - THE THROWAWAY IS A DATABASE ON THE EXISTING SERVER, NOT A CONTAINER, AND THAT IS A TRADE.
+    Spawning a container from inside the scheduler container requires the host's Docker socket,
+    which is root-equivalent on the host (CLAUDE.md § 22). Two things are lost and neither is
+    closed: roles are CLUSTER-wide, so create_roles becomes a no-op in production runs and its
+    production path is untested; and the fresh-cluster property is gone, so a dump depending on
+    some cluster-level object would restore cleanly here and fail on a real rebuild. This job now
+    answers "does this archive restore into THIS server" rather than "into a new one".
   - ROLES ARE CREATED, NOT STRIPPED. `--no-owner --no-privileges` makes any restore succeed, at the
     cost of never exercising the grants - and the read-only `waterway_api` role is a proven
     invariant of this system (§ 20). After restoring, that role is made to attempt a DELETE and
@@ -32,10 +44,10 @@ import re
 import secrets
 import shutil
 import subprocess
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from psycopg import sql
 
@@ -56,28 +68,33 @@ READ_ONLY_ROLE = "waterway_api"
 # excluded its DATA while keeping its DDL.
 EXPECTED_EMPTY_TABLE = f"{backup.COUNTED_SCHEMA}.{backup.EXCLUDED_DATA_TABLE}"
 
-CONTAINER_PREFIX = "dws-restore-test-"
-RESTORE_DB = "restore_probe"
-RESTORE_USER = "postgres"
-CONTAINER_READY_TIMEOUT = 120
+# THE PREFIX IS THE FIRST HALF OF THE NAME GUARD AND IT IS NOT ALLOWED TO BE EMPTY.
+# A prefix check against "" matches every string, so the guard would fail OPEN - which is why the
+# second condition below is an inequality against the connected database's own name rather than a
+# more careful prefix.
+THROWAWAY_PREFIX = "dws_restore_test_"
+
+# The client binaries, from the scheduler image. Same constants the backup job uses, so there is
+# one place that says how postgres is invoked.
+PG_RESTORE = backup.PG_RESTORE
 
 
 class RestoreTestError(RuntimeError):
     """The restore test did not prove the backup restorable. No verification mark is written."""
 
 
-@dataclass
+@dataclass(frozen=True)
 class Throwaway:
-    """A disposable TimescaleDB container: unique name, own network, no published ports."""
+    """A disposable DATABASE on the production server: unique name, dropped when done.
+
+    IT WAS A CONTAINER UNTIL PHASE 12. Spawning one from inside the scheduler container requires
+    the host's Docker socket, which is root-equivalent on the host. See the module docstring for
+    what that trade costs.
+    """
 
     name: str
-    port: int
-    scratch: Path
-    logs: list[str] = field(default_factory=list)
-
-    @property
-    def url(self) -> str:
-        return f"postgresql://{RESTORE_USER}:probe@127.0.0.1:{self.port}/{RESTORE_DB}"
+    url: str
+    production_database: str
 
 
 # ---------------------------------------------------------------------------------------------
@@ -141,128 +158,114 @@ def check_free_space(scratch: Path, byte_size: int, usage=shutil.disk_usage) -> 
 
 
 # ---------------------------------------------------------------------------------------------
-# The throwaway container
+# The throwaway database
 # ---------------------------------------------------------------------------------------------
 
 
-def container_name() -> str:
-    """A random suffix, so two runs cannot collide and neither can collide with production."""
-    return f"{CONTAINER_PREFIX}{secrets.token_hex(6)}"
+def throwaway_name() -> str:
+    """A random suffix, so two runs cannot collide and neither can collide with anything real."""
+    return f"{THROWAWAY_PREFIX}{secrets.token_hex(6)}"
 
 
-def assert_no_such_container(name: str, run=subprocess.run) -> None:
-    """A name collision is FATAL, never "reuse the existing one".
+def throwaway_url(url: str, name: str) -> str:
+    """The same DSN, pointed at a different database. Nothing else about it changes."""
+    parts = urlsplit(url)
+    return urlunsplit((parts.scheme, parts.netloc, f"/{name}", parts.query, parts.fragment))
 
-    Reusing a container of that name would restore into whatever is already there, and if the name
-    ever collided with a production service the restore would land on production data. The random
-    suffix makes this near-impossible; the check is what makes "near" not matter.
+
+def assert_safe_to_drop(name: str, production_database: str) -> None:
+    """TWO INDEPENDENT CONDITIONS, and this is called TWICE - at creation and before the DROP.
+
+    CLAUDE.md § 3 permits exactly one `DROP` in this system and bounds it with this function.
+
+    THE SECOND CALL IS THE ONE THAT MATTERS AND THE ONE THAT LOOKS REDUNDANT. Checking at creation
+    guards against a bad name. Checking again immediately before the drop guards against the
+    variable being reassigned, shadowed, or read from a different scope in between - which is the
+    only way this could ever go wrong, because by then the name has travelled through a restore, a
+    comparison, and a `finally`.
+
+    TWO CONDITIONS, NOT ONE, BECAUSE A PREFIX CHECK ALONE FAILS OPEN. If THROWAWAY_PREFIX were
+    ever "" - a refactor, a config lookup that returned nothing - `startswith("")` is true of every
+    string including the production database's name. The inequality does not depend on the prefix
+    being anything in particular.
+
+    The production name is the database this job is CONNECTED TO, taken from the DSN rather than
+    from a POSTGRES_DB environment variable. Same fact, one fewer copy, and it cannot disagree with
+    the connection the drop is issued on.
     """
-    completed = run(
-        ["docker", "ps", "-a", "--filter", f"name=^{name}$", "--format", "{{.Names}}"],
-        capture_output=True, text=True,
-    )
-    if (completed.stdout or "").strip():
+    if not THROWAWAY_PREFIX:
         raise RestoreTestError(
-            f"a container named {name!r} already exists. Refusing to reuse it: restoring into an "
-            f"existing container writes into whatever is already in it."
+            "THROWAWAY_PREFIX is empty, so the prefix half of the name guard matches every "
+            "database name in the cluster. Refusing to drop anything."
         )
-
-
-def start_throwaway(image: str, scratch: Path, run=subprocess.run, port: int = 0) -> Throwaway:
-    """Start the container on the SAME pinned digest as production.
-
-    Same digest for Part 6's reason and one more: a TimescaleDB extension version mismatch on
-    restore produces errors that read like data corruption, so a restore test on a different
-    version would report a false failure in the one place a false failure is most expensive.
-
-    NO PUBLISHED PORTS on a public interface - bound to 127.0.0.1 on an ephemeral port. And never
-    `docker compose run` against the production stack, where a stray `docker compose down` would
-    sweep it and a naming collision would be a genuinely bad afternoon.
-    """
-    name = container_name()
-    assert_no_such_container(name, run=run)
-    scratch.mkdir(parents=True, exist_ok=True)
-
-    completed = run(
-        [
-            "docker", "run", "-d",
-            "--name", name,
-            # Loopback only. An ephemeral port avoids colliding with anything already bound.
-            "-p", f"127.0.0.1:{port}:5432",
-            "-e", f"POSTGRES_PASSWORD=probe",
-            "-e", f"POSTGRES_DB={RESTORE_DB}",
-            "-v", f"{scratch}:{scratch}",
-            image,
-        ],
-        capture_output=True, text=True,
-    )
-    if completed.returncode != 0:
+    if not name.startswith(THROWAWAY_PREFIX):
         raise RestoreTestError(
-            f"could not start the throwaway container: {(completed.stderr or '').strip()}"
+            f"refusing to touch database {name!r}: it does not start with {THROWAWAY_PREFIX!r}. "
+            f"This job creates and drops exactly one database and its name is generated here; a "
+            f"name that does not match came from somewhere else."
+        )
+    if name == production_database:
+        raise RestoreTestError(
+            f"refusing to touch database {name!r}: it IS the production database this job is "
+            f"connected to. The prefix check passed, which means the prefix is not protecting "
+            f"anything - this is the condition that does not depend on it."
         )
 
-    published = run(
-        ["docker", "port", name, "5432/tcp"], capture_output=True, text=True
+
+def create_throwaway(admin_conn, url: str, production_database: str) -> Throwaway:
+    """`CREATE DATABASE ... TEMPLATE template0`, with the name guard asserted first.
+
+    TEMPLATE template0, NEVER template1. template1 is the default and may carry local additions -
+    extensions, tables, anything a previous operator installed into it - which would land in the
+    throwaway and show up as tables the recorded snapshot does not have. template0 is the pristine
+    baseline and is what makes the restore reproducible.
+
+    The connection must be in autocommit: CREATE DATABASE cannot run inside a transaction block.
+    """
+    name = throwaway_name()
+    assert_safe_to_drop(name, production_database)
+
+    admin_conn.execute(
+        sql.SQL("CREATE DATABASE {} TEMPLATE template0").format(sql.Identifier(name))
     )
-    mapped = (published.stdout or "").strip().splitlines()
-    if not mapped:
-        raise RestoreTestError(f"container {name} published no port for 5432")
-    resolved_port = int(mapped[0].rsplit(":", 1)[1])
-
-    return Throwaway(name=name, port=resolved_port, scratch=scratch)
+    logger.info("created throwaway database %s", name)
+    return Throwaway(
+        name=name, url=throwaway_url(url, name), production_database=production_database
+    )
 
 
-def teardown(throwaway: Throwaway | None, run=subprocess.run, keep_logs: bool = False) -> None:
-    """`docker rm -f`, in a `finally` that survives KeyboardInterrupt.
+def terminate_backends(admin_conn, name: str) -> int:
+    """Kill every backend attached to that database, and NOTHING else.
 
-    ON FAILURE THE LOGS ARE CAPTURED FIRST. Tearing down the evidence at the moment it becomes
-    useful is a small tragedy that recurs, so the logs are read off the container before it is
-    removed and the caller reports where they went.
+    Without this the DROP fails on an open connection and the throwaway LEAKS - a database's worth
+    of disk on the same volume as production, under a name nobody will recognise in a month.
+    Measured 2026-08-17: with one idle session attached, `DROP DATABASE` returns
+    `ERROR: database "..." is being accessed by other users`.
+
+    SCOPED TO THAT datname, and excluding this connection's own pid. An unscoped
+    pg_terminate_backend sweep is how a maintenance job takes production offline.
     """
-    if throwaway is None:
-        return
-    if keep_logs:
-        completed = run(
-            ["docker", "logs", "--tail", "200", throwaway.name],
-            capture_output=True, text=True,
-        )
-        throwaway.logs = ((completed.stdout or "") + (completed.stderr or "")).splitlines()
-    run(["docker", "rm", "-f", throwaway.name], capture_output=True, text=True)
+    return int(
+        admin_conn.execute(
+            "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity "
+            "WHERE datname = %s AND pid <> pg_backend_pid()",
+            (name,),
+        ).fetchone()[0]
+    )
 
 
-def wait_until_ready(throwaway: Throwaway, run=subprocess.run, timeout: int = CONTAINER_READY_TIMEOUT,
-                     sleep=time.sleep) -> None:
-    """Ready means A REAL QUERY SUCCEEDS FROM OUTSIDE, not that pg_isready said so.
+def drop_throwaway(admin_conn, throwaway: Throwaway) -> None:
+    """The one DROP this system performs. Guarded again, immediately above the statement.
 
-    `pg_isready` is not sufficient and the reason is a genuine trap: the official Postgres image
-    runs a TEMPORARY server on a unix socket while initdb sets the database up, then shuts it down
-    and starts the real one. `pg_isready` inside the container answers YES to that temporary
-    server, so a readiness check built on it returns during initialisation and the restore that
-    follows hits a database that is about to be restarted underneath it.
-
-    Measured: this passed in isolation every time and errored under full-suite load, which is the
-    signature of exactly that race. Connecting over the published port, from outside, and running
-    a query is the check that cannot be satisfied by the temporary server.
+    The second assertion is deliberately adjacent to the DROP rather than at the top of the
+    function: what it defends against is the name changing between the check and the use, so any
+    distance between them is the window it exists to close.
     """
-    deadline = time.monotonic() + timeout
-    last_error = None
-    while time.monotonic() < deadline:
-        completed = run(
-            ["docker", "exec", throwaway.name, "pg_isready", "-U", RESTORE_USER],
-            capture_output=True, text=True,
-        )
-        if completed.returncode == 0:
-            try:
-                with db.connection(throwaway.url) as conn:
-                    conn.execute("SELECT 1").fetchone()
-                return
-            except Exception as exc:  # noqa: BLE001 - any connection failure means not ready yet
-                last_error = exc
-        sleep(1)
-
-    raise RestoreTestError(
-        f"throwaway container {throwaway.name} was not accepting queries on port "
-        f"{throwaway.port} after {timeout}s. Last error: {last_error}"
+    assert_safe_to_drop(throwaway.name, throwaway.production_database)
+    killed = terminate_backends(admin_conn, throwaway.name)
+    admin_conn.execute(sql.SQL("DROP DATABASE {}").format(sql.Identifier(throwaway.name)))
+    logger.info(
+        "dropped throwaway database %s (terminated %d backend(s) first)", throwaway.name, killed
     )
 
 
@@ -309,7 +312,7 @@ def _unquote_role(token: str) -> str:
     return token
 
 
-def roles_in_archive(archive_path: Path, image: str, run=subprocess.run) -> list[str]:
+def roles_in_archive(archive_path: Path, run=subprocess.run) -> list[str]:
     """Every role THE ARCHIVE references, read from the archive's own rendered SQL.
 
     FROM THE ARCHIVE, NOT FROM THE LIVE SOURCE DATABASE. Reading the source gives this job a
@@ -332,12 +335,7 @@ def roles_in_archive(archive_path: Path, image: str, run=subprocess.run) -> list
     matters: the archive that was one third its correct size passed `--list` cleanly.
     """
     completed = run(
-        [
-            "docker", "run", "--rm",
-            "-v", f"{archive_path.parent}:{archive_path.parent}",
-            image,
-            "pg_restore", "--file", "-", str(archive_path),
-        ],
+        [PG_RESTORE, "--file", "-", str(archive_path)],
         capture_output=True,
         text=True,
     )
@@ -408,18 +406,18 @@ def create_roles(conn, roles=(READ_ONLY_ROLE,)) -> None:
         )
 
 
-def restore_command(*, image: str, archive_path: Path, port: int, scratch: Path) -> list[str]:
-    """pg_restore into the throwaway. NO --no-owner, NO --no-privileges."""
+def restore_command(*, archive_path: Path, host: str, port: int, database: str, user: str) -> list[str]:
+    """pg_restore into the throwaway database. NO --no-owner, NO --no-privileges.
+
+    A direct invocation, like the dump's: the scheduler container has no Docker socket, so the
+    client is the one installed in the image (CLAUDE.md § 22).
+    """
     return [
-        "docker", "run", "--rm", "--network", "host",
-        "-v", f"{scratch}:{scratch}",
-        "-e", "PGPASSWORD=probe",
-        image,
-        "pg_restore",
-        "--host", "127.0.0.1",
+        PG_RESTORE,
+        "--host", host,
         "--port", str(port),
-        "--username", RESTORE_USER,
-        "--dbname", RESTORE_DB,
+        "--username", user,
+        "--dbname", database,
         # Exit non-zero if anything at all failed, rather than restoring what it can and reporting
         # success - which is the whole failure mode this job exists to detect.
         "--exit-on-error",
@@ -428,28 +426,49 @@ def restore_command(*, image: str, archive_path: Path, port: int, scratch: Path)
 
 
 def restore(
-    throwaway: Throwaway, image: str, archive_path: Path, run=subprocess.run, roles=(READ_ONLY_ROLE,)
+    throwaway: Throwaway, archive_path: Path, *, parts: dict, pgpass_path: Path,
+    run=subprocess.run, roles=(READ_ONLY_ROLE,),
 ) -> None:
-    """pre_restore -> pg_restore -> post_restore, in that order, reconnecting between.
+    """CREATE EXTENSION -> pre_restore -> pg_restore -> post_restore, reconnecting between.
 
-    WITHOUT THE WRAPPER the restore appears to succeed while hypertable and chunk metadata is
-    wrong. The symptom arrives much later, as queries returning plausible partial results over
-    chunks the catalog no longer knows about.
+    THE CREATE EXTENSION IS NEW IN PHASE 12 AND IT IS NOT OPTIONAL. Measured against TimescaleDB
+    2.26.2 on 2026-08-17, in a database created `TEMPLATE template0`:
+
+        SELECT timescaledb_pre_restore();
+        ERROR:  function timescaledb_pre_restore() does not exist
+
+    The function is owned by the extension, so a pristine database does not have it. This was
+    invisible while the throwaway was a CONTAINER, because the timescale/timescaledb image's own
+    init scripts run `CREATE EXTENSION` in POSTGRES_DB - so the container's database always had it
+    and this code never had to.
+
+    Pre-creating does not collide with the archive: measured on this project's own dump, pg_dump
+    emits `CREATE EXTENSION IF NOT EXISTS timescaledb WITH SCHEMA public`, which is a no-op against
+    an extension that is already there. `--exit-on-error` would have caught a collision loudly.
+
+    WITHOUT THE pre/post WRAPPER the restore appears to succeed while hypertable and chunk metadata
+    is wrong. The symptom arrives much later, as queries returning plausible partial results over
+    chunks the catalog no longer knows about. Both functions are per-DATABASE settings, so they
+    apply to the throwaway and touch nothing else in the cluster.
     """
     with db.connection(throwaway.url, autocommit=True) as conn:
         create_roles(conn, roles)
+        conn.execute("CREATE EXTENSION IF NOT EXISTS timescaledb")
         conn.execute("SELECT timescaledb_pre_restore()")
 
     completed = run(
         restore_command(
-            image=image, archive_path=archive_path,
-            port=throwaway.port, scratch=throwaway.scratch,
+            archive_path=archive_path,
+            host=parts["host"], port=parts["port"],
+            database=throwaway.name, user=parts["user"],
         ),
         capture_output=True, text=True,
+        env=backup.pgpass_environment(pgpass_path),
     )
 
-    # post_restore runs on a NEW connection whatever happened, because pre_restore has left the
-    # extension in a state that must not be the state the container is abandoned in.
+    # post_restore runs on a NEW connection whatever happened, because pre_restore leaves the
+    # extension in a state the database must not be abandoned in - and unlike a container, this
+    # database survives the failure on purpose, so abandoning it mid-restore is a real outcome.
     with db.connection(throwaway.url, autocommit=True) as conn:
         conn.execute("SELECT timescaledb_post_restore()")
 
@@ -583,14 +602,44 @@ def assert_read_only_role_cannot_delete(conn, table: str, role: str = READ_ONLY_
     A restore with `--no-owner --no-privileges` succeeds and leaves this untestable. Making the
     restored role actually attempt a write is the difference between "the grants restored" and
     "the grants were never exercised".
+
+    `SET ROLE`, NOT `SET LOCAL ROLE`, AND THE SWITCH'S EFFECT IS READ BACK BEFORE THE DELETE.
+
+    This was `SET LOCAL ROLE` and it did not work. `SET LOCAL` is scoped to the enclosing
+    transaction, and this connection is autocommit, so there IS no enclosing transaction and the
+    setting is discarded at the end of the statement that set it. Measured 2026-08-17 against a
+    real server: `current_user` after `SET LOCAL ROLE` was still the OWNER, and the DELETE that
+    followed ran as the owner and SUCCEEDED.
+
+    The direction that failure takes is what makes it worth this much prose: it does not silently
+    pass, it raises the message below - so the monthly restore test would have failed every time,
+    accusing the BACKUP'S GRANTS, while the actual cause was a session-scoping rule one layer away.
+    A false failure pointing at the wrong layer is the expensive kind.
+
+    So the effect is asserted rather than the invocation, which is the same discipline
+    `assert_statistics_exist` applies to ANALYZE a few functions up (CLAUDE.md § 13): a check that
+    would report correct about the exact thing it is failing to do is theme 2.
     """
-    conn.execute(f"SET LOCAL ROLE {role}")
     try:
-        conn.execute(f"DELETE FROM {table} WHERE false")
-    except Exception:
+        conn.execute(f"SET ROLE {role}")
+
+        observed = conn.execute("SELECT current_user").fetchone()[0]
+        if observed != role:
+            raise RestoreTestError(
+                f"SET ROLE {role} did not take: current_user is {observed!r}. The DELETE below "
+                f"would run as {observed!r} and prove nothing about {role!r} - and because a "
+                f"successful DELETE is reported as the read-only property being ABSENT FROM THE "
+                f"BACKUP, this would surface as a false accusation against the archive. "
+                f"(`SET LOCAL ROLE` on an autocommit connection does exactly this.)"
+            )
+
+        try:
+            conn.execute(f"DELETE FROM {table} WHERE false")
+        except Exception:
+            return
+    finally:
         conn.execute("RESET ROLE")
-        return
-    conn.execute("RESET ROLE")
+
     raise RestoreTestError(
         f"the restored {role!r} role was permitted to DELETE from {table}. The read-only property "
         f"is a proven invariant of this system in production (CLAUDE.md § 20); a backup that does "
@@ -630,12 +679,16 @@ def restore_test_monthly_job(
 
         s3 = boto3.client("s3")
 
-    image = backup.timescaledb_image()
+    parts = backup.connection_parts(url)
+    production_database = parts["database"]
 
     with db.connection(url) as conn:
         record = most_recent_verified(conn)
 
     scratch_dir.mkdir(parents=True, exist_ok=True)
+    backup.assert_staging_writable(scratch_dir)
+    # BEFORE CREATING ANYTHING. The archive AND the restored database both land on /mnt/data,
+    # beside production's own data files.
     check_free_space(scratch_dir, record["byte_size"])
 
     archive_path = scratch_dir / Path(record["s3_key"]).name
@@ -644,16 +697,36 @@ def restore_test_monthly_job(
     # ROLES COME FROM THE ARCHIVE, AFTER IT IS DOWNLOADED - never from the live source database.
     # The source has moved on since the dump: a role dropped from it would never be created and one
     # added to it would be created needlessly, and either way the throwaway stops matching the
-    # artifact under test. This is also why it is here rather than beside most_recent_verified -
-    # it needs the file, not the connection.
-    roles = roles_in_archive(archive_path, image, run=run)
+    # artifact under test.
+    #
+    # PHASE 12 MADE THIS A NO-OP IN PRODUCTION AND IT IS KEPT ANYWAY. Roles are CLUSTER-wide, so
+    # every role the archive references already exists in a database on this server. The code and
+    # its tests stay because the idempotent guard makes the no-op correct and because the archive's
+    # role set is still worth reading - but its production path is no longer exercised end to end,
+    # which is one of the two coverage losses this change accepts (see the module docstring).
+    roles = roles_in_archive(archive_path, run=run)
+
+    # The pgpass file for pg_restore, written beside the archive at 0600, removed in the finally.
+    # Same shape as the dump's, and never PGPASSWORD (CLAUDE.md § 3).
+    pgpass_path = scratch_dir / ".pgpass-restore-test"
+    backup.write_pgpass(
+        pgpass_path,
+        host=parts["host"], port=parts["port"], database=production_database,
+        user=parts["user"], password=parts["password"],
+    )
 
     throwaway = None
     succeeded = False
     try:
-        throwaway = start_throwaway(image, scratch_dir, run=run)
-        wait_until_ready(throwaway, run=run)
-        restore(throwaway, image, archive_path, run=run, roles=roles)
+        # CREATE DATABASE CANNOT RUN INSIDE A TRANSACTION, hence autocommit. This connection is to
+        # the PRODUCTION database and it is the one the DROP is issued on too - which is why the
+        # name guard's second condition compares against the database this connection is on.
+        with db.connection(url, autocommit=True) as admin:
+            throwaway = create_throwaway(admin, url or db.database_url(), production_database)
+
+        restore(
+            throwaway, archive_path, parts=parts, pgpass_path=pgpass_path, run=run, roles=roles
+        )
 
         with db.connection(throwaway.url, autocommit=True) as restored:
             analyze(restored)
@@ -684,16 +757,30 @@ def restore_test_monthly_job(
             record["backup_id"], len(counts), chunks,
         )
     finally:
-        # RUNS ON EVERY EXIT PATH, INCLUDING KeyboardInterrupt. A throwaway container that survives
-        # a Ctrl-C holds a database's worth of disk on the same volume as production.
-        teardown(throwaway, run=run, keep_logs=not succeeded)
-        if succeeded:
+        pgpass_path.unlink(missing_ok=True)
+
+        # RUNS ON EVERY EXIT PATH, INCLUDING KeyboardInterrupt - but ONLY ON SUCCESS.
+        #
+        # ON FAILURE THE THROWAWAY IS KEPT AND NAMED. Evidence at the moment it becomes useful is
+        # worth more than a clean server: a restore that failed halfway is the one thing that can
+        # say WHY, and dropping it destroys the only copy of that state. The cost is a database
+        # holding disk on the same volume as production, so the error says exactly what to run.
+        #
+        # This inverts the container version, which always tore down and captured logs first. A
+        # container's logs are its whole state; a database's state IS the database.
+        if throwaway is not None and succeeded:
+            with db.connection(url, autocommit=True) as admin:
+                drop_throwaway(admin, throwaway)
             archive_path.unlink(missing_ok=True)
         elif throwaway is not None:
             logger.error(
-                "restore test FAILED. Evidence kept: archive at %s, container logs (last 200 "
-                "lines) captured before removal:\n%s",
-                archive_path, "\n".join(throwaway.logs[-200:]),
+                "restore test FAILED. EVIDENCE KEPT, NOTHING DROPPED:\n"
+                "  throwaway database: %s\n"
+                "  archive:            %s\n"
+                "Inspect it, then remove it by hand when you are done:\n"
+                "  SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '%s';\n"
+                "  DROP DATABASE %s;",
+                throwaway.name, archive_path, throwaway.name, throwaway.name,
             )
 
     return None

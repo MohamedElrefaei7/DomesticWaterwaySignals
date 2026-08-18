@@ -431,26 +431,45 @@ COMPOSE_CONTAINERS = [
 ]
 
 
-def test_h_fails_when_throwaway_container_remains():
-    """Looked for across every container on the host - Compose cannot see it.
+def test_h_fails_when_a_throwaway_database_remains():
+    """A DATABASE in pg_database, not a container, as of Phase 12.
 
-    It is created by `docker run` with a random suffix, so it is not a Compose service.
+    RENAMED, and the rename is the finding. The throwaway used to be a `docker run` container with
+    a random suffix; the scheduler is now itself a container and spawning one from inside it would
+    need the host's Docker socket, so the restore test creates and drops a database instead. A
+    check still sweeping containers would pass over a host where nothing can create one - a green
+    check watching nothing, which is exactly what this project renames tests to avoid.
+
+    The failure message must NOT assert which cause it is: on failure the job keeps the throwaway
+    deliberately, as the only state that can say why a restore failed, so a survivor is either
+    that evidence or a killed run - and those send an operator to two different places.
     """
-    leaked = COMPOSE_CONTAINERS + ["dws-restore-test-9f2a1b0c4d5e"]
+    leaked = ["postgres", "waterway", "dws_restore_test_9f2a1b0c4d5e"]
     result = stage_h.check_throwaway_is_gone(leaked)
 
     assert result.status == FAIL
-    assert "dws-restore-test-9f2a1b0c4d5e" in result.observed
-    assert "ROOT disk" in result.observed
+    assert "dws_restore_test_9f2a1b0c4d5e" in result.observed
+    assert "SAME VOLUME" in result.observed
+    assert "DROP DATABASE" in result.observed, (
+        "the failure does not say how to remove it by hand"
+    )
 
-    assert stage_h.check_throwaway_is_gone(COMPOSE_CONTAINERS).status == PASS
+    assert stage_h.check_throwaway_is_gone(["postgres", "waterway"]).status == PASS
 
 
 def test_h_throwaway_prefix_matches_the_job_that_creates_it():
-    """Read from restore_test.py rather than remembered - two copies of one string drift."""
+    """Read from restore_test.py rather than remembered - two copies of one string drift.
+
+    It is a DATABASE prefix as of Phase 12, not a container prefix. A stage still sweeping
+    containers would pass over a host where nothing can create one - green, and watching nothing.
+    """
     from app.orchestration import restore_test
 
-    assert stage_h.THROWAWAY_PREFIX == restore_test.CONTAINER_PREFIX
+    assert stage_h.THROWAWAY_PREFIX == restore_test.THROWAWAY_PREFIX
+    assert not hasattr(restore_test, "CONTAINER_PREFIX"), (
+        "restore_test still exposes a container prefix; the throwaway is a database now and a "
+        "leftover constant is the thing a future check would bind to"
+    )
 
 
 def test_h_fails_when_container_set_is_a_superset():
