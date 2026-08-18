@@ -151,6 +151,22 @@ describes does not hold has already happened here.
 - **A failed backup writes no `backups` row.** The failure lives in `job_runs`, where failures
   belong. Never a `verified = false` placeholder: a later query for "the most recent backup" would
   find it and report one that does not exist.
+- **`pg_dump` and `pg_restore` live INSIDE the scheduler image, pinned to an exact
+  `postgresql-client-NN` version whose major EQUALS the server's, and the two are compared by
+  `verify/preflight.py`, which derives both from the files and hardcodes neither.** Debian bookworm
+  ships client 15, so 16 comes from PGDG, where a major-only pin floats to whatever point release
+  is current on the morning of the build - `latest` on an image wearing a different hat. The
+  committed version is a placeholder that cannot resolve, so a missed resolution step fails at
+  `apt-get` rather than installing something nobody chose (§ 12's rule for digests, applied to a
+  package). **Equality, not compatibility:** `pg_dump` older than the server refuses outright and
+  newer than the server usually works, and "usually works" is not a property anything can assert -
+  the relaxation that reads as reasonable (`server >= client`) passes a pg17 server with a client
+  16, which is exactly how a subtly wrong archive gets produced by a stack that reports itself
+  pinned. The signing key for that repository is verified BY FINGERPRINT against a literal in the
+  Dockerfile, because `curl ... | apt-key add -` in a build running as root trusts whatever answers
+  the request. **The parser that reads the pin strips comments first**, because the Dockerfile
+  explains at length why the client is 16 and not 15, and a raw search over it read the explanation
+  and reported a correct file as broken (§ 23).
 - **Dumps run from a one-shot container off the same pinned digest as the server**, never from
   host tools. A host `pg_dump` at a different major version either refuses or produces a subtly
   wrong archive; same digest means the versions match mechanically rather than by memory. The
@@ -1290,6 +1306,17 @@ inside the system is behaving exactly as designed.
   float. **A multi-stage build's stages are asserted to agree on one digest**: two resolutions of
   the same tag produce a runtime that is not the interpreter the wheels were installed against, and
   it surfaces as an ImportError in a C extension that reads like a broken dependency.
+- **The Docker socket is NEVER bind-mounted into any container in this stack, and its absence is
+  asserted across every service rather than for the one that would want it.** Mounting
+  `/var/run/docker.sock` is root-equivalent on the host - anything that can talk to the daemon can
+  start a privileged container with `/` bind-mounted - so a compromise of the container whose job
+  is running scheduled Python becomes a compromise of the instance. It also satisfies the non-root
+  bullet below in form while voiding it in substance: the process is uid 10001 and can become root
+  whenever it likes. **The cost of refusing it is a version pin in two files, and that cost is
+  accepted because it is DETECTABLE** - a preflight gate reads what the files say and a runtime
+  check reads what is installed (§ 3) - **whereas the socket trades a detectable problem for an
+  undetectable one.** A scheduler-only assertion would invite the mount onto `api` instead, so the
+  check is stack-wide.
 - **Application containers run as a non-root user, declared in the final stage.** Nothing this
   project runs needs root, and a container reachable from the internet running as root is strictly
   worse for no benefit. The numeric spellings of root count: `USER 0` reads as configured.

@@ -13,7 +13,9 @@ import re
 from . import (
     DOCKERFILE_API_PATH,
     DOCKERFILE_FRONTEND_PATH,
+    DOCKERFILE_SCHEDULER_PATH,
     DIGEST_RE,
+    REPO_ROOT,
     base_images,
     final_stage,
     instruction,
@@ -140,6 +142,30 @@ def test_no_entrypoint_script_is_declared_for_the_api():
     )
 
 
+# Every Dockerfile this repo builds. The tuple is asserted against the tree below rather than
+# trusted, because a gate over a collection that does not enumerate the collection reports the
+# whole set as verified while checking a subset - which preflight's gate 1 did for a whole phase
+# (CLAUDE.md § 22). A fourth Dockerfile must fail here until somebody adds it deliberately.
+BUILT_IMAGES = (DOCKERFILE_API_PATH, DOCKERFILE_FRONTEND_PATH, DOCKERFILE_SCHEDULER_PATH)
+
+
+def test_the_built_image_list_covers_every_dockerfile_in_the_repo():
+    """The enumeration the two checks below iterate is the whole of it.
+
+    Both of them loop over BUILT_IMAGES. If a new Dockerfile lands and is not added, both keep
+    passing and neither mentions it - a floating base and a shipped compiler with two green tests
+    above them. The glob is the same one verify/preflight.py walks, so the two cannot disagree
+    about what the stack is made of.
+    """
+    on_disk = sorted(path for path in REPO_ROOT.glob("Dockerfile*") if path.is_file())
+    assert on_disk, "no Dockerfiles found at all - this test is reading the wrong tree"
+    assert on_disk == sorted(BUILT_IMAGES), (
+        f"BUILT_IMAGES lists {[p.name for p in sorted(BUILT_IMAGES)]} but the repo holds "
+        f"{[p.name for p in on_disk]}. Every check that loops over BUILT_IMAGES is silently not "
+        f"looking at the difference."
+    )
+
+
 def test_the_base_image_is_pinned_by_digest():
     """Every FROM in both Dockerfiles, and the two stages of one image agree on the digest.
 
@@ -150,7 +176,7 @@ def test_the_base_image_is_pinned_by_digest():
     also exactly what a half-finished hand edit leaves behind — and this digest is hand-edited,
     because `verify/preflight.py --write-digest` only rewrites docker-compose.yml.
     """
-    for path in (DOCKERFILE_API_PATH, DOCKERFILE_FRONTEND_PATH):
+    for path in BUILT_IMAGES:
         text = read_artifact(path)
         references = base_images(text)
         assert references, f"{path.name} declares no FROM line"
@@ -188,7 +214,7 @@ def test_no_build_toolchain_survives_into_the_final_stage():
     The frontend image is checked too, and it is the one with something to lose: `npm ci` in the
     final stage would carry node_modules into the artifact image.
     """
-    for path in (DOCKERFILE_API_PATH, DOCKERFILE_FRONTEND_PATH):
+    for path in BUILT_IMAGES:
         base, lines = final_stage(read_artifact(path))
         body = "\n".join(lines)
 

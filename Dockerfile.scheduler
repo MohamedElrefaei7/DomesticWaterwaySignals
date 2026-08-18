@@ -1,0 +1,169 @@
+# The scheduler (APScheduler + every scheduled job) as a container, WITH A POSTGRES CLIENT IN IT.
+#
+# =============================================================================================
+# WHY THIS IMAGE CARRIES pg_dump/pg_restore INSTEAD OF THE DOCKER SOCKET
+# =============================================================================================
+#
+# Through Phase 11 the backup job shelled out to `docker run` against the pinned server image, so
+# the client and the server matched by construction. Containerising the scheduler forces a choice,
+# because a container cannot `docker run` without the host's Docker socket:
+#
+#   MOUNTING /var/run/docker.sock IS ROOT-EQUIVALENT ON THE HOST. Anything that can talk to the
+#   daemon can start a privileged container with / bind-mounted. A compromise of the container
+#   whose job is running scheduled Python would become a compromise of the instance, and it would
+#   do so through a mount that reads, in the Compose file, like plumbing. It also contradicts
+#   § 22's "application containers run as a non-root user" in substance while satisfying it in
+#   form: the process is uid 10001 and can still become root whenever it likes.
+#
+#   THE COST OF NOT MOUNTING IT IS A VERSION PIN IN TWO PLACES. The client major is here; the
+#   server major is in docker-compose.yml's `timescale/timescaledb:...-pg16` tag. Two copies of
+#   one fact drift, which is the failure this project names in half a dozen other places.
+#
+# THE TRADE IS ACCEPTED BECAUSE THE DRIFT IS DETECTABLE AND THE SOCKET'S BLAST RADIUS IS NOT.
+# Two independent checks, at two different times, close it:
+#
+#   1. `verify/preflight.py` gate "client and server postgres majors agree" parses the major out of
+#      the package pin BELOW and out of the compose tag, and compares them. It reads the FILES.
+#   2. `app/orchestration/backup.py` asserts `pg_dump --version`'s major equals the server's
+#      `SHOW server_version_num` major at job start, and fails the job. It reads the RUNNING
+#      BINARY and the RUNNING SERVER.
+#
+# Both are needed and the division is the point: a stale image passes (1) and fails (2), because
+# what the files say and what is installed are different claims. See CLAUDE.md § 3.
+#
+# ---------------------------------------------------------------------------------------------
+# THE CLIENT VERSION IS PINNED EXACTLY, AND ITS VALUE IS A PLACEHOLDER UNTIL A HUMAN RESOLVES IT
+# ---------------------------------------------------------------------------------------------
+#
+# Debian bookworm ships postgresql-client-15, so 16 comes from PGDG - where
+# `apt-get install postgresql-client-16` floats to whatever point release is current that morning.
+# That is `latest` on an image wearing a different hat (CLAUDE.md § 5): it resolves differently on
+# two builds three months apart, and the difference is invisible until a dump behaves oddly.
+#
+# So the pin below carries a FULL version string, and the committed value is one that CANNOT
+# RESOLVE - the same discipline as the placeholder digests in Dockerfile.api (CLAUDE.md § 12).
+# `apt-get` fails with `Version '...' for 'postgresql-client-16' was not found`, naming the package
+# and the version, rather than quietly installing whatever is current.
+#
+# TO RESOLVE IT, ON THE INSTANCE (never from a laptop - CLAUDE.md § 5), print the candidates:
+#
+#     docker run --rm python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a \
+#       sh -euxc 'apt-get update -qq && apt-get install -y -qq --no-install-recommends ca-certificates curl gnupg >/dev/null \
+#         && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /tmp/pgdg.asc \
+#         && gpg --show-keys --with-colons --with-fingerprint /tmp/pgdg.asc | awk -F: "/^fpr:/{print \$10; exit}" \
+#         && gpg --dearmor -o /usr/share/keyrings/pgdg.gpg /tmp/pgdg.asc \
+#         && . /etc/os-release \
+#         && echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
+#         && apt-get update -qq && apt-cache madison postgresql-client-16'
+#
+# Take the first version column, put it in PG_CLIENT_VERSION below, and record it in CONTEXT.md.
+# The command also prints the key's fingerprint, which must equal PGDG_KEY_FINGERPRINT below.
+#
+# ---------------------------------------------------------------------------------------------
+# THE BASE DIGESTS
+# ---------------------------------------------------------------------------------------------
+#
+# Both `FROM` lines carry the SAME tag@digest, for the reason Dockerfile.api states: two stages on
+# two resolutions of one tag is a runtime that is not the interpreter the wheels were installed
+# against, and it surfaces as an ImportError in a C extension that reads like a broken dependency.
+# `verify/preflight.py --write-digest` reads and rewrites both lines; do not hand-edit them.
+
+# ---------------------------------------------------------------------------------------------
+# Stage 1 - dependencies, and the PGDG apt source
+# ---------------------------------------------------------------------------------------------
+#
+# Everything that exists only in order to obtain something is here, so it is discarded: pip, curl,
+# gnupg, and the ASCII-armoured key. The runtime stage receives a virtualenv, a dearmored keyring
+# and a one-line sources file, and nothing that fetched them.
+FROM python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a AS build
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# requirements.txt only - the same file the api image installs, so the scheduler and the API cannot
+# be running two different psycopg or APScheduler versions. boto3 is in it, which is what the
+# backup and restore-test jobs need and what the host venv had to be activated for until now.
+COPY requirements.txt ./
+RUN pip install -r requirements.txt
+
+# THE PGDG SIGNING KEY, VERIFIED BY FINGERPRINT RATHER THAN MERELY DOWNLOADED.
+#
+# `curl ... | apt-key add -` trusts whatever answers the request, and this is a build running as
+# root that is about to install packages from the repository that key authorises. The fingerprint
+# below is the PostgreSQL Global Development Group's Debian repository key
+# (pgsql-pkg-debian@postgresql.org). The build FAILS if the fetched key does not carry it.
+#
+# `--with-colons` rather than the human-readable listing: the pretty form's spacing has changed
+# between gnupg versions, and a grep for a spaced fingerprint is a check that stops matching.
+#
+# A LITERAL, NOT AN `ARG`. An ARG carries a default and a `--build-arg` override, so the pin would
+# be advisory - a build could supply any fingerprint and any version from the command line, and the
+# committed file would still read as pinned. Neither of the two values this image is pinned by is
+# overridable from outside.
+RUN set -eux; \
+    expected_fingerprint=B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl gnupg; \
+    curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /tmp/pgdg.asc; \
+    observed="$(gpg --show-keys --with-colons --with-fingerprint /tmp/pgdg.asc | awk -F: '/^fpr:/ {print $10; exit}')"; \
+    if [ "$observed" != "$expected_fingerprint" ]; then \
+        echo "PGDG key fingerprint mismatch: observed ${observed}, expected ${expected_fingerprint}" >&2; \
+        exit 1; \
+    fi; \
+    mkdir -p /pgdg; \
+    gpg --dearmor -o /pgdg/pgdg.gpg /tmp/pgdg.asc; \
+    . /etc/os-release; \
+    echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" > /pgdg/pgdg.list; \
+    rm -rf /var/lib/apt/lists/* /tmp/pgdg.asc
+
+# ---------------------------------------------------------------------------------------------
+# Stage 2 - runtime
+# ---------------------------------------------------------------------------------------------
+FROM python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:$PATH"
+
+COPY --from=build /opt/venv /opt/venv
+COPY --from=build /pgdg/pgdg.gpg /usr/share/keyrings/pgdg.gpg
+COPY --from=build /pgdg/pgdg.list /etc/apt/sources.list.d/pgdg.list
+
+# postgresql-client-16 AT AN EXACT VERSION, AND NEVER postgresql-16.
+#
+# The server package runs initdb and creates a second Postgres cluster inside this image: wasteful,
+# and a live foot-gun the day anything starts it. Only the client binaries are wanted -
+# pg_dump, pg_restore, psql.
+#
+# The version is a placeholder that cannot resolve; see the header for how to obtain the real one.
+# A literal rather than an `ARG`, for the reason above: an overridable pin is not a pin.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends postgresql-client-16=16.0-0.PLACEHOLDER.pgdg120+0; \
+    apt-mark hold postgresql-client-16; \
+    rm -rf /var/lib/apt/lists/*; \
+    pg_dump --version; \
+    pg_restore --version
+
+WORKDIR /srv
+
+# `app/` and nothing else, for Dockerfile.api's reasons. `migrations/` is deliberately absent:
+# CLAUDE.md § 3 forbids migrations running on container start, and the cheapest way to make that
+# impossible is for the image not to contain them.
+COPY app/ ./app/
+
+# NON-ROOT, and the SAME uid as the api image (10001), because both write nothing and read the same
+# tree. It matters here for one more reason than it does there: this container bind-mounts
+# /mnt/data/backups and writes an archive into it, so the uid is the thing that has to own the
+# directory on the host.
+RUN groupadd --system --gid 10001 dws \
+ && useradd --system --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin dws
+USER dws
+
+# EXEC FORM, WITH THE SCHEDULER AS argv[0]. No entrypoint script and no shell, so there is nothing
+# for a `migrate &&` to be chained onto - the same reasoning as Dockerfile.api's CMD, and it lands
+# harder here, because this is the image that would find a migration runner convenient.
+CMD ["python", "-m", "app.orchestration.scheduler"]

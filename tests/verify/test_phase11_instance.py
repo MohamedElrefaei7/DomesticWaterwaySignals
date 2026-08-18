@@ -132,29 +132,35 @@ def test_all_grants_present_returns_cleanly():
 # ---------------------------------------------------------------------------------------------
 
 REAL_PREFLIGHT_LINE = (
-    "  - every image reference across docker-compose.yml, Dockerfile.api, Dockerfile.frontend "
-    "was enumerated (6 found)\n"
+    "  - every image reference across docker-compose.yml, Dockerfile.api, Dockerfile.frontend, "
+    "Dockerfile.scheduler was enumerated (8 found)\n"
 )
 
 
 def test_e_parses_preflight_rather_than_recounting():
     count, files = stage_e.parse_preflight_enumeration(REAL_PREFLIGHT_LINE)
-    assert count == 6
-    assert files == ["docker-compose.yml", "Dockerfile.api", "Dockerfile.frontend"]
+    assert count == 8
+    assert files == [
+        "docker-compose.yml", "Dockerfile.api", "Dockerfile.frontend", "Dockerfile.scheduler"
+    ]
 
 
-def test_e_fails_when_preflight_count_is_not_six():
-    """Six references across three files, MEASURED against this repo on 2026-08-17.
+def test_e_fails_when_preflight_count_is_not_the_measured_one():
+    """EIGHT references across FOUR files, measured against this repo 2026-08-17 (Phase 12).
 
-    Below six means a reference is not being gated - § 22's gate 1 checking one reference out of
-    five while reporting the stack as pinned. Above six means something arrived that needs a pin.
+    It was six across three until Dockerfile.scheduler landed. Below the expected count means a
+    reference is not being gated - § 22's gate 1 checking one reference out of five while
+    reporting the stack as pinned. Above it means something arrived that needs a pin.
+
+    RENAMED from `..._is_not_six`, and the rename is not cosmetic: a test named for a number it no
+    longer asserts is a green check teaching the next reader a fact that stopped being true.
     """
-    five = REAL_PREFLIGHT_LINE.replace("(6 found)", "(5 found)")
-    count, files = stage_e.parse_preflight_enumeration(five)
+    seven = REAL_PREFLIGHT_LINE.replace("(8 found)", "(7 found)")
+    count, files = stage_e.parse_preflight_enumeration(seven)
     result = stage_e.check_preflight_enumeration(count, files)
 
     assert result.status == FAIL
-    assert "5 references across 3 files" in result.observed
+    assert "7 references across 4 files" in result.observed
     assert "not being gated" in result.observed
 
     count, files = stage_e.parse_preflight_enumeration(REAL_PREFLIGHT_LINE)
@@ -171,7 +177,7 @@ def test_e_stops_rather_than_guessing_when_preflight_output_changes_shape():
 def test_e_reads_the_real_preflight_output_and_agrees():
     """Against this repo, not against a fixture of it. The count is a fact about the tree."""
     count, files = stage_e.parse_preflight_enumeration(stage_e._preflight_output())
-    assert (count, len(files)) == (6, 3), (count, files)
+    assert (count, len(files)) == (8, 4), (count, files)
     assert stage_e.check_preflight_enumeration(count, files).status == PASS
 
 

@@ -747,6 +747,242 @@ def check_migration_count(applied: int, on_disk: int) -> Result:
 
 
 # ---------------------------------------------------------------------------------------------
+# The postgres client/server major agreement
+# ---------------------------------------------------------------------------------------------
+#
+# WHY THIS GATE EXISTS AT ALL: THE SCHEDULER CONTAINER DOES NOT GET THE DOCKER SOCKET.
+#
+# Through Phase 11 the backup job ran `pg_dump` in a one-shot container off the SAME pinned digest
+# as the server, so the client and the server matched mechanically. Containerising the scheduler
+# (Phase 12) makes that impossible without mounting /var/run/docker.sock, which is root-equivalent
+# on the host - a permanent widening of blast radius in exchange for a convenience.
+#
+# So the client moved INTO the scheduler image, and the version agreement that used to be a
+# property of the digest became two numbers in two files. Two copies of one fact drift silently;
+# this project says so in half a dozen places. The trade is accepted because THIS drift is
+# detectable, and this is the check that detects it.
+#
+# THE MAJORS ARE DERIVED FROM THE FILES. NEITHER IS A CONSTANT HERE.
+#
+# The wrong version of this gate hardcodes `16` as the expected major. It passes forever, it reads
+# as careful, and the day somebody bumps the server to pg17 it goes on passing while the client is
+# a major behind - a check that cannot fail, reporting correct about the exact thing it stopped
+# watching (CLAUDE.md § 2, theme 2). The server major is parsed out of the compose tag and the
+# client major out of the package pin, and BOTH observed values are reported on every outcome, so
+# a hardcoded expectation is visible in the output rather than only in the source.
+#
+# EQUALITY, NOT COMPATIBILITY. `pg_dump` older than the server refuses outright; newer than the
+# server usually works and is not what anything here was verified against. "Usually works" is not
+# an assertable property, and the version that accepts it (`server >= client`) passes a pg17 server
+# with a client 16 - which is precisely the case that produces a subtly wrong archive.
+#
+# The RUNTIME counterpart lives in app/orchestration/backup.py, which compares the actual
+# `pg_dump --version` against the actual `SHOW server_version_num`. Both are needed: this reads
+# what the files say, that reads what is installed. A stale image passes here and fails there.
+
+SCHEDULER_DOCKERFILE = REPO_ROOT / "Dockerfile.scheduler"
+
+# The compose service whose image tag names the server's major.
+SERVER_SERVICE = "timescaledb"
+
+# A marker rather than a full literal, so that no postgres major number is written down in this
+# file at all - see the block above. A committed pin containing it is an unresolved placeholder.
+PLACEHOLDER_MARKER = "PLACEHOLDER"
+
+_COMPOSE_SERVICE_RE = re.compile(r"^  (?P<name>[A-Za-z0-9_-]+):\s*$")
+
+# `2.26.2-pg16`, `2.26.2-pg16-oss`, `pg16`. The major is the digits after a `pg` that is either at
+# the start of the tag or preceded by a separator - so `2.26.2` never reads as a major, and a
+# future `-pg17-something` still does.
+_PG_MAJOR_RE = re.compile(r"(?:^|[-_.])pg(?P<major>\d+)(?![0-9])")
+
+# `postgresql-client-16=16.10-1.pgdg120+1`, with or without the `=version`. The absence of the
+# version part is a distinct finding, not a parse failure: `postgresql-client-16` on its own is a
+# FLOATING pin that resolves to whatever point release is current on the machine that builds.
+_CLIENT_PIN_RE = re.compile(
+    r"postgresql-client-(?P<major>\d+)(?:=(?P<version>[^\s\\\"';]+))?"
+)
+
+
+@dataclass(frozen=True)
+class ServerMajor:
+    """The postgres major the compose file's server image declares, and what it was read from."""
+
+    major: int | None
+    observed: str
+
+
+@dataclass(frozen=True)
+class ClientPin:
+    """The postgres client pin the scheduler image declares, and what it was read from."""
+
+    major: int | None
+    version: str | None
+    observed: str
+
+
+def server_postgres_major(compose_text: str, service: str = SERVER_SERVICE) -> ServerMajor:
+    """Parse the server's postgres major out of the compose `image:` tag.
+
+    READ, NEVER HARDCODED. The digest is already written down once; the major is already written
+    down once, inside the tag beside it. A constant here would be a third copy of a fact that
+    exists twice, and it would be the copy that never changes.
+    """
+    current = None
+    for line in compose_text.splitlines():
+        service_match = _COMPOSE_SERVICE_RE.match(line)
+        if service_match is not None:
+            current = service_match.group("name")
+            continue
+        image_match = _IMAGE_LINE_RE.match(line)
+        if image_match is None or current != service:
+            continue
+
+        reference = image_match.group("reference")
+        tag = parse_image_reference(reference).tag
+        if tag is None:
+            return ServerMajor(None, f"{reference} (no tag, so no major to read)")
+        major_match = _PG_MAJOR_RE.search(tag)
+        if major_match is None:
+            return ServerMajor(None, f"{reference} (tag {tag!r} names no `pgNN` major)")
+        return ServerMajor(int(major_match.group("major")), reference)
+
+    return ServerMajor(None, f"no `image:` line for the {service!r} service")
+
+
+def dockerfile_instructions(dockerfile_text: str) -> str:
+    """A Dockerfile with its `#` comment lines removed.
+
+    THE PARSER MUST NOT READ THE FILE'S OWN EXPLANATION OF ITSELF, and this is not hypothetical -
+    it was measured on the first run of this gate. Dockerfile.scheduler's header explains that
+    "Debian bookworm ships postgresql-client-15, so 16 comes from PGDG", and a search over the raw
+    text found that sentence first and reported the image as pinning a client 15 with no version.
+    A correct file, read as broken, by a check reading prose as configuration.
+
+    That is CLAUDE.md § 23's rule about a source-scanning guard matching its own justification, and
+    the repair it warns against is loosening the pattern until the sentence stops matching - which
+    makes the pattern weaker everywhere else too. Strip the comments instead, which is what
+    tests/deploy's Caddyfile reader and test_migration_ordering.py already do for the same reason.
+    """
+    kept = [line for line in dockerfile_text.splitlines() if not line.lstrip().startswith("#")]
+    return "\n".join(kept)
+
+
+def client_postgres_pin(dockerfile_text: str) -> ClientPin:
+    """The client major and exact version the scheduler image INSTALLS, comments excluded.
+
+    EVERY occurrence is collected rather than the first, and the versioned ones decide the answer.
+    A first-match parser is correct only for as long as the `apt-get install` line stays above the
+    `apt-mark hold` line beside it - and "which line comes first" is precisely the kind of
+    load-bearing file order this project has already been bitten by once, in preflight gate 1.
+    Order-independence costs four lines here and removes the trap.
+    """
+    matches = list(_CLIENT_PIN_RE.finditer(dockerfile_instructions(dockerfile_text)))
+    if not matches:
+        return ClientPin(None, None, "no `postgresql-client-NN` package pin in any instruction")
+
+    majors = sorted({int(m.group("major")) for m in matches})
+    if len(majors) > 1:
+        return ClientPin(
+            None, None,
+            f"the image names more than one client major: {majors}. Which one pg_dump ends up "
+            f"being is decided by apt, not by this file.",
+        )
+
+    versioned = sorted({m.group("version") for m in matches if m.group("version")})
+    if len(versioned) > 1:
+        return ClientPin(
+            majors[0], None,
+            f"the image pins postgresql-client-{majors[0]} to more than one version: {versioned}",
+        )
+
+    version = versioned[0] if versioned else None
+    observed = (
+        f"postgresql-client-{majors[0]}={version}" if version
+        else f"postgresql-client-{majors[0]} (no `=version`)"
+    )
+    return ClientPin(majors[0], version, observed)
+
+
+def check_client_server_major_agreement(server: ServerMajor, client: ClientPin) -> Result:
+    """One check, five distinct failures, every one reporting BOTH observed values.
+
+    Both values on every message, including the ones where only one of them is at fault: an
+    operator reading "the client pin has no version" still has to know which server it is supposed
+    to match, and going to find out is the round trip the harness already had the answer to
+    (CLAUDE.md § 13).
+    """
+    name = "postgres client and server majors agree"
+    observed = (
+        f"observed: server {server.observed}\n"
+        f"         observed: client {client.observed}"
+    )
+
+    if server.major is None:
+        return Result(
+            name,
+            FAIL,
+            f"{observed}\n"
+            f"         the SERVER major could not be read. Without it there is nothing to compare "
+            f"the client against, and a gate that cannot tell must not report agreement.",
+        )
+
+    if client.major is None:
+        return Result(
+            name,
+            FAIL,
+            f"{observed}\n"
+            f"         the CLIENT major could not be read from {SCHEDULER_DOCKERFILE.name}. The "
+            f"scheduler image is where pg_dump comes from now that the Docker socket is not "
+            f"mounted; an image with no client pin has no pg_dump at all.",
+        )
+
+    if client.version is None:
+        return Result(
+            name,
+            FAIL,
+            f"{observed}\n"
+            f"         the client pin carries NO EXACT VERSION. Debian bookworm ships "
+            f"postgresql-client-15, so {client.major} comes from PGDG, where a major-only pin "
+            f"floats to whatever point release is current on the morning of the build. That is "
+            f"`latest` on an image wearing a different hat: it resolves differently on two builds "
+            f"three months apart and the difference is invisible until a dump behaves oddly. Pin "
+            f"the full version string.",
+        )
+
+    if PLACEHOLDER_MARKER in client.version:
+        return Result(
+            name,
+            FAIL,
+            f"{observed}\n"
+            f"         the client version is the committed PLACEHOLDER, not a resolved one - wrong "
+            f"by value rather than by form, the same way the all-zero digest is. Resolve it ON THE "
+            f"INSTANCE (CLAUDE.md § 5) with the `apt-cache madison` command in "
+            f"{SCHEDULER_DOCKERFILE.name}'s header, write the version into the pin, and record it "
+            f"in CONTEXT.md.",
+        )
+
+    if client.major != server.major:
+        return Result(
+            name,
+            FAIL,
+            f"{observed}\n"
+            f"         MAJORS DIFFER: server {server.major}, client {client.major}. Equality, not "
+            f"compatibility - pg_dump older than the server refuses outright, and newer than the "
+            f"server usually works but is not what this was verified against. Since the scheduler "
+            f"container has no Docker socket, this pair is the only thing making the dump's client "
+            f"match the server it dumps.",
+        )
+
+    return Result(
+        name,
+        PASS,
+        f"server major {server.major} ({server.observed})\n"
+        f"         client major {client.major} pinned at {client.version}",
+    )
+
+
+# ---------------------------------------------------------------------------------------------
 # The gates, run against the real machine
 # ---------------------------------------------------------------------------------------------
 
@@ -833,8 +1069,37 @@ def gate_migrations() -> list[Result]:
     return [check_migration_count(applied, on_disk)]
 
 
+def gate_client_server_majors() -> list[Result]:
+    """One result. Reads both files; neither major is a constant in this module.
+
+    A missing file is a FAIL rather than a SKIP. The other gates SKIP on a missing `.env` or a
+    missing data volume because those are legitimately absent off the instance; a Dockerfile this
+    repo commits is not, so its absence means the walk is looking at the wrong tree - and a SKIP
+    would read as "nothing to object to" (CLAUDE.md § 13).
+    """
+    try:
+        compose_text = COMPOSE_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [Result("postgres client and server majors agree", FAIL,
+                       f"observed: could not read {COMPOSE_PATH}: {exc}")]
+    try:
+        dockerfile_text = SCHEDULER_DOCKERFILE.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [Result("postgres client and server majors agree", FAIL,
+                       f"observed: could not read {SCHEDULER_DOCKERFILE}: {exc}\n"
+                       f"         this is where pg_dump comes from now that the scheduler "
+                       f"container has no Docker socket.")]
+
+    return [
+        check_client_server_major_agreement(
+            server_postgres_major(compose_text), client_postgres_pin(dockerfile_text)
+        )
+    ]
+
+
 def run_all_gates() -> list[Result]:
     results = gate_images()
+    results.extend(gate_client_server_majors())
     results.extend(gate_env())
     results.extend(gate_data_volume())
     results.extend(gate_migrations())

@@ -11,6 +11,11 @@ drifts is always the one nobody is looking at. So this invokes preflight and rea
 MEASURED 2026-08-17: six references across three files - docker-compose.yml (timescaledb, caddy),
 Dockerfile.api (build, runtime) and Dockerfile.frontend (build, artifact).
 
+UPDATED, PHASE 12: EIGHT references across FOUR files. `Dockerfile.scheduler` (build, runtime)
+joins them - the scheduler image, which carries pg_dump so that the scheduler container never needs
+the Docker socket. The constants below moved with it, deliberately and in the commit that added the
+file: they are the tripwire for a Dockerfile landing without anybody noticing it was not walked.
+
 NO IMAGE WAS RE-PULLED, and the reason this is worth a check rather than a shrug: a running
 container's image ID is what Docker actually resolved, and the digest in the Compose file is what
 this repo says it should have resolved. If those disagree, the pin did not hold - and the guard
@@ -49,8 +54,8 @@ ENUMERATION_LINE = re.compile(
     r"every image reference across (?P<files>.+?) was enumerated \((?P<count>\d+) found\)"
 )
 
-EXPECTED_REFERENCES = 6
-EXPECTED_FILES = 3
+EXPECTED_REFERENCES = 8
+EXPECTED_FILES = 4
 
 
 def parse_preflight_enumeration(text: str) -> tuple[int, list[str]]:

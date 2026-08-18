@@ -95,6 +95,56 @@ no longer matches the data:
 
 ---
 
+## Phase 12 — the scheduler runs in production
+
+**THE FINDING THAT SCOPES THE PHASE: THE SCHEDULER HAS NEVER RUN IN PRODUCTION.** `job_runs` holds
+two probe rows from 2026-08-11 written by `verify/` harnesses and nothing else. `apscheduler_jobs`
+exists - created by `SQLAlchemyJobStore`'s own DDL during a Phase 2 run - and holds **zero rows**.
+There is no `dws-scheduler.service`; the units are `dws-external-interface`, `dws-docker-firewall`
+and `dws-stack`. Every ingest row in the database arrived by manual backfill. So this is not
+"containerise an existing process"; it is "make the scheduler exist as a running thing for the
+first time". The empty job store is luck: the first real start is from zero entries, with no
+past-due backlog to reason about.
+
+### Part 1 — `Dockerfile.scheduler`, and the decision that shapes Parts 1, 3 and 4
+
+**THE SCHEDULER CONTAINER DOES NOT GET THE DOCKER SOCKET.** Mounting it is root-equivalent on the
+host, so a compromise of the container whose job is running scheduled Python becomes a compromise
+of the instance - a large, permanent widening of blast radius for a convenience. `pg_dump` and
+`pg_restore` are installed into the image instead, pinned to the server's major. The cost is a
+version pin in two places (`Dockerfile.scheduler` and the compose tag) which can drift; that cost
+is accepted because the drift is **detectable** - a preflight gate reads the files, and a runtime
+check reads the running binary - **whereas the socket trades a detectable problem for an
+undetectable one.** Recorded as a contract in `CLAUDE.md § 3` and `§ 22`.
+
+**THE CLIENT VERSION IS AN UNRESOLVED PLACEHOLDER AND THE BUILD WILL FAIL UNTIL A HUMAN RESOLVES
+IT.** `postgresql-client-16=16.0-0.PLACEHOLDER.pgdg120+0` cannot resolve against PGDG, which is the
+point: it is the digest placeholder's discipline applied to a package (`CLAUDE.md § 12`). It must
+be resolved **on the instance**, never from a laptop, with the `apt-cache madison` command in
+`Dockerfile.scheduler`'s header, and **the resolved version recorded here**. Until then
+`verify/preflight.py` reports the new gate as FAIL - by value, not by form - naming the command.
+**Resolved version: NOT YET RESOLVED.**
+
+**The PGDG signing key is verified by fingerprint** - `B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8`,
+the PostgreSQL Global Development Group's Debian repository key - against a literal in the
+Dockerfile, and the build exits non-zero on a mismatch. The fingerprint is written down a second,
+independent time in `tests/deploy/test_client_server_major_agreement.py`: a test that read the value
+out of the file it is checking would assert only that *some* fingerprint is present.
+
+**Preflight now enumerates eight references across four files** (was six across three).
+`verify/phase11/stage_e.py`'s `EXPECTED_REFERENCES`/`EXPECTED_FILES` moved with it, in the same
+commit, and the test named for the old number was renamed rather than left describing a count it no
+longer asserts.
+
+**Measured while writing the gate, and it is `§ 23` in miniature:** the first version searched the
+raw Dockerfile text for `postgresql-client-NN` and found the header sentence "Debian bookworm ships
+postgresql-client-15, so 16 comes from PGDG" *before* the instruction - reporting a correct file as
+pinning client 15 with no version. The parser strips comments; the guard against the repair
+somebody reaches for (a weaker pattern) is an **inverted mutation** test that puts two plausible
+pins in comments and requires the parser to stay green.
+
+---
+
 ## § Up Next
 
 **THE DEPLOYMENT RUNBOOK IS `docs/runbooks/phase-11.md`, IN THE REPO AND VERSIONED.** It executes
