@@ -14,6 +14,51 @@ current (`../CONTEXT.md`).
 
 **Read order for someone new:** `../CONTEXT.md` → `findings.md` → this file.
 
+## Phase 13 — cluster settings under version control, and the chunk interval
+
+**Two commits, both unapplied to the instance at the time of writing.**
+
+### `3dee5c7` — the cluster's 33 settings were untracked
+
+`infra/postgres/settings.py`, a preflight gate, `docs/runbooks/cluster-settings.md`, 15 tests.
+
+- `REQUIRED_SETTINGS` enforced (`max_locks_per_transaction >= 512`), `TUNER_BASELINE` recorded and
+  never enforced. Merging them makes the gate fail on a correctly re-derived cluster of a
+  different size.
+- The gate reads the running value **and** `pending_restart`, with distinct messages.
+- **The prompt's mutation-1 fixture did not work and was corrected.** On a normal *raise* the
+  running value is still the old, failing one, so a `setting`-only gate fails anyway. The
+  discriminating fixture is a setting being **lowered**: running value 512, `pending_restart` true.
+  Under mutation 1 that returns `PASS`.
+- **The baseline was not populated and was not invented.** The 33 values are recorded nowhere in
+  the repo and no agent connects to the instance (§ 9). `--write-baseline` captures them, as
+  `--write-digest` does for digests.
+
+Six mutations confirmed, each restored from a pristine copy, under `PYTHONDONTWRITEBYTECODE=1`.
+
+### `78eb514` — 986 chunks become tens
+
+`migrations/0027_gauge_readings_iv_chunk_interval.sql`, `tests/db/`, 18 tests (9 unit, 9
+integration against a real TimescaleDB).
+
+- **`gauge_series` binds by OID and would have followed the rename onto the archive.** Not in the
+  prompt; found by reading 0010 before writing the migration. Silent — the archive holds identical
+  data at commit time, so the view returns identical rows and diverges only on the next ingest.
+- **An advisory lock was rejected, not deferred:** `usgs_ingest` takes none, so
+  `pg_try_advisory_lock` would succeed against a running ingest and report the coast clear.
+- Seven mutations confirmed. The most valuable was not on the prompt's list: replacing the whole
+  rewrite with a bare `set_chunk_time_interval` — the one-statement half-fix the migration's header
+  warns about — leaves **312 chunks of 312** and turns six integration tests red.
+- `verify/phase11/stage_f.py::EXPECTED_MIGRATIONS` 26 → 27. **The pin going red is the pin
+  working.** Its companion test now reads the constant instead of repeating the literal four times.
+
+### Live verification is outstanding for both
+
+`ALTER SYSTEM` + restart, then 0027 with the scheduler stopped. The after-state compression figures
+are **not** recorded in `docs/findings.md` because none have been taken; the section says so
+explicitly rather than carrying a placeholder that reads as a measurement.
+
+
 ## Contents
 
 | Phase | Built | Verified on the instance |

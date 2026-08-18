@@ -1138,6 +1138,29 @@ back in.
 
 ## Standing items, carried until somebody closes them
 
+**`gauge_readings_iv_archived_20260818` is waiting for a human `DROP`, and it is not free.**
+Migration 0027 archived the pre-consolidation hypertable rather than dropping it (§ 3: only a human
+runs a `DROP`). Until somebody does:
+
+- It **roughly doubles `gauge_readings_iv`'s footprint** — the pre-consolidation total was
+  134,946,816 B before compression, 40,181,760 B after.
+- It is in **every nightly backup**. Expect `backups.byte_size` to step up from 8,535,888 on the
+  next run; the delta is the archive.
+- It appears in the **restore test's per-table `row_counts`**, which compares key sets in both
+  directions with no tolerance (§ 3) — so it is not a silent passenger, it is a table the restore
+  test will assert about.
+- Nothing reads it. `gauge_series` was repointed at the new table in the same migration, and a
+  `pg_depend` check in 0027 asserts nothing is left depending on it.
+
+**There is no migration that will drop it and there should not be one.** Dropping it is a decision
+about whether the pre-consolidation copy is still wanted, and that is the human's.
+
+**The tuner baseline has never been captured.** `infra/postgres/tuner-baseline.json` carries the
+`NEVER-CAPTURED` sentinel. Run `python verify/preflight.py --write-baseline` on the instance,
+review the diff, and commit it. Until then a rebuild has nothing to be compared against, which is
+the whole point of the file.
+
+
 0. ~~**`verify/preflight.py` gate 1 covers one image reference out of three, and no Dockerfile
    `FROM` at all.**~~ **CLOSED 2026-08-17.** Gate 1 enumerates every `image:` in
    `docker-compose.yml` and every `FROM` in every Dockerfile — six references across three files —

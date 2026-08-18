@@ -191,11 +191,70 @@ columnar compression flattens.
 entirely adequate.** TimescaleDB here is a demonstrated engineering choice, not a necessity the
 data forced. No README line may imply otherwise.
 
-**Tuning candidate, logged and NOT acted on:** 986 chunks for 258,739 IV rows is the main drag on
-that table's ratio — a 7-day interval across 1990–2026 with only one dense site leaves many sparse
-chunks carrying fixed per-chunk overhead. A 30-day interval would likely improve both the ratio and
-planning. **Chunk interval changes affect NEW chunks only**, so this is a deliberate future
-migration on a considered date, not a fix to slip in.
+### The chunk interval — logged as a tuning candidate, then acted on when it stopped being one
+
+**The original note, kept verbatim because the escalation is the finding:** *986 chunks for 258,739
+IV rows is the main drag on that table's ratio — a 7-day interval across 1990–2026 with only one
+dense site leaves many sparse chunks carrying fixed per-chunk overhead. A 30-day interval would
+likely improve both the ratio and planning. Chunk interval changes affect NEW chunks only, so this
+is a deliberate future migration on a considered date, not a fix to slip in.*
+
+**It was filed as a ratio problem and it was a correctness problem.** On 2026-08-18 a bare
+`SELECT min(ts), max(ts), count(*) FROM gauge_readings_iv` failed outright:
+
+```
+ERROR:  out of shared memory
+HINT:  You might need to increase max_locks_per_transaction.
+```
+
+A full-table query takes a lock per chunk plus one per index per chunk — roughly **2,000 slots**
+against a cluster lock table of `128 × (25 + 0) = 3,200`, cluster-wide and shared. The project's
+largest table was **not fully queryable**, and the heartbeat reported `CANNOT BE CHECKED` for it.
+Intermittent, because the threshold is concurrency-dependent: it appeared, vanished after a
+rebuild, and returned once the nightly backup added lock demand.
+
+**Nothing in the original note was wrong. What it got wrong was the SEVERITY**, and it did so in a
+predictable direction: the measurable consequence (a worse ratio) was visible in a table already
+being measured, and the unmeasurable one (lock exhaustion at some unknown concurrency) was not in
+any table at all. A finding logged against the number you happen to be looking at is filed at the
+severity of that number.
+
+Closed by migration `0027` (365-day interval, existing chunks consolidated by rewrite) and by
+`max_locks_per_transaction = 512` (`infra/postgres/settings.py`).
+
+### `gauge_readings_iv` before consolidation — 2026-08-18, the baseline 0027 is measured against
+
+`SELECT * FROM hypertable_compression_stats('gauge_readings_iv')`, immediately before 0027:
+
+| | Before compression | After compression | Ratio |
+|---|---|---|---|
+| Table | 56,451,072 B | 16,072,704 B | **3.51:1** |
+| Index | 70,459,392 B | 16,072,704 B | **4.38:1** |
+| Toast | 8,036,352 B | 8,036,352 B | 1.00:1 |
+| **Total** | **134,946,816 B** | **40,181,760 B** | **3.36:1** |
+
+986 chunks, 981 compressed. **The index was the larger share of the before-size** (70.5 MB against
+56.5 MB of table data) and compressed hardest, which is the evidence for the "most of the win is in
+indexes" claim above, stated as a split rather than as one headline ratio.
+
+*(These differ slightly from the two-hypertable table above — 134,791,168 → 40,140,800 — because
+that measurement was taken earlier, with fewer rows ingested. Both are real; neither supersedes the
+other. The 2026-08-18 figures are the ones 0027's after-state must be compared against.)*
+
+### After consolidation — NOT YET MEASURED
+
+**No after-figures are recorded here because none have been taken.** 0027 is committed and
+mutation-confirmed but has not been applied to the instance; the after-state comes from live
+verification step 6 and is transcribed by a human, per `CLAUDE.md § 13` (a verifier never writes to
+a tracked file).
+
+**The direction is genuinely uncertain and is worth stating before the number arrives**, so that
+whatever lands is read rather than rationalised. Fewer, larger chunks compress better per segment —
+longer runs per `segmentby` group, less per-chunk framing overhead. But the *uncompressed baseline
+shrinks too*, because much of that 134.9 MB is per-chunk fixed cost across 986 chunks that will not
+exist afterwards. **The ratio could fall while the absolute size falls further**, and that would be
+a win being reported as a regression by the headline number. Record both, and record the chunk
+counts beside them.
 
 
 ---

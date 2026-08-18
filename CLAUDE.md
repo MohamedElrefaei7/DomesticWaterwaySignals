@@ -1517,6 +1517,17 @@ every layer agreed with itself. Nothing was wrong anywhere except that the row w
   operational test of which kind you have: mutate the behaviour. Under the illegitimate kind the
   test stays green — that is the failure. Under the legitimate kind there is no behaviour to mutate,
   only the source, and mutating it turns the test red.**
+- **"The prose describing a rule matches the rule's own pattern" is a RECURRING SHAPE, not three
+  incidents, and it now has its own statement in § 24.** The general form: **any check whose
+  subject is text must exclude the text that documents the check** — and the fix is always to
+  narrow the SUBJECT, never to weaken the pattern, because the weaker pattern is what the failure
+  invites and it silently stops catching the thing. Four occurrences: preflight's version parser
+  reading a Dockerfile comment (§ 3); the two module docstrings that name the call their own scan
+  forbids (below); `test_no_transaction_marker_only_counts_on_the_first_line` (§ 12); and the first
+  draft of `test_nothing_in_the_repo_issues_alter_system`, which matched the gate's own failure
+  message telling an operator to run `ALTER SYSTEM`. **Assume the fifth exists in whatever you are
+  writing** — if a guard's subject is source text, name the exclusion before running it, not after
+  it goes red on a correct file.
 - **A source-scanning guard walks the AST, never a regex, and confirms both that it resolved the
   source tree and that it found something.** The modules this guard covers contain the forbidden
   call in their own docstrings, in the sentences explaining why it is forbidden; a regex matches its
