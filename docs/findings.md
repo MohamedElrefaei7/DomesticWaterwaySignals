@@ -1408,3 +1408,159 @@ behind the claim above, and it is the reason rows 1–5 were not enough on their
 **A seventh, diagnostic run** applied mutations 1 and 4 together — the exact state the instance was
 in — and produced `Password: ` followed by `fe_sendauth: no password supplied`, which is what
 isolates the prompt as the mechanism rather than the credential.
+
+---
+
+### Freshness thresholds were set from expectation, and three of five tripped on correct data — 2026-08-18
+
+**Measured on the instance with zero jobs overdue and every source publishing on schedule.** The
+heartbeat's only remaining alert was table staleness, and it was wrong.
+
+| Table | Cycle | Observed lag | Old threshold | State on 2026-08-18 | New |
+|---|---|---|---|---|---|
+| `gauge_readings_iv` | 1 h (poll) | 2 h *(assumed)* | 6 h | fresh | **6 h — unchanged** |
+| `gauge_readings_daily` | 1 day | **2 days** (measured) | 48 h | **STALE** | **4 days** |
+| `barge_rates` | 7 days | 3 days *(assumed)* | 10 days | fresh at 7d21h | **17 days** |
+| `lock_movements` | 7 days | **≥3 days** (measured) | 10 days | **STALE** | **17 days** |
+| `features` | 1 day | **2 days** | 48 h | fresh | **4 days** |
+
+**The measurements.** `gauge_readings_daily`: 4 rows/day, every day, no gaps; newest date 2026-08-16
+on 2026-08-18 — USGS finalises a daily value about two days after the day it describes.
+`lock_movements`: `week_ending` every 7 days with no gaps — 2026-08-08, 08-01, 07-25, 07-18, all
+Saturdays — and 08-15 not yet published three days after that week closed, so the lag is a **lower
+bound**, not a point estimate.
+
+**Two compounding factors that the old comments missed.**
+
+1. **Neither weekly comment counted the publication lag at all.** The 10-day reasoning was "up to 7
+   days old before anything has gone wrong, add a holiday week, 8 or 9 days is still healthy" — a
+   careful-sounding argument that is one whole term short. 7 + 3 = 10 during correct operation.
+2. **A `date` column is anchored at midnight UTC** by `_as_utc_datetime`, adding up to 24 hours of
+   apparent age. Four of the five entries are date-keyed. `gauge_readings_daily` at a 48-hour
+   threshold was therefore over the line for most of every day even when the lag was exactly 2 days.
+
+#### THE GENERAL RULE — second instance after `d-pre`
+
+> **A threshold set from expectation rather than from the source's measured behaviour will sit at
+> its boundary during normal operation, and an alarm that fires during correct operation is one that
+> stops being read.**
+
+`d-pre` was the first instance: a guard that goes red on the correct state trains its own removal.
+The failure here is not tuning — it is that a threshold inside its own normal range **cannot answer
+the only question it exists to answer**, which is "is the source still publishing".
+
+**The derivation, applied to all five rather than to the two that complained:**
+
+    max_staleness  >=  cycle  +  observed_lag  +  one missed publication (a second cycle)
+
+**`barge_rates` is why "all five" matters.** It read `fresh` at 7d21h purely because it sat earlier
+in its cycle than `lock_movements` did — identical publisher, identical weekly `week_ending` label,
+identical defect, days from tripping. Fixing the two red ones and leaving it is how this recurs.
+
+**The arithmetic is committed, not the number.** `cycle` and `observed_lag` are fields on
+`Freshness`, and each entry carries a `# DERIVATION:` line that
+`test_each_threshold_records_its_derivation` **parses** — comparing the stated cycle against `cycle`,
+the stated lag against `observed_lag`, the missed-publication term against one cycle, the stated
+total against their sum, and `max_staleness` against the total. A comment that merely *exists* is not
+enough: one that disagrees with the value beside it is worse than none, because it reads as a
+justification. **Re-measuring is the response to a threshold that starts tripping**, not widening or
+tightening by feel.
+
+#### CONTENT AGE AND INGESTION AGE ARE DIFFERENT QUESTIONS
+
+**None of these tables carries an ingestion timestamp, and that is by design.**
+`gauge_readings_daily` is `(usgs_site_id, date, param_code, stat_cd, value, qualifiers)`;
+`lock_movements` and `barge_rates` are keyed on `week_ending`. So this check can only measure content
+age — "is the source still publishing".
+
+**"Is the pipeline running" is already answered, by `job_runs`.** Measured the same day: the
+heartbeat reported `usgs_daily_ingest: ok` with a last success minutes old while this table's newest
+content was two days behind. **Both statements are true and both are useful**, and their disagreement
+is the diagnosis (§ 20).
+
+**The obvious fix for a permanently-stale table is to add an `ingested_at` column and measure that
+instead. It would make every entry read green forever** — by silently converting this check into a
+second copy of the one `job_runs` already performs, leaving nobody at all watching the source. That
+is `CLAUDE.md § 4`'s "liveness is measured from the DATA" being deleted by something that looks like
+a fix.
+
+#### FOUR THINGS FOUND ALONG THE WAY
+
+**1. What `features` rows are actually stamped with — the registry's comment was wrong.** It claimed
+the newest feature date "comes from the daily-values job". It does not: `features` is built from
+`gauge_daily`, which `app/features/rollup.py` reads from the **`gauge_series` view**, whose 0010
+precedence rule takes the **instantaneous** row wherever one exists and falls back to the published
+daily mean only where none does. The newest feature date therefore tracks `gauge_readings_iv`,
+current to within hours — which is why `features` held a row dated 2026-08-18 while
+`gauge_readings_daily` ended at 08-16, an observation that looks impossible under the old comment and
+is ordinary once you follow the view.
+
+**Its lag is still set to 2 days, not 0.** Instantaneous retention is a rolling window of recent
+weeks at three of the four gauges (§ 15), so a fallback to the dv side is *normal operation*.
+Deriving from the fastest input would put the threshold back on its boundary the moment the fastest
+input hiccuped — the exact defect being removed. At 4 days the division of labour is clean:
+`features_build`'s `overdue_after` is 3 days, so **a stopped build is caught by the job check first**,
+and this entry catches what the job check cannot see — the build running, succeeding, and producing
+nothing new.
+
+**2. `barge_rates`' lag is an assumption and is recorded as one.** `lag_measured_on=None`, with the
+query to run written beside it. § 16 is explicit that a property established by analogy to a measured
+sibling is a guess that later reads as verified, and this project has already been wrong assuming two
+USGS endpoints shared a period of record (§ 15). **A test asserts the `None`**, so replacing it is a
+deliberate act rather than a drive-by.
+
+**3. An existing test encoded the defect as a guard.**
+`tests/ingest/test_usda_movements.py::test_both_usda_tables_are_in_the_freshness_registry` asserted
+`timedelta(days=9) < max_staleness < timedelta(days=14)` with the comment "weekly publication plus a
+late holiday week must not alert; two consecutive missed publications must". **That band permitted
+the broken 10 days and would have gone red on the correct value** — a literal band is a second,
+independent copy of the derivation, and when the two disagree the one nobody re-measured wins. It now
+reads `cycle` and `observed_lag` off the entry. **It is in the integration tier**, which is why a
+`-m "not integration"` run reported 642 green over a changed contract; the full run caught it.
+
+**4. The ordering against the job check reversed, and that is an improvement.** `cadence.py`'s
+`usda_rates_ingest` entry chose `overdue_after=14 days` *explicitly citing the 10-day freshness
+threshold*, so that data-stale would speak before job-overdue. At 17 days the order is now
+job-overdue at 14, data-stale at 17. The old concern was a job outage being reported repeatedly as a
+data problem; under the new ordering **a job outage announces itself as a job outage first**, and a
+source that stops while the job keeps succeeding is still caught by the data check at 17 days — the
+case the job check cannot see at any threshold. **The cadence values are unchanged**; only the
+comment, which would otherwise cite a number that no longer exists.
+
+**An emergent consequence worth recording, because nobody designed it:** the registry is now
+*uniform* in this respect. Before the change, only `gauge_readings_iv` had job-overdue firing before
+data-stale (3 h against 6 h); the other four were the other way round. After it, all five are:
+
+| Table | job overdue at | data stale at |
+|---|---|---|
+| `gauge_readings_iv` | 3 h | 6 h |
+| `gauge_readings_daily` | 3 days | 4 days |
+| `barge_rates` | 14 days | 17 days |
+| `lock_movements` | 14 days | 17 days |
+| `features` | 3 days | 4 days |
+
+This is a *consequence* of deriving each freshness window from its source's publication behaviour,
+not a target that was aimed at, and it is **not** a rule to enforce — the two thresholds answer
+different questions and must stay independently derived (`test_freshness_thresholds_are_not_derived
+_from_job_cadence`). It is recorded so that a future entry landing the other way round is read as
+"this source publishes more slowly than we poll" rather than as a mistake.
+
+#### Mutation confirmation — six rows, 2026-08-18
+
+Applied, `__pycache__` cleared, named test run, restored from a snapshot copy (never `git checkout`),
+suite re-run green.
+
+| # | Mutation | Named test | Actual failure |
+|---|---|---|---|
+| 1 | `gauge_readings_daily` → 2 days | `test_every_threshold_exceeds_its_cycle_plus_lag` | `max_staleness is 2 days against a normal maximum age of 3 days (cycle 1 day + observed lag 2 days)` |
+| 2 | `lock_movements` → 10 days | `test_thresholds_allow_one_missed_publication` | `max_staleness is 10 days, below the derived floor of 17 days (cycle 7 days + observed lag 3 days + one missed publication 7 days)` |
+| 3 | `barge_rates` left at 10 days | `test_barge_rates_threshold_matches_the_weekly_derivation` | `barge_rates' threshold is 10 days against lock_movements' 17 days` |
+| 4 | `# DERIVATION:` line → `# 17 days.` | `test_each_threshold_records_its_derivation` | `lock_movements: no parseable # DERIVATION: line beside its threshold` |
+| 5 | `max_staleness=cadence_module.BY_NAME["usda_rates_ingest"].overdue_after` | `test_freshness_thresholds_are_not_derived_from_job_cadence` | `the freshness registry reads job-cadence values: ["cadence_module.BY_NAME['usda_rates_ingest'].overdue_after", 'cadence_module']` |
+| 6 | **inverted** — `observed_lag` → 0 days | `test_every_threshold_exceeds_its_cycle_plus_lag` | **stayed green, 5 passed** |
+
+**Row 6 is the one that makes rows 1–3 mean anything.** It proves the guard compares against the
+committed constants rather than today's answer — so a re-measurement of `observed_lag` moves it
+rather than breaking it. Two *other* tests went red under that mutation
+(`test_gauge_readings_daily_threshold_is_four_days`, `test_each_threshold_records_its_derivation`),
+which is the derivation being genuinely wired rather than the guard being confused.

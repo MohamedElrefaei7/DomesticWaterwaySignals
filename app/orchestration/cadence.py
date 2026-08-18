@@ -198,12 +198,29 @@ CADENCES: tuple[Cadence, ...] = (
         # have with their overlaps.
         interval=timedelta(seconds=604800),
         # TWO INTERVALS, not the three every other entry uses, and the difference is deliberate.
+        # Three weeks of silence before saying anything is too long for a weekly series: two weeks
+        # means one missed publication is a blip and two consecutive ones are a pattern.
         #
-        # Three weeks of silence before saying anything is too long for a weekly series: the
-        # freshness registry's own threshold for this table is 10 days, so a three-week job
-        # threshold would let the DATA check speak twice before the JOB check spoke once, which
-        # inverts which of the two an operator reads first. Two weeks means one missed
-        # publication is a blip and two consecutive ones are a pattern.
+        # THE ORDERING AGAINST THE FRESHNESS CHECK REVERSED ON 2026-08-18, AND THE REVERSAL IS AN
+        # IMPROVEMENT RATHER THAN A REGRESSION - recorded here because this comment used to argue
+        # the opposite and a reader would otherwise think it had rotted.
+        #
+        # It read: "the freshness registry's own threshold for this table is 10 days, so a
+        # three-week job threshold would let the DATA check speak twice before the JOB check spoke
+        # once, which inverts which of the two an operator reads first." The 10 days is now 17
+        # (heartbeat.FRESHNESS), because 10 could not distinguish USDA publishing normally from
+        # USDA stopping - a 7-day cycle plus a 3-day lag reaches it during correct operation.
+        #
+        # So the order is now JOB-OVERDUE AT 14 DAYS, DATA-STALE AT 17. The old concern was a job
+        # outage being reported repeatedly as a data problem; under the new ordering a job outage
+        # announces itself AS a job outage first, which is the more diagnostic of the two. A
+        # source that stops while the job keeps succeeding is still caught, by the data check, at
+        # 17 days - the case the job check cannot see at any threshold.
+        #
+        # THIS VALUE IS NOT DERIVED FROM THE FRESHNESS THRESHOLD AND MUST NOT BECOME SO. They
+        # answer different questions from different sources (§ 20), and coupling them would make a
+        # source outage indistinguishable from a job outage. Guarded by
+        # tests/orchestration/test_heartbeat.py::test_freshness_thresholds_are_not_derived_from_job_cadence.
         overdue_after=timedelta(days=14),
     ),
     Cadence(

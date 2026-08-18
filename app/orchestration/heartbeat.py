@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from app import db
 from app.orchestration import cadence as cadence_module
@@ -57,6 +57,62 @@ logger = logging.getLogger(__name__)
 # for a job nothing runs would report a stale table forever with no way to fix it.
 
 
+# ---------------------------------------------------------------------------------------------
+# THE THRESHOLDS ARE DERIVED FROM MEASURED PUBLICATION BEHAVIOUR, NOT FROM EXPECTATION.
+# ---------------------------------------------------------------------------------------------
+#
+# Every threshold below was originally set from what its source was expected to do. Measured on
+# 2026-08-18, on real data, three of the five sat AT OR INSIDE their own boundary during entirely
+# normal operation — `gauge_readings_daily` and `lock_movements` were reporting stale with nothing
+# wrong anywhere, and `barge_rates` was 7d21h into a 10-day window for the same structural reason
+# and days from doing the same.
+#
+# THAT IS THE FAILURE, AND IT IS NOT A TUNING PROBLEM. A check that cannot distinguish "the source
+# is publishing normally" from "the source stopped" is not answering the only question it exists
+# to answer, and an alarm that fires during correct operation is one that gets muted — after which
+# nobody is watching the case it was built for. This project has already recorded that shape once
+# (`d-pre`): a guard that goes red on the correct state trains its own removal.
+#
+# THE DERIVATION, applied identically to all five and stated per entry:
+#
+#     max_staleness  >=  cycle  +  observed_lag  +  one missed publication (a second cycle)
+#
+#   cycle         how often the source publishes a new period.
+#   observed_lag  how long after a period closes before its value appears. MEASURED, with a date.
+#   + one cycle   headroom for a single missed publication, so one late week is not an alarm and
+#                 two consecutive ones are.
+#
+# THE ARITHMETIC IS COMMITTED, NOT JUST THE NUMBER. `cycle` and `observed_lag` are fields, and
+# each entry carries a `# DERIVATION:` line that
+# tests/orchestration/test_heartbeat.py::test_each_threshold_records_its_derivation PARSES and
+# checks against those fields and against `max_staleness`. A bare `timedelta(days=4)` is a number
+# somebody reducing alert latency will tighten because they cannot see what it was for; the
+# arithmetic beside it is the only thing that makes the tightening visibly wrong.
+#
+# A THRESHOLD THAT STARTS TRIPPING IS A SIGNAL TO RE-MEASURE, NOT TO RETUNE. `observed_lag` is a
+# measurement with a date, not a constant: a source that changes its publication schedule
+# invalidates it, and `lag_measured_on` is what tells a later reader the measurement is old.
+# Widening or tightening by feel puts the check back where it started.
+#
+# CONTENT AGE AND INGESTION AGE ARE DIFFERENT QUESTIONS, AND ONLY ONE OF THEM IS THIS ONE.
+#
+# None of these tables carries an ingestion timestamp, and that is deliberate rather than missing.
+# `gauge_readings_daily` is (usgs_site_id, date, param_code, stat_cd, value, qualifiers);
+# `lock_movements` and `barge_rates` are keyed on `week_ending`. So this check can only measure
+# how old the newest CONTENT is — which is the question "is the source still publishing".
+#
+# "Is the pipeline running" is ALREADY ANSWERED, by `job_runs`, through the cadence table's
+# `overdue_after`. Both statements are true at once and both are useful: measured 2026-08-18, the
+# heartbeat reported `usgs_daily_ingest: ok` with a success minutes old while this table's newest
+# content was two days behind.
+#
+# THE OBVIOUS "FIX" FOR A PERMANENTLY-STALE TABLE IS TO ADD AN `ingested_at` COLUMN AND MEASURE
+# THAT INSTEAD. It would make every entry here read green forever, because it would silently
+# convert this check into a second copy of the one `job_runs` already performs — leaving nobody at
+# all watching the source. CLAUDE.md § 4: liveness is measured from the DATA, never from the
+# process.
+
+
 @dataclass(frozen=True)
 class Freshness:
     """One ingested table's liveness contract.
@@ -66,13 +122,33 @@ class Freshness:
     timestamp_column  The column carrying the SOURCE's timestamp — not an inserted_at. An
                    inserted_at column measures that we wrote something, which is the process
                    measurement this check exists to replace.
-    max_staleness  How old the newest row may be before this is stale.
+    cycle          How often the SOURCE publishes a new period. Not how often the job polls: a
+                   daily poll of a weekly series still only produces a new row once a week.
+    observed_lag   Measured delay between a period closing and its value appearing.
+    lag_measured_on  When `observed_lag` was measured, or None where it is an assumption carried
+                   from a sibling source rather than a measurement of this one. A date here is a
+                   claim that somebody looked; None is the honest absence of one.
+    max_staleness  How old the newest row may be before this is stale. Never below
+                   `derived_minimum`, and the entry's `# DERIVATION:` comment records why.
     """
 
     job_name: str
     table: str
     timestamp_column: str
+    cycle: timedelta
+    observed_lag: timedelta
+    lag_measured_on: date | None
     max_staleness: timedelta
+
+    @property
+    def derived_minimum(self) -> timedelta:
+        """`cycle + observed_lag + one missed publication`, the floor for `max_staleness`.
+
+        A FLOOR, NOT AN EQUALITY (CLAUDE.md § 24). Equality would make a well-reasoned increase
+        fail the guard, and the guard exists to stop TIGHTENING - which is the direction that
+        reintroduces permanent staleness.
+        """
+        return self.cycle + self.observed_lag + self.cycle
 
 
 FRESHNESS: tuple[Freshness, ...] = (
@@ -80,16 +156,32 @@ FRESHNESS: tuple[Freshness, ...] = (
         job_name="usgs_ingest",
         table="gauge_readings_iv",
         timestamp_column="ts",
-        # SIX HOURS, AND GENEROUS RELATIVE TO THE HOURLY POLL ON PURPOSE.
+        # CYCLE = 1 HOUR, and it is the POLL's interval rather than the gauges' own.
         #
-        # The arithmetic behind the number: two of the four seeded sites record hourly, and USGS
-        # transmits hourly rather than continuously, so a MAX(ts) that is already one to two
-        # hours behind wall clock is the NORMAL steady state, not a symptom. Add the poll's own
-        # hourly interval and a late transmission, and three to four hours old is still healthy.
+        # Native recording cadence is per site and is 15, 30 or 60 minutes across the four seeded
+        # gauges (measured 2026-08-13, docs/findings.md § A) - but USGS TRANSMITS hourly rather
+        # than continuously, and this job polls hourly, so a new row cannot appear here more often
+        # than once an hour whatever the gauge is doing.
+        cycle=timedelta(hours=1),
+        # 2 HOURS. Carried unchanged from the Phase 3 registry comment, which recorded a MAX(ts)
+        # one to two hours behind wall clock as the normal steady state.
         #
-        # Six hours means roughly four consecutive failed polls, or a genuine upstream outage,
-        # before this speaks. Tighter and it would fire on ordinary USGS lateness — and an alert
-        # that fires routinely is an alert everyone mutes, which costs more than the delay.
+        # `lag_measured_on` IS None BECAUSE THIS WAS NEVER MEASURED WITH A QUERY. It is the
+        # value this project has been running on and it has not fired, which is evidence of a
+        # kind but is not a measurement; recording a date beside it would assert that somebody
+        # looked (CLAUDE.md § 16: a comment copied from a sibling reads as measured and is worse
+        # than an absent one).
+        observed_lag=timedelta(hours=2),
+        lag_measured_on=None,
+        # DERIVATION: cycle 1h + observed lag 2h + one missed publication 1h = 4h
+        #
+        # SIX HOURS IS UNCHANGED, AND IT ALREADY SATISFIES THE DERIVATION with two hours to
+        # spare. Only the reasoning is new. Six hours is roughly four consecutive failed polls or
+        # a genuine upstream outage before this speaks, and the extra margin over the 4-hour floor
+        # is what keeps it from firing on ordinary USGS lateness.
+        #
+        # THIS IS THE ONE ENTRY WHOSE COLUMN IS A REAL timestamptz, so it is also the only one
+        # that does not pay the midnight-anchoring cost the four date-keyed entries below do.
         max_staleness=timedelta(hours=6),
     ),
     Freshness(
@@ -98,13 +190,25 @@ FRESHNESS: tuple[Freshness, ...] = (
         # `date`, not a timestamp. A daily mean is a calendar date and is stored as one; see
         # newest_row() for how an age is computed from it without inventing a time of day.
         timestamp_column="date",
-        # FORTY-EIGHT HOURS, and the arithmetic is different from the instantaneous table's.
+        # CYCLE = 1 DAY. One published daily mean per site per calendar day.
+        cycle=timedelta(days=1),
+        # 2 DAYS, MEASURED 2026-08-18 ON THE INSTANCE: 4 rows/day, every day, no gaps, and the
+        # newest date was 2026-08-16. USGS finalises a daily value roughly two days after the day
+        # it describes, consistently.
+        observed_lag=timedelta(days=2),
+        lag_measured_on=date(2026, 8, 18),
+        # DERIVATION: cycle 1d + observed lag 2d + one missed publication 1d = 4d
         #
-        # A daily value is published AFTER its day closes, so the newest date in this table is
-        # normally yesterday - already ~24 hours old by this check's reckoning before anything
-        # has gone wrong. 48 hours allows one late publication without crying wolf, and still
-        # speaks after two consecutive daily polls have produced nothing.
-        max_staleness=timedelta(hours=48),
+        # WAS 48 HOURS, WHICH WAS THE DEFECT. The normal state of this table is two days behind,
+        # so a 2-day threshold sat permanently AT its own boundary - and because a date column is
+        # anchored at midnight UTC by _as_utc_datetime (up to 24 hours of extra apparent age), it
+        # spent most of every day over the line. It reported stale on 2026-08-18 with the source
+        # publishing perfectly and the job succeeding minutes earlier.
+        #
+        # The old comment's arithmetic - "the newest date is normally yesterday, ~24 hours old" -
+        # was the error, and it was an expectation rather than a measurement. The newest date is
+        # normally the day BEFORE yesterday.
+        max_staleness=timedelta(days=4),
     ),
     Freshness(
         job_name="usda_rates_ingest",
@@ -112,18 +216,32 @@ FRESHNESS: tuple[Freshness, ...] = (
         # The published week label. A calendar date, like the daily table's - see newest_row()
         # for how an age is taken from one without inventing a time of day.
         timestamp_column="week_ending",
-        # TEN DAYS, and the arithmetic is publication-shaped rather than poll-shaped.
+        # CYCLE = 7 DAYS. A weekly series labelled by week-ending date.
+        cycle=timedelta(days=7),
+        # 3 DAYS, AND THIS ONE IS AN ASSUMPTION RATHER THAN A MEASUREMENT - hence
+        # `lag_measured_on=None`.
         #
-        # A weekly series' newest row is normally up to 7 days old before anything has gone
-        # wrong - the week just ended. Add a holiday week, which USDA publishes late, and 8 or 9
-        # days old is still healthy. Ten days therefore does not fire on ordinary lateness.
+        # It is carried from `lock_movements` below, which WAS measured. Both come from USDA
+        # AgTransport, both are labelled by `week_ending`, and both are polled weekly, so the
+        # analogy is a reasonable one - but CLAUDE.md § 16 is explicit that a property established
+        # by analogy to a measured sibling is a guess that later reads as verified, and this
+        # project has already been wrong assuming two USGS endpoints shared a period of record
+        # (§ 15). The honest record is the missing date.
         #
-        # What it DOES catch is two consecutive missed publications: at 14 days the newest row
-        # would be two weeks old and this has already spoken. That is the pair of numbers the
-        # threshold is chosen against - not "about a week and a half".
+        # TO MEASURE IT: `SELECT max(week_ending), now()::date - max(week_ending) FROM
+        # barge_rates;` run a few days apart, and note which weekday the labels fall on. If it
+        # differs from 3 days, change `observed_lag` and this comment - the DERIVATION line and
+        # the test move with it.
+        observed_lag=timedelta(days=3),
+        lag_measured_on=None,
+        # DERIVATION: cycle 7d + observed lag 3d + one missed publication 7d = 17d
         #
-        # Stated because a threshold with no reasoning behind it is the one that gets loosened the
-        # first time it fires, and the loosening is never measured either.
+        # WAS 10 DAYS - THE SAME DEFECT AS lock_movements, AND IT WAS NOT YET FIRING. On
+        # 2026-08-18 this table read fresh at 7d21h purely because it sat earlier in its own
+        # cycle; 7 days of normal gap plus a 3-day lag already reaches 10 and it would have
+        # tripped within days. FIXING THE TWO TABLES THAT WERE RED AND LEAVING THIS ONE IS HOW
+        # THE WHOLE THING RECURS, so the derivation is applied to all five rather than to the
+        # ones that complained.
         #
         # FRESHNESS COUNTS ROWS, NOT RATES, AND THAT IS LOAD-BEARING FOR THIS TABLE.
         #
@@ -140,19 +258,41 @@ FRESHNESS: tuple[Freshness, ...] = (
         # alarm fires all winter, gets muted, and the check is then not watching in the spring
         # either. Guarded by
         # tests/ingest/test_usda_rates.py::test_freshness_uses_max_week_ending_over_all_rows.
-        max_staleness=timedelta(days=10),
+        max_staleness=timedelta(days=17),
     ),
     Freshness(
         job_name="usda_movements_ingest",
         table="lock_movements",
         timestamp_column="week_ending",
-        # Same publication cadence, same arithmetic, same threshold as the rates table.
+        # CYCLE = 7 DAYS, MEASURED 2026-08-18: week_ending values every 7 days with no gaps -
+        # 2026-08-08, 08-01, 07-25, 07-18 - all Saturdays.
+        cycle=timedelta(days=7),
+        # >= 3 DAYS, MEASURED 2026-08-18: week_ending 2026-08-15 had not been published, three
+        # days after that week closed. A LOWER BOUND rather than a point estimate, because the
+        # measurement can only say the value had not appeared yet - it cannot say when it did.
         #
-        # BOTH TABLES ARE REGISTERED, not one. A single registration covering "the USDA ingest"
-        # would report healthy while the other table received nothing - the heartbeat's green
-        # light would mean "the one table I know about is fine", which is CLAUDE.md § 2's theme 2
-        # exactly. They have separate jobs, so they have separate entries.
-        max_staleness=timedelta(days=10),
+        # The bound is used as though it were the value, which is the direction that errs towards
+        # a WIDER threshold, and that is the safe direction here: too wide reports stale late,
+        # too narrow reports stale always and gets muted.
+        observed_lag=timedelta(days=3),
+        lag_measured_on=date(2026, 8, 18),
+        # DERIVATION: cycle 7d + observed lag 3d + one missed publication 7d = 17d
+        #
+        # WAS 10 DAYS, AND IT WAS RED ON MEASUREMENT DAY: newest week_ending 2026-08-08 on
+        # 2026-08-18 is 10 days plus the midnight anchoring, with USDA publishing exactly on
+        # schedule. The old comment reasoned "up to 7 days old before anything has gone wrong,
+        # add a holiday week, 8 or 9 days is still healthy" - which never counted the publication
+        # lag at all, so it was one whole term short.
+        #
+        # NOT UNIFIED WITH THE DAILY TABLES' THRESHOLD, and not to be. Two values differing
+        # because their sources differ is a contract to assert in opposite directions, not an
+        # inconsistency to remove (CLAUDE.md § 25).
+        #
+        # BOTH USDA TABLES ARE REGISTERED, not one. A single registration covering "the USDA
+        # ingest" would report healthy while the other table received nothing - the heartbeat's
+        # green light would mean "the one table I know about is fine", which is CLAUDE.md § 2's
+        # theme 2 exactly. They have separate jobs, so they have separate entries.
+        max_staleness=timedelta(days=17),
     ),
     Freshness(
         job_name="features_build",
@@ -170,15 +310,40 @@ FRESHNESS: tuple[Freshness, ...] = (
         # measure that the build wrote something, which is the process measurement this check
         # exists to replace.
         timestamp_column="date",
-        # FORTY-EIGHT HOURS, derived from what FEEDS it rather than from the build's own interval.
+        # CYCLE = 1 DAY. The build runs daily and writes one row per site per feature per day.
+        cycle=timedelta(days=1),
+        # 2 DAYS, AND THE OLD COMMENT HAD THIS WRONG IN A WAY WORTH RECORDING.
         #
-        # The newest feature date can only be as new as the newest gauge_daily date, which comes
-        # from the daily-values job whose own threshold is 48 hours. A tighter threshold here would
-        # fire on ordinary USGS publication lag and report the build broken when it had correctly
-        # computed everything available - and the operator would then be reading two alarms for one
-        # cause, with the wrong one on top. Equal to its input's threshold means this speaks when
-        # the build has genuinely stopped, and stays quiet when it is merely waiting.
-        max_staleness=timedelta(hours=48),
+        # It said the newest feature date "comes from the daily-values job". IT DOES NOT.
+        # `features` is built from `gauge_daily`, which app/features/rollup.py reads from the
+        # `gauge_series` VIEW - and 0010's precedence rule takes the INSTANTANEOUS row wherever
+        # one exists, falling back to the published daily mean only where none does. So the
+        # newest feature date tracks `gauge_readings_iv`, which is current to within hours.
+        #
+        # That is why `features` carried a row dated 2026-08-18 on 2026-08-18 while
+        # `gauge_readings_daily` ended at 2026-08-16 - an observation that looks impossible if
+        # you believe the old comment, and is ordinary once you follow the view.
+        #
+        # SO WHY 2 DAYS AND NOT 0. Instantaneous retention is a rolling window of recent weeks at
+        # three of the four gauges (§ 15), and whenever the iv side is briefly absent
+        # `gauge_series` falls back to the dv side, putting the newest feature date at
+        # `gauge_readings_daily`'s own 2-day lag. THAT IS NORMAL OPERATION, not a fault. Deriving
+        # this from the FASTEST input would put the threshold back on its boundary the moment the
+        # fastest input hiccuped - the exact defect this commit exists to remove - so the lag is
+        # the SLOWEST healthy input's.
+        observed_lag=timedelta(days=2),
+        lag_measured_on=date(2026, 8, 18),
+        # DERIVATION: cycle 1d + observed lag 2d + one missed publication 1d = 4d
+        #
+        # WAS 48 HOURS. That satisfied the arithmetic only under the fallback-free reading, and
+        # exactly - 2 days against a 2-day floor is a threshold sitting on its own boundary.
+        #
+        # THE DIVISION OF LABOUR WITH THE JOB CHECK IS CLEAN AT THIS VALUE, and it is worth
+        # stating because it is what makes four days defensible rather than merely generous:
+        # `features_build`'s cadence entry has `overdue_after=3 days`, so A BUILD THAT STOPS IS
+        # CAUGHT BY THE JOB CHECK FIRST, at three days. What this entry catches is the case the
+        # job check cannot see - the build running, succeeding, and producing nothing new.
+        max_staleness=timedelta(days=4),
     ),
 )
 

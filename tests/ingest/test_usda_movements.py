@@ -676,11 +676,32 @@ def test_both_usda_tables_are_in_the_freshness_registry(migrated_db, database_ur
                 f"would be reported stale forever with no way to fix it"
             )
             assert entry.timestamp_column == "week_ending"
-            # Weekly publication plus a late holiday week must not alert; two consecutive missed
-            # publications must. That pins the threshold between 9ish and 14 days.
-            assert timedelta(days=9) < entry.max_staleness < timedelta(days=14), (
-                f"{entry.table}'s staleness threshold is {entry.max_staleness}, which either "
-                f"fires on ordinary weekly lateness or sleeps through two missed publications"
+
+            # DERIVED FROM THE ENTRY'S OWN MEASURED CONSTANTS, NOT PINNED TO A BAND.
+            #
+            # THIS ASSERTION USED TO READ `timedelta(days=9) < max_staleness < timedelta(days=14)`,
+            # with the comment "weekly publication plus a late holiday week must not alert; two
+            # consecutive missed publications must". THAT BAND WAS THE DEFECT WEARING A GUARD'S
+            # CLOTHES: it never counted USDA's publication lag, so it permitted exactly the 10-day
+            # threshold that was reporting `lock_movements` stale on 2026-08-18 with the source
+            # publishing on schedule - and it would have gone RED on the correct value.
+            #
+            # A literal band is a second, independent copy of the derivation, and when the two
+            # disagree the one nobody re-measured wins. Reading `cycle` and `observed_lag` off the
+            # entry means a re-measurement moves this test with it.
+            normal_maximum_age = entry.cycle + entry.observed_lag
+            assert entry.max_staleness > normal_maximum_age, (
+                f"{entry.table}'s threshold is {entry.max_staleness}, at or below the "
+                f"{normal_maximum_age} its newest row reaches during NORMAL operation (cycle "
+                f"{entry.cycle} + lag {entry.observed_lag}). It fires while USDA is publishing "
+                f"exactly on schedule."
+            )
+            # Two consecutive missed publications MUST alert. One is a blip and is absorbed by
+            # the `+ one cycle` term; a threshold above this ceiling would sleep through two.
+            two_missed = normal_maximum_age + 2 * entry.cycle
+            assert entry.max_staleness <= two_missed, (
+                f"{entry.table}'s threshold is {entry.max_staleness}, above the {two_missed} at "
+                f"which two consecutive missed publications have gone unreported"
             )
 
     with db.connection(database_url) as conn:

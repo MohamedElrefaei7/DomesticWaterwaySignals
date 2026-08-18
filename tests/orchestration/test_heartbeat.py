@@ -6,7 +6,9 @@ table is the only source of overdue thresholds), 16 ("last success" means the la
 failures never fail the monitoring job).
 """
 
+import re
 from datetime import date, datetime, time as dt_time, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from apscheduler.events import EVENT_JOB_MISSED, JobExecutionEvent
@@ -25,6 +27,29 @@ from app.orchestration.heartbeat import Freshness
 pytestmark = pytest.mark.integration
 
 FAKE_JOBSTORE_URL = "postgresql+psycopg://does-not-connect/unit"
+
+def _freshness(job_name, table, timestamp_column, max_staleness):
+    """A registry entry for tests about the AGE ARITHMETIC, not about the derivation.
+
+    `cycle` and `observed_lag` are set so the entry satisfies its own floor
+    (`cycle + lag + cycle == max_staleness`), because a fixture that violated the contract the
+    real registry is held to would be a confusing thing to read next to the tests that assert it.
+    Which numbers they are does not matter to any test below; `max_staleness` is the one under
+    test, and it is the argument every call site passes explicitly.
+
+    The real registry's derivations are asserted separately, against `heartbeat.FRESHNESS` itself.
+    """
+    return Freshness(
+        job_name=job_name,
+        table=table,
+        timestamp_column=timestamp_column,
+        cycle=max_staleness / 4,
+        observed_lag=max_staleness / 2,
+        lag_measured_on=None,
+        max_staleness=max_staleness,
+    )
+
+
 
 
 @pytest.fixture
@@ -349,7 +374,7 @@ def test_freshness_registry_flags_a_stale_table(migrated_db, database_url, monke
     """
     now = datetime.now(timezone.utc)
     registry = (
-        Freshness("usgs_ingest", "gauge_readings_iv", "ts", timedelta(hours=6)),
+        _freshness("usgs_ingest", "gauge_readings_iv", "ts", timedelta(hours=6)),
     )
 
     # No rows at all -> stale, not quiet.
@@ -372,7 +397,7 @@ def test_freshness_registry_flags_a_stale_table(migrated_db, database_url, monke
 
     # Same data, same code, one threshold tightened in the registry -> the verdict flips.
     tightened = (
-        Freshness("usgs_ingest", "gauge_readings_iv", "ts", timedelta(hours=1)),
+        _freshness("usgs_ingest", "gauge_readings_iv", "ts", timedelta(hours=1)),
     )
     with db.connection(database_url) as conn:
         stale = heartbeat.check_freshness(conn, now=now, registry=tightened)
@@ -423,7 +448,7 @@ def test_a_job_with_recent_runs_but_stale_data_is_still_flagged(
     monkeypatch.setattr(
         heartbeat,
         "FRESHNESS",
-        (Freshness("usgs_ingest", "gauge_readings_iv", "ts", timedelta(hours=6)),),
+        (_freshness("usgs_ingest", "gauge_readings_iv", "ts", timedelta(hours=6)),),
     )
 
     # The job-status check alone sees nothing wrong. This assertion is the control: without it,
@@ -465,8 +490,8 @@ def test_an_unqueryable_registered_table_alerts_rather_than_skipping(
     """
     now = datetime.now(timezone.utc)
     registry = (
-        Freshness("usgs_ingest", "table_that_does_not_exist", "ts", timedelta(hours=6)),
-        Freshness("usgs_ingest", "gauge_readings_iv", "ts", timedelta(hours=6)),
+        _freshness("usgs_ingest", "table_that_does_not_exist", "ts", timedelta(hours=6)),
+        _freshness("usgs_ingest", "gauge_readings_iv", "ts", timedelta(hours=6)),
     )
 
     with db.connection(database_url) as conn:
@@ -582,7 +607,7 @@ def test_daily_freshness_measures_age_from_a_date_column(migrated_db, database_u
 
     now = datetime.combine(today, dt_time(12, 0), tzinfo=timezone.utc)
     registry = (
-        Freshness("usgs_daily_ingest", "gauge_readings_daily", "date", timedelta(hours=48)),
+        _freshness("usgs_daily_ingest", "gauge_readings_daily", "date", timedelta(hours=48)),
     )
 
     with db.connection(database_url) as conn:
@@ -595,3 +620,272 @@ def test_daily_freshness_measures_age_from_a_date_column(migrated_db, database_u
     )
     assert verdict.age == timedelta(hours=12)
     assert verdict.stale is False, "today's daily value was reported stale against a 48h threshold"
+
+
+# ---------------------------------------------------------------------------------------------
+# The freshness thresholds, and the derivation that keeps them off their own boundary
+# ---------------------------------------------------------------------------------------------
+#
+# THESE ARE UNIT TESTS IN AN INTEGRATION MODULE, and that is deliberate: they belong beside the
+# registry's other tests rather than in a file of their own, and the module-level
+# `pytestmark = pytest.mark.integration` costs them nothing because none of them touches a
+# database. They read `heartbeat.FRESHNESS` and the module's own source text.
+#
+# 2026-08-18, on real data: three of the five thresholds sat at or inside their own boundary
+# during entirely normal operation. `gauge_readings_daily` (48h against a source that publishes
+# two days in arrears) and `lock_movements` (10 days against a 7-day cycle plus a 3-day lag) were
+# both reporting stale with nothing wrong; `barge_rates` was 7d21h into the same 10-day window and
+# days from joining them.
+#
+# A threshold set from expectation rather than from the source's measured behaviour sits at its
+# boundary during correct operation - and an alarm that fires during correct operation is one that
+# stops being read. That is the second instance of this shape in the project (`d-pre` was the
+# first), and these tests are what stop it being the third.
+
+FRESHNESS_TABLES = [entry.table for entry in heartbeat.FRESHNESS]
+
+
+def _entry(table):
+    return next(e for e in heartbeat.FRESHNESS if e.table == table)
+
+
+@pytest.mark.parametrize("table", FRESHNESS_TABLES)
+def test_every_threshold_exceeds_its_cycle_plus_lag(table):
+    """THE GUARD. A tightening that reintroduces permanent staleness goes red.
+
+    `cycle + observed_lag` is the age the newest row reaches during NORMAL operation, just before
+    the next publication lands. A threshold at or below it cannot ever distinguish "the source is
+    publishing normally" from "the source stopped", which is the only question this check exists
+    to answer.
+
+    IT COMPARES AGAINST THE COMMITTED CONSTANTS, NOT AGAINST A LITERAL. That is what makes it move
+    when a re-measurement moves `observed_lag` - the response to a threshold that starts tripping
+    is to re-measure the source, not to widen or tighten by feel - and it is confirmed by an
+    INVERTED mutation: setting `observed_lag` to zero must leave this GREEN, because a test that
+    hardcoded today's answer would go red on a number it has no opinion about.
+    """
+    entry = _entry(table)
+    normal_maximum_age = entry.cycle + entry.observed_lag
+
+    assert entry.max_staleness > normal_maximum_age, (
+        f"{table}: max_staleness is {entry.max_staleness} against a normal maximum age of "
+        f"{normal_maximum_age} (cycle {entry.cycle} + observed lag {entry.observed_lag}). This "
+        f"threshold trips while the source is publishing exactly on schedule, so it cannot report "
+        f"an outage - and an alarm that fires during correct operation is one that gets muted."
+    )
+
+
+@pytest.mark.parametrize("table", FRESHNESS_TABLES)
+def test_thresholds_allow_one_missed_publication(table):
+    """`threshold >= cycle + lag + cycle`. One late publication is a blip, two are a pattern.
+
+    A FLOOR, NOT AN EQUALITY (CLAUDE.md § 24): equality would make a well-reasoned increase fail
+    the guard, and the direction that needs guarding is tightening. `gauge_readings_iv` sits above
+    its floor at six hours against four and that is correct, not drift.
+    """
+    entry = _entry(table)
+
+    assert entry.max_staleness >= entry.derived_minimum, (
+        f"{table}: max_staleness is {entry.max_staleness}, below the derived floor of "
+        f"{entry.derived_minimum} (cycle {entry.cycle} + observed lag {entry.observed_lag} + one "
+        f"missed publication {entry.cycle}). A single late publication would alert."
+    )
+
+
+def test_gauge_readings_daily_threshold_is_four_days():
+    """1 day cycle + 2 days measured lag + 1 missed publication.
+
+    Was 48 hours, which is exactly the lag - so the table's NORMAL state was at the boundary, and
+    the midnight-UTC anchoring in `_as_utc_datetime` pushed it over for most of every day.
+    Measured 2026-08-18: 4 rows/day, no gaps, newest date 2026-08-16.
+    """
+    entry = _entry("gauge_readings_daily")
+
+    assert entry.cycle == timedelta(days=1), f"cycle is {entry.cycle}"
+    assert entry.observed_lag == timedelta(days=2), f"observed lag is {entry.observed_lag}"
+    assert entry.max_staleness == timedelta(days=4), (
+        f"gauge_readings_daily's threshold is {entry.max_staleness}, not 4 days. If this was a "
+        f"deliberate re-derivation, update this test and say what was re-measured; if it was a "
+        f"tightening to reduce alert latency, it puts the table back on its own boundary."
+    )
+
+
+def test_lock_movements_threshold_is_seventeen_days():
+    """7 day cycle + 3 days measured lag + 1 missed publication.
+
+    Measured 2026-08-18: week_ending every 7 days with no gaps (08-08, 08-01, 07-25, 07-18), and
+    08-15 not yet published three days after that week closed. The old 10 days was one whole term
+    short - it counted the cycle and a holiday allowance but never the publication lag at all.
+    """
+    entry = _entry("lock_movements")
+
+    assert entry.cycle == timedelta(days=7), f"cycle is {entry.cycle}"
+    assert entry.observed_lag == timedelta(days=3), f"observed lag is {entry.observed_lag}"
+    assert entry.max_staleness == timedelta(days=17), (
+        f"lock_movements' threshold is {entry.max_staleness}, not 17 days. At 10 days it was red "
+        f"on measurement day with USDA publishing exactly on schedule."
+    )
+
+
+def test_barge_rates_threshold_matches_the_weekly_derivation():
+    """THE TABLE THAT WAS NOT YET COMPLAINING, AND HAD THE IDENTICAL DEFECT.
+
+    On 2026-08-18 `barge_rates` read fresh at 7d21h against 10 days, purely because it sat earlier
+    in its cycle than `lock_movements` did. Same publisher, same weekly `week_ending` label, same
+    arithmetic - so the same threshold. Fixing the two tables that were red and leaving this one is
+    how the whole thing recurs in a fortnight.
+
+    ASSERTED AGAINST THE SIBLING'S VALUES rather than against a literal 17 days, so that a
+    re-measurement of the weekly lag has to move both tables or explain why not.
+    """
+    rates = _entry("barge_rates")
+    movements = _entry("lock_movements")
+
+    assert rates.cycle == movements.cycle, (
+        f"barge_rates' cycle is {rates.cycle} and lock_movements' is {movements.cycle}. Both are "
+        f"USDA weekly series labelled by week_ending; if one has genuinely changed, say so here."
+    )
+    assert rates.max_staleness == movements.max_staleness, (
+        f"barge_rates' threshold is {rates.max_staleness} against lock_movements' "
+        f"{movements.max_staleness}. The two tables share a publisher, a cadence and a label "
+        f"column, so a divergence needs a measured reason."
+    )
+    assert rates.max_staleness >= rates.derived_minimum
+
+    # THE ASSUMPTION IS ASSERTED AS AN ASSUMPTION. barge_rates' lag was never measured on its own -
+    # it is carried from the sibling - and CLAUDE.md § 16 is explicit that a property established
+    # by analogy to a measured sibling is a guess that later reads as verified. A None date is the
+    # honest record; a date here would be a claim nobody can support.
+    assert rates.lag_measured_on is None, (
+        f"barge_rates carries lag_measured_on={rates.lag_measured_on}, which asserts somebody "
+        f"measured this dataset's own publication lag. If they did, good - update the comment "
+        f"beside it with the query and the result, and this assertion with it."
+    )
+    assert movements.lag_measured_on is not None, (
+        "lock_movements' lag was measured on 2026-08-18; losing that date makes the value above "
+        "indistinguishable from the assumption it is the source of"
+    )
+
+
+DERIVATION = re.compile(
+    r"#\s*DERIVATION:\s*cycle\s+(\d+)([hd])\s*\+\s*observed lag\s+(\d+)([hd])\s*"
+    r"\+\s*one missed publication\s+(\d+)([hd])\s*=\s*(\d+)([hd])"
+)
+
+
+def _as_delta(amount, unit):
+    return timedelta(hours=int(amount)) if unit == "h" else timedelta(days=int(amount))
+
+
+def test_each_threshold_records_its_derivation():
+    """THE ARITHMETIC IS WHAT GETS COMMITTED, NOT THE NUMBER — and it is machine-checked.
+
+    A SOURCE-TEXT TEST OF THE LEGITIMATE KIND (CLAUDE.md § 23). The written derivation is not a
+    proxy for behaviour here; it IS the thing that stops `timedelta(days=17)` being tidied down by
+    somebody reducing alert latency who cannot see what it was for. Its absence is the defect, so
+    reading the source is direct evidence rather than a stand-in.
+
+    It does not merely check that a comment EXISTS - a comment that exists and disagrees with the
+    value beside it is worse than none, because it reads as a justification. The line is parsed and
+    every term is compared: the stated cycle against `cycle`, the stated lag against `observed_lag`,
+    the stated total against their sum, and `max_staleness` against that total.
+
+    THE SUBJECT IS NARROWED TO THE REGISTRY'S OWN SOURCE (§ 24). The prose ABOUT this rule - the
+    module header above the dataclass, and this docstring - contains the words "DERIVATION" and
+    "observed lag" too, and a scan over the whole file would match its own explanation. The block
+    between `FRESHNESS: tuple` and the `_unscheduled` check is the only text in scope.
+    """
+    source = Path(heartbeat.__file__).read_text(encoding="utf-8")
+    start = source.index("FRESHNESS: tuple[Freshness, ...] = (")
+    end = source.index("\n_unscheduled = ", start)
+    registry_source = source[start:end]
+
+    blocks = registry_source.split("Freshness(")[1:]
+    assert len(blocks) == len(heartbeat.FRESHNESS), (
+        f"the scan found {len(blocks)} Freshness( blocks for {len(heartbeat.FRESHNESS)} registry "
+        f"entries. It resolved the wrong text, and every assertion below would be about nothing."
+    )
+
+    for entry, block in zip(heartbeat.FRESHNESS, blocks):
+        match = DERIVATION.search(block)
+        assert match, (
+            f"{entry.table}: no parseable `# DERIVATION:` line beside its threshold. The bare "
+            f"number is what gets tightened by somebody who cannot see what it was derived from - "
+            f"that is exactly how the 48-hour and 10-day thresholds survived being wrong. Write "
+            f"it as: # DERIVATION: cycle 7d + observed lag 3d + one missed publication 7d = 17d"
+        )
+        cycle = _as_delta(match.group(1), match.group(2))
+        lag = _as_delta(match.group(3), match.group(4))
+        second_cycle = _as_delta(match.group(5), match.group(6))
+        total = _as_delta(match.group(7), match.group(8))
+
+        assert cycle == entry.cycle, (
+            f"{entry.table}: the derivation says cycle {cycle}, the field says {entry.cycle}"
+        )
+        assert lag == entry.observed_lag, (
+            f"{entry.table}: the derivation says observed lag {lag}, the field says "
+            f"{entry.observed_lag}"
+        )
+        assert second_cycle == entry.cycle, (
+            f"{entry.table}: the missed-publication term is {second_cycle}, which is not one "
+            f"cycle ({entry.cycle}). The headroom is one more publication, not an arbitrary pad."
+        )
+        assert total == cycle + lag + second_cycle, (
+            f"{entry.table}: the derivation's stated total {total} is not the sum of its own "
+            f"terms ({cycle} + {lag} + {second_cycle})"
+        )
+        assert entry.max_staleness >= total, (
+            f"{entry.table}: max_staleness is {entry.max_staleness}, below the {total} its own "
+            f"derivation line states"
+        )
+
+
+def test_freshness_thresholds_are_not_derived_from_job_cadence():
+    """THE TWO ANSWER DIFFERENT QUESTIONS AND MUST NOT BE COUPLED.
+
+    `overdue_after` asks "has this been RUN recently", from `job_runs`. `max_staleness` asks "is
+    what is ALREADY STORED still inside its freshness window", from MAX(ts) on the table. They
+    legitimately disagree - measured 2026-08-16 on both USDA jobs at once, and again on 2026-08-18
+    when `usgs_daily_ingest` reported `ok` with a success minutes old while its table's newest
+    content was two days behind (CLAUDE.md § 20).
+
+    IF ONE WERE DERIVED FROM THE OTHER, A SOURCE OUTAGE WOULD BE INDISTINGUISHABLE FROM A JOB
+    OUTAGE. Every value would move together and the disagreement that carries the diagnosis would
+    be impossible to observe.
+
+    AN AST WALK, NOT A GREP (CLAUDE.md §§ 23-24): the registry's own prose explains at length why
+    it is not derived from the cadence table and names `overdue_after` in doing so, so a regex
+    would match the explanation and fail on a correct file. Only what is EXECUTED is in scope.
+    """
+    import ast
+
+    tree = ast.parse(Path(heartbeat.__file__).read_text(encoding="utf-8"))
+    assignment = next(
+        (node for node in tree.body
+         if isinstance(node, ast.AnnAssign)
+         and getattr(node.target, "id", None) == "FRESHNESS"),
+        None,
+    )
+    assert assignment is not None and assignment.value is not None, (
+        "no FRESHNESS assignment found in heartbeat.py - the walk resolved nothing and every "
+        "assertion below would be vacuous"
+    )
+
+    calls = [n for n in ast.walk(assignment.value)
+             if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "Freshness"]
+    assert len(calls) == len(heartbeat.FRESHNESS), (
+        f"the walk found {len(calls)} Freshness() calls for {len(heartbeat.FRESHNESS)} entries"
+    )
+
+    borrowed = [
+        ast.unparse(node) for node in ast.walk(assignment.value)
+        if (isinstance(node, ast.Attribute) and node.attr in ("overdue_after", "interval"))
+        or (isinstance(node, ast.Name) and node.id in ("cadence_module", "cadence", "BY_NAME"))
+    ]
+    assert not borrowed, (
+        f"the freshness registry reads job-cadence values: {borrowed}. A table's freshness window "
+        f"is a fact about its SOURCE's publication behaviour; a job's overdue threshold is a fact "
+        f"about how often we poll. Coupling them makes a source that stopped publishing "
+        f"indistinguishable from a job that stopped running, which is the one disagreement the "
+        f"heartbeat exists to surface."
+    )
