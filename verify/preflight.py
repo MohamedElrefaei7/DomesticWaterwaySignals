@@ -29,14 +29,23 @@ a database, or the filesystem outside tmp_path.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import stat
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from infra.postgres.settings import (  # noqa: E402 - after the path insert, deliberately
+    REQUIRED_SETTINGS,
+    RequiredSetting,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_PATH = REPO_ROOT / "docker-compose.yml"
@@ -983,6 +992,110 @@ def check_client_server_major_agreement(server: ServerMajor, client: ClientPin) 
 
 
 # ---------------------------------------------------------------------------------------------
+# Cluster settings
+# ---------------------------------------------------------------------------------------------
+#
+# `postgresql.conf` lives in PGDATA, on the data volume, and cannot be mounted from this repo
+# without breaking `initdb` on a fresh volume. So the committed values are authoritative and this
+# gate is what makes a divergence from them visible. The reasoning, the two-list split, and why
+# `include_dir` is not available are in `infra/postgres/settings.py`; this file holds the check.
+
+
+@dataclass(frozen=True)
+class ObservedSetting:
+    """One row of pg_settings, as the cluster reports it right now.
+
+    `pending_restart` IS NOT REDUNDANT WITH `value`, and the case that proves it is the one that
+    looks least likely: a setting being LOWERED. `ALTER SYSTEM SET max_locks_per_transaction =
+    256` against a cluster currently running 512 leaves `value` at 512 and sets `pending_restart`
+    to true, so a gate reading `value` alone reports a healthy cluster that is one restart away
+    from the state this gate exists to prevent - and the restart will happen at boot, unattended,
+    long after the ALTER SYSTEM is out of anybody's shell history.
+
+    Reading `pending_restart` ALONE fails the other way and is the more tempting mistake, because
+    it reads as the more sophisticated check: a cluster where nobody ever ran ALTER SYSTEM at all
+    has `pending_restart` false and reports clean. That is the state this instance was in for a
+    week while the largest table was not fully queryable.
+    """
+
+    name: str
+    value: int
+    source: str
+    pending_restart: bool
+
+
+def check_required_setting(
+    required: RequiredSetting, observed: ObservedSetting | None, evidence: str = ""
+) -> Result:
+    """PASS only when the RUNNING value meets the floor AND no restart is pending.
+
+    Three distinct failures with three distinct messages, because they send an operator to three
+    different actions: apply it, restart the cluster, or find out who lowered it.
+    """
+    name = f"cluster setting {required.name} >= {required.minimum}"
+    tail = f"\n         {evidence}" if evidence else ""
+
+    if observed is None:
+        return Result(
+            name,
+            FAIL,
+            f"observed: the cluster reports no setting named {required.name!r} at all. "
+            f"pg_settings had no row for it, which means the name is wrong or the server is not "
+            f"the one this repo pins.{tail}",
+        )
+
+    if observed.pending_restart:
+        return Result(
+            name,
+            FAIL,
+            f"observed: RESTART PENDING. running value {observed.value}, source "
+            f"{observed.source!r}, pending_restart = true.\n"
+            f"         The configuration on disk and the value the cluster is RUNNING disagree. "
+            f"An ALTER SYSTEM has been issued and not yet taken effect - or has been issued to "
+            f"LOWER this setting, in which case the running value above is about to stop being "
+            f"true. This is not the same failure as the setting never having been applied.\n"
+            f"         Fix: docker compose restart timescaledb, then re-run this gate.{tail}",
+        )
+
+    if observed.value < required.minimum:
+        return Result(
+            name,
+            FAIL,
+            f"observed: NEVER APPLIED (or applied and reverted). running value {observed.value}, "
+            f"below the required floor of {required.minimum}. source {observed.source!r}, "
+            f"pending_restart = false.\n"
+            f"         Nothing is pending, so the cluster is not one restart away from being "
+            f"correct - postgresql.auto.conf does not carry this setting. This is not the same "
+            f"failure as an ALTER SYSTEM awaiting a restart.\n"
+            f"         Fix: docs/runbooks/cluster-settings.md.{tail}",
+        )
+
+    return Result(
+        name,
+        PASS,
+        f"observed: running value {observed.value} (floor {required.minimum}), source "
+        f"{observed.source!r}, no restart pending.{tail}",
+    )
+
+
+# The two settings the lock-table arithmetic multiplies against. Read from the cluster rather than
+# hardcoded, so the slot count this gate REPORTS is this cluster's own and not a number copied from
+# the instance it was first written on (CLAUDE.md § 3's rule for the client/server majors).
+LOCK_TABLE_FACTORS = ("max_connections", "max_prepared_transactions")
+
+
+def lock_table_evidence(factors: dict[str, int], observed: ObservedSetting | None) -> str:
+    """The slot arithmetic, computed from what the cluster reports. Evidence, never a verdict."""
+    if observed is None or not all(key in factors for key in LOCK_TABLE_FACTORS):
+        return ""
+    backends = factors["max_connections"] + factors["max_prepared_transactions"]
+    slots = observed.value * backends
+    return (
+        f"lock table: {observed.value} * ({factors['max_connections']} + "
+        f"{factors['max_prepared_transactions']}) = {slots:,} slots, cluster-wide."
+    )
+
+# ---------------------------------------------------------------------------------------------
 # The gates, run against the real machine
 # ---------------------------------------------------------------------------------------------
 
@@ -1069,6 +1182,84 @@ def gate_migrations() -> list[Result]:
     return [check_migration_count(applied, on_disk)]
 
 
+def gate_cluster_settings() -> list[Result]:
+    """One result per REQUIRED_SETTINGS entry, read from the running cluster.
+
+    A SKIP without a database, per this file's convention and CLAUDE.md § 13 - and a FAIL, not a
+    pass, if REQUIRED_SETTINGS is ever emptied. A gate over an empty collection reports every
+    member of that collection as verified and is green forever (CLAUDE.md § 22); the collection
+    being empty is the one case where that is indistinguishable from working.
+
+    The TUNER BASELINE IS DELIBERATELY NOT READ HERE. It is recorded, not enforced: its values are
+    a function of the instance's memory and cpu count, so a rebuild onto a different size derives
+    different ones CORRECTLY, and a gate enforcing them would go red on a working cluster. Compare
+    it with `--resolve-baseline`, which prints a diff and returns no verdict.
+    """
+    if not REQUIRED_SETTINGS:
+        return [
+            Result(
+                "cluster settings are declared",
+                FAIL,
+                "observed: REQUIRED_SETTINGS is empty. This gate would otherwise report zero "
+                "failures over zero settings and read as green - a gate over an empty collection "
+                "is the failure it exists to prevent (CLAUDE.md § 22).",
+            )
+        ]
+
+    if not os.environ.get("DATABASE_URL"):
+        return [
+            Result(
+                f"cluster setting {required.name} >= {required.minimum}",
+                SKIP,
+                "DATABASE_URL is not set, so the running cluster was not queried. This is a SKIP, "
+                "not a pass - the setting has NOT been checked. Run: set -a; . ./.env; set +a",
+            )
+            for required in REQUIRED_SETTINGS
+        ]
+
+    wanted = [required.name for required in REQUIRED_SETTINGS]
+    try:
+        sys.path.insert(0, str(REPO_ROOT))
+        from app import db  # noqa: PLC0415 - deliberately late, so the gate can SKIP without it
+
+        with db.connection() as conn:
+            rows = conn.execute(
+                "SELECT name, setting, source, pending_restart FROM pg_settings "
+                "WHERE name = ANY(%s)",
+                (wanted + list(LOCK_TABLE_FACTORS),),
+            ).fetchall()
+    except Exception as exc:  # noqa: BLE001 - any failure here is a gate failure, with its cause
+        return [
+            Result(
+                f"cluster setting {required.name} >= {required.minimum}",
+                FAIL,
+                f"observed: could not query pg_settings: {type(exc).__name__}: {exc}",
+            )
+            for required in REQUIRED_SETTINGS
+        ]
+
+    observed_by_name = {
+        name: ObservedSetting(name, int(setting), source, bool(pending))
+        for name, setting, source, pending in rows
+        if name in set(wanted)
+    }
+    factors = {
+        name: int(setting) for name, setting, _source, _pending in rows
+        if name in LOCK_TABLE_FACTORS
+    }
+
+    return [
+        check_required_setting(
+            required,
+            observed_by_name.get(required.name),
+            lock_table_evidence(factors, observed_by_name.get(required.name))
+            if required.name == "max_locks_per_transaction"
+            else "",
+        )
+        for required in REQUIRED_SETTINGS
+    ]
+
+
 def gate_client_server_majors() -> list[Result]:
     """One result. Reads both files; neither major is a constant in this module.
 
@@ -1103,6 +1294,7 @@ def run_all_gates() -> list[Result]:
     results.extend(gate_env())
     results.extend(gate_data_volume())
     results.extend(gate_migrations())
+    results.extend(gate_cluster_settings())
     return results
 
 
@@ -1233,6 +1425,99 @@ def _digest_command(write: bool, run=subprocess.run, repo_root: Path = REPO_ROOT
     return 0
 
 
+def _baseline_command(write: bool) -> int:
+    """Capture, or diff, the cluster's non-default settings. NEVER A VERDICT.
+
+    This exists for the same reason `--write-digest` does: 33 setting values are not something a
+    human should be typing into a committed file. CLAUDE.md § 13 records that hand-editing a
+    digest failed twice, and a baseline is thirty-three digests.
+
+    It prints a diff against the committed baseline and returns 0 whether or not they agree,
+    because a re-derived baseline that DIFFERS is the expected outcome on a differently-sized
+    instance. Deciding what a difference means is the human's, and the difference being visible at
+    all is the whole point - until this existed there was no committed side to diff against.
+    """
+    from infra.postgres.settings import (  # noqa: PLC0415 - local, so --dry-run needs no database
+        BASELINE_NEVER_CAPTURED,
+        TUNER_BASELINE_PATH,
+        load_tuner_baseline,
+    )
+
+    if not os.environ.get("DATABASE_URL"):
+        print(
+            "DATABASE_URL is not set, so the cluster was not queried. Nothing was written.\n"
+            "Run: set -a; . ./.env; set +a",
+            file=sys.stderr,
+        )
+        return 2
+
+    from app import db  # noqa: PLC0415
+
+    with db.connection() as conn:
+        rows = conn.execute(
+            "SELECT name, setting, unit, source FROM pg_settings "
+            "WHERE source NOT IN ('default', 'override', 'client', 'session') "
+            "ORDER BY name"
+        ).fetchall()
+        version = conn.execute("SELECT version()").fetchone()[0]
+
+    running = {
+        name: f"{setting}{unit}" if unit else str(setting) for name, setting, unit, _src in rows
+    }
+    sources = {name: source for name, _setting, _unit, source in rows}
+
+    committed = load_tuner_baseline()
+    print(f"{len(running)} non-default settings on the running cluster.\n")
+    if not committed.is_captured:
+        print(
+            f"The committed baseline is the {BASELINE_NEVER_CAPTURED} placeholder - it has never "
+            f"been captured, so there is nothing to diff against yet.\n"
+        )
+    else:
+        added = sorted(set(running) - set(committed.settings))
+        removed = sorted(set(committed.settings) - set(running))
+        changed = sorted(
+            name
+            for name in set(running) & set(committed.settings)
+            if running[name] != committed.settings[name]
+        )
+        if not (added or removed or changed):
+            print(f"IDENTICAL to the baseline captured {committed.captured_at}.\n")
+        for name in changed:
+            print(f"  CHANGED  {name}: committed {committed.settings[name]!r} -> running "
+                  f"{running[name]!r}  [{sources[name]}]")
+        for name in added:
+            print(f"  ONLY ON THE CLUSTER  {name} = {running[name]!r}  [{sources[name]}]")
+        for name in removed:
+            print(f"  ONLY IN THE BASELINE  {name} = {committed.settings[name]!r}")
+        print()
+
+    for name in sorted(running):
+        print(f"  {name:<40} {running[name]:<20} [{sources[name]}]")
+
+    if not write:
+        print("\nNothing was written. Re-run with --write-baseline to record this as the baseline.")
+        return 0
+
+    payload = {
+        "_comment": [
+            "MACHINE-WRITTEN by `python verify/preflight.py --write-baseline`. Do not hand-edit.",
+            "RECORDED, NOT ENFORCED: no preflight gate reads this file. Enforced overrides live",
+            "in infra/postgres/settings.py's REQUIRED_SETTINGS. These values are a function of the",
+            "instance's memory and cpu count, so a rebuild onto a different size derives different",
+            "ones CORRECTLY - this file exists so that difference is visible, not so it is a failure.",
+        ],
+        "captured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "instance": version,
+        "settings": running,
+    }
+    TUNER_BASELINE_PATH.write_text(
+        json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8"
+    )
+    print(f"\nWrote {len(running)} settings to {TUNER_BASELINE_PATH}. Review the diff and commit it.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -1257,12 +1542,28 @@ def main(argv: list[str] | None = None) -> int:
             "then show the diff"
         ),
     )
+    group.add_argument(
+        "--resolve-baseline",
+        action="store_true",
+        help=(
+            "print the running cluster's non-default settings beside the committed baseline, "
+            "and change nothing"
+        ),
+    )
+    group.add_argument(
+        "--write-baseline",
+        action="store_true",
+        help="record the running cluster's non-default settings as infra/postgres/tuner-baseline.json",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
         help="list the gates that would run, and run none of them",
     )
     args = parser.parse_args(argv)
+
+    if args.resolve_baseline or args.write_baseline:
+        return _baseline_command(write=args.write_baseline)
 
     if args.resolve_digest or args.write_digest:
         try:
@@ -1289,6 +1590,11 @@ def main(argv: list[str] | None = None) -> int:
             f"{DATA_DIR} is on a different st_dev than /",
             f"{DATA_DIR} holds at least {MINIMUM_DATA_BYTES:,} bytes",
             "schema_migrations row count equals the number of migration files",
+            *(
+                f"cluster setting {required.name} >= {required.minimum}, running value "
+                f"and pending_restart both"
+                for required in REQUIRED_SETTINGS
+            ),
         ):
             print(f"  - {name}")
         print(

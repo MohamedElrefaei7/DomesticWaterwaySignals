@@ -1,0 +1,12 @@
+{
+  "_comment": [
+    "MACHINE-WRITTEN. Do not hand-edit. Capture with: python verify/preflight.py --write-baseline",
+    "This is the PLACEHOLDER, not a capture. captured_at is the literal NEVER-CAPTURED sentinel so",
+    "that a missed capture step fails loudly rather than reading as a cluster with no non-default",
+    "settings - the same rule the committed image digest follows (CLAUDE.md § 12).",
+    "RECORDED, NOT ENFORCED: no preflight gate reads this file. See infra/postgres/settings.py."
+  ],
+  "captured_at": "NEVER-CAPTURED",
+  "instance": null,
+  "settings": {}
+}

@@ -1524,3 +1524,77 @@ every layer agreed with itself. Nothing was wrong anywhere except that the row w
   precision with an INVERTED mutation — put the forbidden call in a comment and require the test to
   stay **green** — because a guard that is merely strict is not the same as one that is correct, and
   only the second survives a codebase that documents itself.
+
+---
+
+## 24. Cluster settings
+
+Learned when a bare `SELECT min(ts), max(ts), count(*)` on the project's largest table failed with
+`out of shared memory` (Phase 13). §§ 14–23 govern data, claims, serialization, rendering, reach,
+and transaction boundaries. **This governs the configuration of the server all of it runs on.**
+
+The difference from every section above is that these values are not in this repo and cannot be.
+`postgresql.conf` lives in PGDATA on the data volume; all 33 non-default settings this cluster runs
+were written by `timescaledb-tune` when the image initialised the volume, and **none of them were
+in version control**. A rebuilt instance re-derives whatever the tuner chooses that day, silently,
+with no diff anywhere — which is § 2's theme 1 relocated below the application entirely.
+
+- **The achievable property is not "the settings live in git". It is "the committed values are
+  authoritative and any divergence is detected."** Same shape as the image digests (§ 12) and the
+  `postgresql-client` pin (§ 3): the artifact lives somewhere the repo cannot hold it, so the repo
+  holds the value it must have and a gate reads what is actually running. **The two fixes that look
+  obvious are both wrong and the file says so in its header**, because the next reader's instinct
+  is to reach for them: bind-mounting `postgresql.conf` breaks `initdb` on a fresh volume — the
+  exact case being made reproducible — and `include_dir` is commented out in the generated file
+  *and* cannot be set by `ALTER SYSTEM`, so enabling it requires editing the file that cannot be
+  mounted.
+- **`ALTER SYSTEM` is the application mechanism, and it is a human step.** It writes
+  `postgresql.auto.conf`, which Postgres reads after `postgresql.conf` and which therefore wins;
+  that file was empty when this started, so nothing the tuner chose is lost. Hand-editing
+  `postgresql.conf` instead is the untracked hand-edit this contract exists to detect, performed as
+  the fix for it. Nothing in the repo issues `ALTER SYSTEM`, as nothing in it runs `terraform apply`
+  (§ 1).
+- **Two lists, and merging them makes the gate fail on a correct state.** `REQUIRED_SETTINGS` are
+  the deliberate overrides, enforced, each with its reason stored beside the value.
+  `TUNER_BASELINE` is what the tuner derived for *this* instance's size — recorded, never enforced,
+  because a rebuild onto a larger instance derives a larger `shared_buffers` **correctly**, and a
+  guard that goes red on a correct state gets disabled rather than fixed. Its purpose is that the
+  re-derivation is *visible*; before it existed, no committed side existed to diff against.
+- **The baseline is captured by a command, never typed**, and its committed placeholder is a
+  sentinel that cannot be mistaken for a capture. `{}` would read as "captured, and this cluster
+  runs nothing but defaults" — the placeholder-that-resolves failure § 12 forbids for digests, and
+  § 22's gate over an empty collection.
+- **A required setting is a FLOOR, not an equality.** Equality guarantees only that nobody may ever
+  be more generous than us, and makes a well-reasoned increase fail the gate.
+- **The gate checks the running value AND `pending_restart`, with distinct messages, and neither
+  half is redundant.** A postmaster-scoped setting keeps reporting its old value after a successful
+  `ALTER SYSTEM`, so the two halves catch opposite failures: **the case that proves
+  `pending_restart` is a setting being LOWERED** — running value still meets the floor,
+  `pending_restart` true, and the restart that makes it false happens at boot, unattended, long
+  after the `ALTER SYSTEM` has left anybody's shell history. A `pending_restart`-only gate fails the
+  other way and is the more tempting mistake, because it reads as the more sophisticated check: a
+  cluster where nobody applied anything reports clean. **A fixture built at a failing value goes red
+  under both mutations, for the wrong reason, and proves nothing about either half.**
+- **A number whose size is an argument carries the argument.** `max_locks_per_transaction = 512`
+  is written with the arithmetic that produced it — `slots = value × (max_connections +
+  max_prepared_transactions)`, the measured demand it was sized against, and what the extra slots
+  cost — because a bare round number gets tidied downwards by somebody economising on memory who
+  cannot see what it was for. The gate **computes and reports the slot count from the cluster's own
+  factors**, never from a constant copied off the instance it was first written on.
+
+### A fourth instance of one shape, so it stops being three incidents
+
+**Any check whose subject is text must exclude the text that documents the check.** This has now
+happened four times: `verify/preflight.py`'s version parser read a Dockerfile *comment* explaining
+the pin and reported a correct file as broken (§ 3); two module docstrings name the call their own
+AST scan forbids (§ 23); `test_no_transaction_marker_only_counts_on_the_first_line` guards exactly
+this for migration markers (§ 12); and the first draft of
+`test_nothing_in_the_repo_issues_alter_system` scanned every string constant in `preflight.py`,
+matched the gate's own failure message — which names `ALTER SYSTEM` to tell the operator the fix —
+and failed on a correct file.
+
+**The fix is always to narrow the SUBJECT, never to weaken the pattern.** The weaker pattern is
+what the failure invites, and it silently stops catching the thing. Walk the AST for what is
+*executed* — the arguments of `.execute()`, the call site itself — so prose is not in scope at all.
+Then confirm precision with an **inverted mutation** (§ 23): the documenting prose is already
+present, so the guard must be **green** with it there.

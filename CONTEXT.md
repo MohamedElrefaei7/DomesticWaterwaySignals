@@ -463,6 +463,73 @@ is not the first time.
 
 ---
 
+## Phase 13 — the cluster's own settings, and the chunk interval
+
+### Part 1 — 33 settings were untracked, and `max_locks_per_transaction` is the one that bit
+
+**The symptom, measured on the instance 2026-08-18.** A bare
+`SELECT min(ts), max(ts), count(*) FROM gauge_readings_iv` failed outright:
+
+```
+ERROR:  out of shared memory
+HINT:  You might need to increase max_locks_per_transaction.
+```
+
+The project's largest table was **not fully queryable**, and the health endpoint's freshness check
+reported `CANNOT BE CHECKED` for it — correctly refusing rather than reporting a false fresh
+(§ 14), but refusing nonetheless. Intermittent, because the threshold is concurrency-dependent: it
+appeared, vanished after a rebuild, and returned once the nightly backup added lock demand.
+
+**The arithmetic.** `gauge_readings_iv` held **986 chunks for 258,739 rows** — 262 rows per chunk,
+18.9 years at a 7-day interval. A query over the whole table takes a lock per chunk plus one per
+index per chunk, roughly **2,000 slots**. The cluster's lock table is
+`max_locks_per_transaction × (max_connections + max_prepared_transactions)` = 128 × (25 + 0) =
+**3,200 slots, cluster-wide** — not per transaction, despite the name. Raised to 512, that is
+12,800 slots, at roughly 270 bytes per slot: about **3.3 MB against the default's 864 KB**, so the
+change costs under 2.5 MB on an instance with 1.9 GB and a `shared_buffers` already at 477 MB.
+
+**THE LARGER FINDING IS NOT THE LOCK SETTING.** `postgresql.conf` lives at
+`/var/lib/postgresql/data/`, on the data volume, written by `timescaledb-tune` when the image
+initialised on 2026-08-11. **All 33 non-default settings come from there and none were in version
+control.** A rebuilt instance re-derives whatever the tuner chooses that day, silently, with no
+diff anywhere. `max_locks_per_transaction` is not a special case; it is the setting that happened
+to surface it.
+
+**What is achievable, and what is not.** The settings cannot be moved into the repo:
+
+- Bind-mounting `postgresql.conf` **breaks `initdb` on a fresh volume**, which is the exact case
+  being made reproducible.
+- `include_dir` is commented out in the generated file **and cannot be set by `ALTER SYSTEM`**, so
+  enabling it requires editing the file that cannot be mounted.
+
+So the property is **detected divergence**, not settings-in-git — the same shape as the image
+digests and the client-version pin. Recorded as contract in `CLAUDE.md § 24`, values in
+`infra/postgres/settings.py`, procedure in `docs/runbooks/cluster-settings.md`.
+
+**Two lists, and the split is load-bearing.** `REQUIRED_SETTINGS` is enforced by a preflight gate;
+`TUNER_BASELINE` is recorded and never enforced, because the tuner's output is a function of
+instance size and a rebuild onto a larger instance derives different values *correctly*. Enforcing
+it would be a guard that goes red on a correct state — the `d-pre` shape.
+
+**THE BASELINE IS NOT YET CAPTURED, AND THAT IS THE HONEST STATE.** The 33 values were never
+recorded anywhere this agent can read, and inventing them was refused (§ 1). `tuner-baseline.json`
+carries the literal `NEVER-CAPTURED` sentinel rather than `{}`, and
+`verify/preflight.py --write-baseline` captures it from the running cluster — 33 settings are not
+a value a human should be typing, for the same reason a digest is not (§ 13). **Capturing and
+committing it is an open human step.**
+
+**Two halves of the gate, and the fixture that distinguishes them.** The gate reads the running
+value *and* `pending_restart`. The case that proves `pending_restart` is a setting being
+**lowered**: running value still meets the floor, `pending_restart` true, and the restart that
+makes it false happens at boot, unattended. A fixture built at a *failing* value goes red under
+both mutations for the wrong reason and proves nothing — the prompt specified that fixture and the
+mutation table did not hold against it; corrected, and both mutations now go red for their own
+reason.
+
+### Part 2 — the chunk interval and the 986 existing chunks
+
+See the phase log for the migration and its verification.
+
 ## § Up Next
 
 **THE DEPLOYMENT RUNBOOK IS `docs/runbooks/phase-11.md`, IN THE REPO AND VERSIONED.** It executes
