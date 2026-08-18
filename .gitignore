@@ -21,6 +21,7 @@ crash.*.log
 *.tfvars
 *.tfvars.json
 !*.tfvars.example
+*.plan.json
 # NOTE: .terraform.lock.hcl IS committed — it pins provider versions.
 
 # ---------------------------------------------------------------------------
