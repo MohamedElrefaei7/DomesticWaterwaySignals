@@ -13,6 +13,7 @@ silently, because a verification tier that vanishes quietly is worse than one th
 written.
 """
 
+import re
 import shutil
 import subprocess
 from datetime import datetime, timezone
@@ -27,21 +28,61 @@ from app.orchestration import backup
 pytestmark = pytest.mark.integration
 
 
-def _docker_available() -> bool:
-    if shutil.which("docker") is None:
-        return False
+def _client_major() -> int | None:
+    """The major of the pg_dump on PATH, or None if there is not one.
+
+    PHASE 12 REPLACED A DOCKER PRECONDITION WITH A CLIENT PRECONDITION. These tests used to skip
+    when Docker was unavailable, because the dump ran in a one-shot container off the pinned server
+    digest. The scheduler container has no Docker socket - mounting it is root-equivalent on the
+    host - so pg_dump is now the one in the image, invoked directly, and what these tests need is
+    a client rather than a daemon.
+    """
+    if shutil.which("pg_dump") is None:
+        return None
     try:
-        return subprocess.run(
-            ["docker", "info"], capture_output=True, timeout=20
-        ).returncode == 0
+        completed = subprocess.run(
+            ["pg_dump", "--version"], capture_output=True, text=True, timeout=20
+        )
     except (OSError, subprocess.TimeoutExpired):
-        return False
+        return None
+    if completed.returncode != 0:
+        return None
+    match = re.search(r"\(PostgreSQL\)\s+(\d+)", completed.stdout or "")
+    return int(match.group(1)) if match else None
 
 
-requires_docker = pytest.mark.skipif(
-    not _docker_available(),
-    reason="Docker is not available; the dump runs in a one-shot container off the pinned digest",
+CLIENT_MAJOR = _client_major()
+
+requires_pg_client = pytest.mark.skipif(
+    CLIENT_MAJOR is None,
+    reason="no pg_dump on PATH; the dump is invoked directly rather than in a container",
 )
+
+
+def skip_unless_client_matches_server(database_url: str) -> int:
+    """Skip, at RUN time, when the local client's major differs from the server under test.
+
+    ONLY THE JOB-LEVEL TESTS NEED THIS, and the distinction is worth stating. The archive-shape
+    tests are about what pg_restore does to a truncated file, which any recent client answers the
+    same way. The job-level tests drive the real entrypoint, and the real job REFUSES a major
+    mismatch on purpose - so on a machine whose client is a different major they must skip rather
+    than pass, and they must not stub the version check out. Stubbing it would make the only tests
+    that exercise the whole path stop exercising the guard that path now depends on.
+
+    A run-time skip rather than a `skipif` decorator because the server's major is a fact about
+    DATABASE_URL, which does not exist at collection time. A SKIP with this reason is visible in
+    the report; it does not read as a pass (CLAUDE.md § 13).
+    """
+    with db.connection(database_url) as conn:
+        server = backup.server_major(conn)
+    if CLIENT_MAJOR != server:
+        pytest.skip(
+            f"local pg_dump is major {CLIENT_MAJOR} and the server under test is major {server}; "
+            f"the job refuses a mismatch by design (CLAUDE.md § 3), so this path cannot be "
+            f"exercised here. It runs on the instance, where the scheduler image's client is "
+            f"pinned to the server's major."
+        )
+    return server
 
 
 @pytest.fixture
@@ -73,13 +114,17 @@ def scheduler_table(migrated_db, database_url):
 
 @pytest.fixture
 def archive(tmp_path, scheduler_table, database_url):
-    """A real custom-format archive of the migrated test database, dumped in the pinned image."""
-    image = backup.timescaledb_image()
+    """A real custom-format archive of the migrated test database, dumped by the local client.
+
+    NO CONTAINER, and no `host.docker.internal` rewriting of the connection host with it. That
+    rewriting existed because the dump ran inside a container that could not reach the host's
+    loopback; a direct invocation connects to whatever DATABASE_URL says, which is what production
+    does too.
+    """
     parts = backup.connection_parts(database_url)
 
     staging = tmp_path / "backups"
     staging.mkdir()
-    staging.chmod(0o777)
     archive_path = staging / "test.dump"
     pgpass = staging / ".pgpass"
     backup.write_pgpass(
@@ -93,38 +138,34 @@ def archive(tmp_path, scheduler_table, database_url):
 
         completed = subprocess.run(
             backup.dump_command(
-                image=image,
                 archive_path=archive_path,
-                pgpass_path=pgpass,
                 snapshot_id=snapshot.snapshot_id,
-                # The container reaches the host's mapped port over host networking.
-                host="host.docker.internal",
+                host=parts["host"],
                 port=parts["port"],
                 database=parts["database"],
                 user=parts["user"],
-                uid=0, gid=0,
-                staging_dir=staging,
             ),
             capture_output=True,
             text=True,
+            env=backup.pgpass_environment(pgpass),
         )
         counting.execute("COMMIT")
 
     if completed.returncode != 0:
         pytest.skip(f"could not produce a real dump in this environment: {completed.stderr[:400]}")
 
-    return archive_path, snapshot, image
+    return archive_path, snapshot
 
 
-@requires_docker
+@requires_pg_client
 def test_backup_integration_verification_passes_on_a_good_archive(archive):
     """The positive case, or the truncation test below could pass for the wrong reason."""
-    archive_path, _, image = archive
+    archive_path, _ = archive
     assert archive_path.stat().st_size > 0
-    backup.verify_archive(archive_path, image)  # no raise
+    backup.verify_archive(archive_path)  # no raise
 
 
-@requires_docker
+@requires_pg_client
 def test_backup_integration_truncated_archive_fails(archive):
     """THE INCIDENT THIS PHASE EXISTS FOR.
 
@@ -142,7 +183,7 @@ def test_backup_integration_truncated_archive_fails(archive):
     lists cleanly and cannot be restored. That is the cut this test needs in order to be able to
     fail for the reason it is named for.
     """
-    archive_path, _, image = archive
+    archive_path, _ = archive
     original = archive_path.read_bytes()
     assert len(original) > 300, "the archive is too small for a truncation to be meaningful"
 
@@ -151,7 +192,7 @@ def test_backup_integration_truncated_archive_fails(archive):
         broken.write_bytes(original[: int(len(original) * fraction)])
 
         with pytest.raises(backup.BackupError) as excinfo:
-            backup.verify_archive(broken, image)
+            backup.verify_archive(broken)
 
         message = str(excinfo.value)
         assert "verification FAILED" in message, f"{label}: {message}"
@@ -160,7 +201,7 @@ def test_backup_integration_truncated_archive_fails(archive):
         )
 
 
-@requires_docker
+@requires_pg_client
 def test_backup_integration_list_would_not_have_caught_it(archive):
     """WHY `--list` IS FORBIDDEN, demonstrated rather than asserted.
 
@@ -179,7 +220,7 @@ def test_backup_integration_list_would_not_have_caught_it(archive):
     contract in § 3 rests on a real incident, and a test that quietly implied the distinction does
     not matter would be worse than no test.
     """
-    archive_path, _, image = archive
+    archive_path, _ = archive
     original = archive_path.read_bytes()
 
     reproduced = []
@@ -188,17 +229,12 @@ def test_backup_integration_list_would_not_have_caught_it(archive):
         broken.write_bytes(original[: int(len(original) * fraction)])
 
         listed = subprocess.run(
-            [
-                "docker", "run", "--rm",
-                "-v", f"{broken.parent}:{broken.parent}",
-                image, "pg_restore", "--list", str(broken),
-            ],
-            capture_output=True, text=True,
+            [backup.PG_RESTORE, "--list", str(broken)], capture_output=True, text=True
         )
         list_accepted = listed.returncode == 0 and not listed.stderr.strip()
 
         try:
-            backup.verify_archive(broken, image)
+            backup.verify_archive(broken)
             restore_accepted = True
         except backup.BackupError:
             restore_accepted = False
@@ -225,14 +261,14 @@ def test_backup_integration_list_would_not_have_caught_it(archive):
         )
 
 
-@requires_docker
+@requires_pg_client
 def test_backup_integration_row_counts_cover_every_public_table(archive, database_url):
     """The recorded key set is EXACTLY the source's public-schema table set.
 
     Including zero-row tables. A table that vanishes between dump and restore is only detectable
     if its absence from the restored key set can be compared against its presence here.
     """
-    _, snapshot, _ = archive
+    _, snapshot = archive
 
     with db.connection(database_url) as conn:
         actual = {
@@ -249,7 +285,7 @@ def test_backup_integration_row_counts_cover_every_public_table(archive, databas
     assert actual, "the source database has no public tables; this test would pass over nothing"
 
 
-@requires_docker
+@requires_pg_client
 def test_backup_integration_row_counts_include_zero_row_tables(archive, database_url):
     """A table with no rows still gets a key, with the value 0.
 
@@ -257,7 +293,7 @@ def test_backup_integration_row_counts_include_zero_row_tables(archive, database
     record it. The answer is that its DISAPPEARANCE is what the restore test detects, and a key
     that was never written cannot go missing.
     """
-    _, snapshot, _ = archive
+    _, snapshot = archive
 
     with db.connection(database_url) as conn:
         tables = [
@@ -287,10 +323,10 @@ def test_backup_integration_row_counts_include_zero_row_tables(archive, database
         assert snapshot.row_counts[name] == 0
 
 
-@requires_docker
+@requires_pg_client
 def test_backup_integration_records_compressed_chunk_count(archive):
     """Compression is a headline measurement and is exactly what silently fails to survive."""
-    _, snapshot, _ = archive
+    _, snapshot = archive
     assert isinstance(snapshot.compressed_chunks, int)
     assert snapshot.compressed_chunks >= 0
 
@@ -388,34 +424,22 @@ def _with_password(url: str) -> str:
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
-def _reachable_run(argv, **kwargs):
-    """Run the real docker command, rewriting the loopback host the container cannot reach.
-
-    The job builds its argv from DATABASE_URL, which points at 127.0.0.1 on the host. Rewriting
-    here rather than adding a host override to the job keeps the production code free of a
-    parameter that exists only for tests.
-    """
-    return subprocess.run(
-        ["host.docker.internal" if part == "127.0.0.1" else part for part in argv],
-        **kwargs,
-    )
-
-
-@requires_docker
+@requires_pg_client
 def test_backup_integration_end_to_end(tmp_path, scheduler_table, database_url):
     """A real dump, really verified, "uploaded", and recorded.
 
     Asserts the two things only a job-level test can see: `rows_written` is NULL in job_runs, and
     the `backups` row's `row_counts` keys equal the source's public-schema table set exactly.
     """
+    skip_unless_client_matches_server(database_url)
+
     staging = tmp_path / "backups"
     staging.mkdir()
-    staging.chmod(0o777)
     s3 = RecordingS3()
 
     backup.backup_nightly_job(
         _with_password(database_url),
-        bucket="test-bucket", staging_dir=staging, s3=s3, run=_reachable_run,
+        bucket="test-bucket", staging_dir=staging, s3=s3,
     )
 
     assert len(s3.uploaded) == 1, f"expected one upload, got {s3.uploaded}"
@@ -465,20 +489,21 @@ def test_backup_integration_end_to_end(tmp_path, scheduler_table, database_url):
     assert list(staging.glob(".pgpass*")) == [], "the pgpass file was left behind"
 
 
-@requires_docker
+@requires_pg_client
 def test_backup_integration_keeps_local_file_when_upload_verification_fails(
     tmp_path, scheduler_table, database_url
 ):
     """A failed upload verification KEEPS the archive - it is the only copy known to restore."""
+    skip_unless_client_matches_server(database_url)
+
     staging = tmp_path / "backups"
     staging.mkdir()
-    staging.chmod(0o777)
     s3 = RecordingS3(content_length=1)  # S3 reports a one-byte object
 
     with pytest.raises(backup.BackupError, match="upload verification FAILED"):
         backup.backup_nightly_job(
             _with_password(database_url),
-            bucket="test-bucket", staging_dir=staging, s3=s3, run=_reachable_run,
+            bucket="test-bucket", staging_dir=staging, s3=s3,
         )
 
     survivors = list(staging.glob("*.dump"))
@@ -492,20 +517,21 @@ def test_backup_integration_keeps_local_file_when_upload_verification_fails(
     assert count == 0, "a backups row was written despite the upload failing verification"
 
 
-@requires_docker
+@requires_pg_client
 def test_backup_integration_copies_to_monthly_on_first_of_month(
     tmp_path, scheduler_table, database_url
 ):
     """Server-side copy on the first, and NOT on any other day."""
+    skip_unless_client_matches_server(database_url)
+
     staging = tmp_path / "backups"
     staging.mkdir()
-    staging.chmod(0o777)
 
     first = RecordingS3()
     backup.backup_nightly_job(
         _with_password(database_url), bucket="b",
         now=datetime(2026, 9, 1, 2, 0, tzinfo=timezone.utc),
-        staging_dir=staging, s3=first, run=_reachable_run,
+        staging_dir=staging, s3=first,
     )
     assert len(first.copied) == 1, f"no monthly copy on the first of the month: {first.copied}"
     assert first.copied[0][1].startswith(backup.MONTHLY_PREFIX)
@@ -515,6 +541,6 @@ def test_backup_integration_copies_to_monthly_on_first_of_month(
     backup.backup_nightly_job(
         _with_password(database_url), bucket="b",
         now=datetime(2026, 9, 2, 2, 0, tzinfo=timezone.utc),
-        staging_dir=staging, s3=other, run=_reachable_run,
+        staging_dir=staging, s3=other,
     )
     assert other.copied == [], f"a monthly copy was made on the 2nd: {other.copied}"

@@ -167,10 +167,29 @@ describes does not hold has already happened here.
   the request. **The parser that reads the pin strips comments first**, because the Dockerfile
   explains at length why the client is 16 and not 15, and a raw search over it read the explanation
   and reported a correct file as broken (§ 23).
-- **Dumps run from a one-shot container off the same pinned digest as the server**, never from
-  host tools. A host `pg_dump` at a different major version either refuses or produces a subtly
-  wrong archive; same digest means the versions match mechanically rather than by memory. The
-  digest is READ from the Compose file, never written down a second time.
+- **Dumps run from the `postgresql-client` INSIDE the scheduler image, never from host tools, and
+  the client's major is asserted against the server's AT RUNTIME before anything is dumped.** A
+  `pg_dump` at a different major either refuses or produces a subtly wrong archive. Through Phase
+  11 the dump ran in a one-shot container off the same pinned digest as the server, so the two
+  matched mechanically; containerising the scheduler made that impossible without the Docker
+  socket (§ 22), so the guarantee moved from structural to checked. **Two checks, and the division
+  between them is the point: preflight compares what the FILES say, and the job compares what is
+  RUNNING** — `pg_dump --version` against `SHOW server_version_num`. A stale image passes the first
+  and fails the second, which is the case neither catches alone. The server's major is read from
+  `server_version_num`, an integer, never from the `server_version` display string, which has
+  carried suffixes and a two-part major.
+- **The staging directory's writability is proven by WRITING A FILE, at job start, before the
+  counting transaction opens.** `os.access` is the one-line version and answers a different
+  question — it consults the real uid against the mode bits and knows nothing about a read-only
+  mount, a full filesystem, or an ACL, so it says yes where the write fails. The check matters
+  because the scheduler runs as uid 10001 against a bind mount **Docker creates as `root:root` when
+  the source is missing**: a provisioning step nobody ran becomes a directory that exists,
+  resolves, and cannot be written to, and the first thing to discover it would otherwise be
+  `pg_dump`, with a snapshot already exported.
+- **`PGPASSFILE` is set on the child process and any inherited `PGPASSWORD` is STRIPPED.** libpq
+  prefers `PGPASSWORD`, so leaving one in the environment means the 0600 file is silently not the
+  thing being used — and the dump still succeeds, which is what makes it invisible. A path to a
+  file only this uid can read is not a secret; the password itself never enters an environment.
 - **The dump writes with `-f` to a bind mount. Nothing is piped through stdout.**
   `pg_dump | cat > file` reintroduces the truncation class directly — a broken pipe with a zero
   exit is exactly "exits zero, writes a third of a file". The command is built as an argv list, so

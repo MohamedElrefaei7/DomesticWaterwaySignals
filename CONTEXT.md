@@ -200,6 +200,55 @@ alive would be exactly the process-liveness signal `§ 4` says not to trust.
 
 ---
 
+### Part 3 — `backup.py` invokes the in-image client
+
+The `docker run` path is **deleted, not kept behind a flag**: a retained branch reintroduces the
+socket requirement the moment somebody sets the flag, and dead code with a plausible use case is
+the code that comes back. Both invocations changed - the dump AND `verify_archive`'s full restore
+to `/dev/null` - because both were `docker run`. **What is verified did not change**: a full
+restore of every block, exit 0 AND empty stderr.
+
+**Two new guards, in this order, before the counting transaction opens:**
+
+1. **Staging writability, proven by writing a file.** `os.access` consults the real uid against
+   the mode bits and knows nothing about a read-only mount, a full filesystem, or an ACL.
+2. **`pg_dump --version`'s major == `SHOW server_version_num`'s major**, or the job fails. Read
+   from `server_version_num` (an integer: 160010 -> 16, 90600 -> 9) rather than the
+   `server_version` display string, which has carried suffixes and a two-part major.
+
+**`PGPASSFILE` stays and an inherited `PGPASSWORD` is now STRIPPED.** libpq prefers `PGPASSWORD`,
+so one left in the environment means the 0600 file is silently unused - and the dump still
+succeeds, which is what makes it invisible.
+
+**Measured, and it is § 2's theme 2 inside the guard added to close a theme-1 gap:** deleting the
+JOB'S CALL to the version check left the test that exercises the function directly **entirely
+green**. The function was proven to refuse while nothing proved anything ever asked it. Two
+job-level tests now drive the real entrypoint with the database faked out and assert the runner's
+call list, so "the job asks" is observed rather than assumed. The first attempt at those two tests
+also failed the mutation for the **wrong reason** - `failed to resolve host 'h'`, then
+`IndexError` from a too-thin fake connection - and neither counts (`§ 0`).
+
+**`timescaledb_image()` has no caller in `backup.py` any more.** It survives this commit only
+because `restore_test.py` still calls it, and goes when that does. Worth knowing: **it would not
+work inside the container anyway** - it reads `REPO_ROOT/docker-compose.yml`, and the image copies
+`app/` only, so there is no compose file at `/srv`.
+
+**The integration tier's precondition changed from Docker to a postgres CLIENT.** The archive-shape
+tests run against any recent client; the three job-level tests skip, with a stated reason, when the
+local client's major differs from the server under test - because the job refuses a mismatch by
+design, and stubbing the check out would make the only tests that exercise the whole path stop
+exercising the guard that path depends on.
+
+**RUN LOCALLY, 2026-08-17, against `timescale/timescaledb:2.26.2-pg16` at the pinned digest with
+migrations applied:** 8 of 11 pass with an 18 client (3 skip as designed); **11 of 11 pass with a
+pg16 client**, including the three job-level tests - a real `pg_dump`, a real restore-to-`/dev/null`
+verification, a real `backups` row, `rows_written` NULL, and the staging directory left empty. The
+pg16 client came from a **throwaway image built in the scratchpad and never committed**; the client
+version it resolved (`16.15-1.pgdg13+2`) is **NOT the value to commit** - `§ 5` requires that
+resolution on the instance.
+
+---
+
 ## § Up Next
 
 **THE DEPLOYMENT RUNBOOK IS `docs/runbooks/phase-11.md`, IN THE REPO AND VERSIONED.** It executes

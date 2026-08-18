@@ -16,9 +16,19 @@ So:
     moving part and is wrong: ingest runs concurrently, so those counts describe a database state
     the archive does not contain. The monthly restore test built on them would then either fail
     spuriously or acquire a tolerance wide enough to hide real loss.
-  - THE DUMP RUNS IN A CONTAINER OFF THE PINNED SERVER DIGEST. A host `pg_dump` at a different
-    major version than the server either refuses or produces a subtly wrong archive. Same digest
-    means the client and server versions match mechanically rather than by someone remembering.
+  - THE CLIENT'S MAJOR IS ASSERTED AGAINST THE SERVER'S, AT RUNTIME, BEFORE ANYTHING IS DUMPED.
+    A `pg_dump` at a different major than the server either refuses or produces a subtly wrong
+    archive. Through Phase 11 the dump ran in a one-shot container off the pinned server digest,
+    so the two matched mechanically. Phase 12 put this job inside a container, and a container
+    cannot `docker run` without the host's Docker socket - which is root-equivalent on the host,
+    a permanent widening of blast radius for a convenience (CLAUDE.md § 22).
+
+    So the client lives in the scheduler image and the agreement is CHECKED rather than
+    structural. There are two checks and the division between them is the point:
+    `verify/preflight.py` compares what the FILES say (the compose tag against the package pin),
+    and `assert_client_server_majors_agree` below compares what is RUNNING (the binary's own
+    `--version` against `SHOW server_version_num`). A stale image passes the first and fails the
+    second, which is exactly the case neither could catch alone.
 
 A failed run writes NO `backups` row. The failure lives in `job_runs`, where failures belong.
 """
@@ -72,6 +82,16 @@ FREE_SPACE_MULTIPLE = 2.0
 
 _IMAGE_RE = re.compile(r"^\s*image:\s*(?P<reference>\S+)\s*$")
 _SERVICE_RE = re.compile(r"^  (?P<name>[A-Za-z0-9_-]+):\s*$")
+
+# The client binaries, by bare name, resolved on PATH inside the scheduler image. Not absolute
+# paths: Debian puts them under /usr/lib/postgresql/NN/bin with symlinks in /usr/bin, and writing
+# the versioned path here would be a THIRD copy of the major - one that agrees with nothing and
+# that the version check could not catch, because it would be the thing being checked.
+PG_DUMP = "pg_dump"
+PG_RESTORE = "pg_restore"
+
+# `pg_dump (PostgreSQL) 16.10 (Debian 16.10-1.pgdg120+1)` -> 16.
+_CLIENT_VERSION_RE = re.compile(r"\(PostgreSQL\)\s+(?P<major>\d+)")
 
 
 class BackupError(RuntimeError):
@@ -190,6 +210,103 @@ def check_free_space(staging_dir: Path, last_byte_size: int | None, usage=shutil
     return free
 
 
+def assert_staging_writable(staging_dir: Path) -> None:
+    """WRITE A FILE AND DELETE IT. Never `os.access`, and never merely `is_dir()`.
+
+    The container runs as uid 10001 and bind-mounts this directory from the host. Docker creates a
+    MISSING bind-mount source as root:root, so a provisioning step nobody ran turns into a
+    directory that exists, resolves, and cannot be written to - and without this check the first
+    thing to discover that is `pg_dump`, several minutes and one exported snapshot later, with an
+    error about a file rather than about ownership.
+
+    `os.access(path, os.W_OK)` is the one-line version and it answers a different question. It
+    consults the real uid against the mode bits and knows nothing about a read-only mount, a full
+    filesystem, or an ACL - so it says yes in cases where the write fails. The check that crosses
+    the boundary where the failure lives is the write itself (CLAUDE.md § 13).
+
+    The probe is removed on every exit path. A leaked probe file is harmless and untidy; a leaked
+    probe file that a later run refuses to overwrite is neither.
+    """
+    probe = staging_dir / ".writable-probe"
+    try:
+        probe.write_bytes(b"")
+    except OSError as exc:
+        raise BackupError(
+            f"refusing to dump: {staging_dir} is not writable by uid {os.getuid()}: "
+            f"{type(exc).__name__}: {exc}\n"
+            f"Docker creates a missing bind-mount source as root:root, so this is usually a "
+            f"provisioning step that has not been run on this instance:\n"
+            f"    sudo install -d -o 10001 -g 10001 -m 0750 /mnt/data/backups "
+            f"/mnt/data/restore-test\n"
+            f"Refusing here is a clean failure. Discovering it after pg_dump has been invoked is "
+            f"a failed job holding an exported snapshot open."
+        ) from exc
+    finally:
+        probe.unlink(missing_ok=True)
+
+
+def client_major(run=subprocess.run, binary: str = PG_DUMP) -> int:
+    """The major of the pg_dump binary ACTUALLY ON PATH, from its own `--version`.
+
+    Not read from the Dockerfile, not read from the image tag, not passed in. The whole value of
+    this check over preflight's is that it interrogates the running artifact - an image built
+    before the pin was corrected passes every file-based check there is.
+    """
+    completed = run([binary, "--version"], capture_output=True, text=True)
+    if completed.returncode != 0:
+        raise BackupError(
+            f"could not run `{binary} --version` (exit {completed.returncode}): "
+            f"{(completed.stderr or '').strip() or '(no stderr)'}\n"
+            f"The client lives in the scheduler image (Dockerfile.scheduler); its absence means "
+            f"the image is not the one this job is supposed to be running in."
+        )
+
+    output = (completed.stdout or "").strip()
+    match = _CLIENT_VERSION_RE.search(output)
+    if match is None:
+        raise BackupError(
+            f"could not parse a major version out of `{binary} --version`: {output!r}\n"
+            f"Refusing rather than guessing: an unparsed version compared against the server "
+            f"would be a check that cannot fail."
+        )
+    return int(match.group("major"))
+
+
+def server_major(conn) -> int:
+    """The server's major from `server_version_num`, which is an INTEGER and unambiguous.
+
+    `SHOW server_version` returns a display string that has carried suffixes ("16.10 (Debian ...)")
+    and, historically, a two-part major ("9.6"). `server_version_num` is 160010 for 16.10 and
+    90600 for 9.6, so integer division by 10000 is correct on both sides of the version-scheme
+    change and needs no parsing at all.
+    """
+    return int(conn.execute("SHOW server_version_num").fetchone()[0]) // 10000
+
+
+def assert_client_server_majors_agree(conn, run=subprocess.run) -> int:
+    """THE RUNTIME HALF OF THE PAIR. Fails the job; never warns and proceeds.
+
+    EQUALITY, NOT COMPATIBILITY, for `verify/preflight.py`'s reason: `pg_dump` older than the
+    server refuses outright, and newer than the server usually works and is not what anything here
+    was verified against. A job that warned and carried on would produce an archive nobody had
+    reason to trust, and the warning would be in a log nobody reads at 03:00.
+    """
+    client = client_major(run=run)
+    server = server_major(conn)
+
+    if client != server:
+        raise BackupError(
+            f"refusing to dump: pg_dump is major {client} and the server is major {server}.\n"
+            f"These are pinned in two files - the client in Dockerfile.scheduler's "
+            f"postgresql-client-NN version, the server in docker-compose.yml's image tag - "
+            f"because the scheduler container has no Docker socket to run a matched one-shot "
+            f"container with (CLAUDE.md § 22). `verify/preflight.py` compares what those files "
+            f"SAY; this compares what is INSTALLED, so a mismatch here with preflight green means "
+            f"the running image is older than the checkout. Rebuild it."
+        )
+    return client
+
+
 def assert_excluded_table_exists(conn, table: str = EXCLUDED_DATA_TABLE) -> None:
     """THEME 1 IN A SINGLE FLAG.
 
@@ -285,30 +402,27 @@ def write_pgpass(path: Path, *, host: str, port: int, database: str, user: str, 
 
 def dump_command(
     *,
-    image: str,
     archive_path: Path,
-    pgpass_path: Path,
     snapshot_id: str,
     host: str,
     port: int,
     database: str,
     user: str,
-    uid: int,
-    gid: int,
-    staging_dir: Path = STAGING_DIR,
 ) -> list[str]:
-    """The full `docker run` argv. Built as a list so there is no shell and no pipe."""
+    """The `pg_dump` argv. Built as a list so there is no shell and therefore no pipe.
+
+    A DIRECT INVOCATION, NOT `docker run`. The container-spawning version is DELETED rather than
+    kept behind a flag: a retained branch reintroduces the Docker-socket requirement the moment
+    somebody sets the flag, and dead code with a plausible use case is the code that comes back.
+    The client it invokes is the one installed in this image (Dockerfile.scheduler), whose major is
+    asserted against the server's before this function is called.
+
+    The `--user`/`-v`/`--network host` juggling the container form needed is gone with it. The
+    process already runs as uid 10001, already sees /mnt/data/backups, and already reaches
+    `timescaledb` over the compose network.
+    """
     return [
-        "docker", "run", "--rm",
-        # So the archive is readable by the host process without a chown.
-        "--user", f"{uid}:{gid}",
-        "--network", "host",
-        "-v", f"{staging_dir}:{staging_dir}",
-        # Read-only, and the password never appears in the environment.
-        "-v", f"{pgpass_path}:/tmp/pgpass:ro",
-        "-e", "PGPASSFILE=/tmp/pgpass",
-        image,
-        "pg_dump",
+        PG_DUMP,
         "--host", host,
         "--port", str(port),
         "--username", user,
@@ -326,7 +440,25 @@ def dump_command(
     ]
 
 
-def verify_archive(archive_path: Path, image: str, run=subprocess.run) -> None:
+def pgpass_environment(pgpass_path: Path, environ: dict | None = None) -> dict:
+    """The child's environment: PGPASSFILE pointing at the 0600 file, and NO PGPASSWORD.
+
+    PGPASSFILE IS A PATH, NOT A SECRET, which is the whole reason this shape is permitted where
+    `PGPASSWORD` is not. A process environment is readable - /proc/<pid>/environ to the same uid,
+    and `docker inspect` when the value is set on the container - so the password itself never
+    goes there. A path to a file only this uid can read gives a reader nothing.
+
+    Any inherited PGPASSWORD is stripped rather than left alone. It would take precedence over
+    PGPASSFILE, so leaving one in place means the file this job took care to write at 0600 is
+    silently not the thing being used.
+    """
+    child = dict(os.environ if environ is None else environ)
+    child.pop("PGPASSWORD", None)
+    child["PGPASSFILE"] = str(pgpass_path)
+    return child
+
+
+def verify_archive(archive_path: Path, run=subprocess.run) -> None:
     """A FULL RESTORE TO /dev/null. Exit 0 AND empty stderr.
 
     NOT `pg_restore --list`. `--list` reads only the archive's table of contents; the dump that was
@@ -336,14 +468,14 @@ def verify_archive(archive_path: Path, image: str, run=subprocess.run) -> None:
     STDERR IS CHECKED SEPARATELY FROM THE EXIT CODE. pg_restore reports several classes of damage
     as warnings on stderr while still exiting zero, so an exit-code-only check is green over an
     archive that has already told you it is broken.
+
+    THE INVOCATION CHANGED IN PHASE 12 AND THE VERIFICATION DID NOT. This used to be a `docker run`
+    off the pinned server digest; it is now the pg_restore in this image, for the reason in the
+    module docstring. What is checked - a full restore of every block to /dev/null, exit 0 AND
+    empty stderr - is character for character what it was.
     """
     completed = run(
-        [
-            "docker", "run", "--rm",
-            "-v", f"{archive_path.parent}:{archive_path.parent}",
-            image,
-            "pg_restore", "--file", "/dev/null", str(archive_path),
-        ],
+        [PG_RESTORE, "--file", "/dev/null", str(archive_path)],
         capture_output=True,
         text=True,
     )
@@ -481,13 +613,22 @@ def backup_nightly_job(
         s3 = boto3.client("s3")
 
     staging_dir.mkdir(parents=True, exist_ok=True)
+    # BEFORE ANYTHING ELSE, AND BEFORE THE SNAPSHOT IS EXPORTED. The container runs as uid 10001
+    # against a bind mount Docker will have created as root:root if provisioning did not. Every
+    # later step - the connection, the snapshot, the dump - would succeed right up to the moment
+    # pg_dump opens the output file.
+    assert_staging_writable(staging_dir)
+
     archive_path = staging_dir / archive_name(now)
     pgpass_path = staging_dir / ".pgpass-backup"
 
-    image = timescaledb_image()
     parts = connection_parts(url)
 
     with db.connection(url) as pre:
+        # The runtime half of the version pin (see the module docstring). Inside the same
+        # connection block as the other pre-flight reads, and before the counting transaction, so
+        # a mismatch fails with nothing open and nothing written.
+        assert_client_server_majors_agree(pre, run=run)
         last = last_verified_backup(pre)
         assert_excluded_table_exists(pre)
     check_free_space(staging_dir, None if last is None else last["byte_size"])
@@ -506,17 +647,15 @@ def backup_nightly_job(
 
             completed = run(
                 dump_command(
-                    image=image,
                     archive_path=archive_path,
-                    pgpass_path=pgpass_path,
                     snapshot_id=snapshot.snapshot_id,
                     host=parts["host"], port=parts["port"],
                     database=parts["database"], user=parts["user"],
-                    uid=os.getuid(), gid=os.getgid(),
-                    staging_dir=staging_dir,
                 ),
                 capture_output=True,
                 text=True,
+                # The path to the 0600 file, never the password itself. See pgpass_environment.
+                env=pgpass_environment(pgpass_path),
             )
             if completed.returncode != 0:
                 raise BackupError(
@@ -527,7 +666,7 @@ def backup_nightly_job(
     finally:
         pgpass_path.unlink(missing_ok=True)
 
-    verify_archive(archive_path, image, run=run)
+    verify_archive(archive_path, run=run)
 
     byte_size = archive_path.stat().st_size
     check_size_floor(byte_size, last)
