@@ -140,8 +140,23 @@ def job_kwargs(cadence) -> dict:
     return {
         "func": JOB_FUNCTIONS[cadence.job_name],
         "trigger": IntervalTrigger(seconds=cadence.interval_seconds, timezone="UTC"),
-        # Decision 14. After a four-hour outage, catch up ONCE, promptly — rather than firing
-        # sixteen times in a row against a source that will rate-limit us for it.
+        # Decision 14. After a four-hour outage, catch up ONCE, promptly.
+        #
+        # WHAT THIS ACTUALLY PREVENTS IS NOT A BURST OF RUNS, and the note here used to say it was
+        # ("firing sixteen times in a row against a source that will rate-limit us for it").
+        # MEASURED 2026-08-18 on a real scheduler with three seeded missed slots:
+        #
+        #     coalesce=True     1 job_runs row:  success
+        #     coalesce=False    3 job_runs rows: missed, missed, success
+        #
+        # One run either way. The burst cannot happen, because § 12 requires misfire_grace_time
+        # STRICTLY SHORTER than the interval - so at most one missed fire time is ever inside the
+        # grace window and every older one is skipped as a misfire.
+        #
+        # What coalescing off produces is SPURIOUS `missed` ROWS: one per slot the outage
+        # swallowed, each recorded as a lost run when the truth is one late run. That is quieter
+        # than a burst and worse for the same reason - the heartbeat reads those rows, and § 4
+        # turns on `missed` meaning one thing.
         "coalesce": True,
         # Decision 14. Never the library default of one second.
         "misfire_grace_time": cadence.misfire_grace_time,

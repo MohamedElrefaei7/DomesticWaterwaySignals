@@ -320,6 +320,66 @@ and left **no `dws_restore_test_*` database behind**.
 
 ---
 
+### Part 5 — restart recovery, observed as behaviour
+
+`tests/orchestration/test_restart_recovery.py` (integration tier). **Nothing in it asserts a
+setting**; the observable is a row in `job_runs`. Real child processes, a real `SQLAlchemyJobStore`,
+a real Postgres - because process lifetime is the subject and a harness that stubbed the store, the
+scheduler or the decorator would reproduce the original bug's invisibility exactly.
+
+**The outage is SEEDED, not waited out.** A backdated `next_run_time` in `apscheduler_jobs` is what
+an outage leaves behind, and seeding it is the only way to get an outage's aftermath into a test
+that runs in seconds - `verify/restart_recovery.py` still does the multi-minute real-outage version
+and remains the live evidence.
+
+**Rows go to a dedicated test database** (`DATABASE_URL` + the per-test schema reset).
+`apscheduler_jobs` is cleaned up explicitly on every exit path, because `register_jobs()` never
+removes a job it does not recognise, so a leftover probe would keep firing under whatever scheduler
+starts next. **`job_runs` rows are deliberately NOT cleaned up**: the table is append-only by
+trigger (`§ 12`).
+
+**The probe interval is 120s and cannot be smaller.** `Cadence.__post_init__` rejects a grace at or
+above the interval, and the derivation is `max(60, interval // 2)` - so 121s is the true minimum
+and 120s is legal by exactly 60 seconds. A probe needing an exemption from the rule it verifies
+would not be verifying much.
+
+#### THE MEASUREMENT THAT CONTRADICTED THE PLAN, AND THREE PLACES IN THIS REPO
+
+**`coalesce=False` does not produce a burst of runs. It produces spurious `missed` rows.**
+
+Measured 2026-08-18, three seeded missed slots, real scheduler, identical seeding:
+
+| setting | `job_runs` rows |
+|---|---|
+| `coalesce=True` | 1: `success` |
+| `coalesce=False` | 3: `missed`, `missed`, `success` |
+
+**One run either way.** The burst cannot happen, and the reason is this project's own contract:
+`§ 12` requires `misfire_grace_time` **strictly shorter** than the interval, consecutive slots are
+one interval apart, so **at most one missed fire time is ever inside the grace window** - every
+older one is skipped as a misfire rather than run.
+
+Three places said otherwise and all three were corrected in the same commit:
+`app/orchestration/scheduler.py` ("firing sixteen times in a row against a source that will
+rate-limit us for it"), `app/orchestration/cadence.py`, and `verify/restart_recovery.py`.
+
+**The failure this actually prevents is quieter and arguably worse than a burst.** `missed` is
+supposed to mean "a scheduled run was lost". With coalescing off it also means "a slot went by
+during an outage", so a four-hour outage writes rows claiming two hours of runs were missed when
+one run was late - and the heartbeat reads those rows.
+
+**The first draft of the test asserted RUNS and passed over the mutation entirely.** Correcting it
+to assert the total row count is what made the guard real; the measurement above is what said which
+number to assert.
+
+**A second thing the first draft got wrong:** `test_past_due_job_runs_once_after_restart` asserted
+"a row appeared", which a `missed` row satisfies - so a `misfire_grace_time` of 1s left it green.
+It now filters to rows that represent the function having actually been called.
+
+**RUN: 5 passed in ~43s** against `timescale/timescaledb:2.26.2-pg16` at the pinned digest.
+
+---
+
 ## § Up Next
 
 **THE DEPLOYMENT RUNBOOK IS `docs/runbooks/phase-11.md`, IN THE REPO AND VERSIONED.** It executes

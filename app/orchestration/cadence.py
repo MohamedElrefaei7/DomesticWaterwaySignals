@@ -107,6 +107,13 @@ class Cadence:
         job whose grace is >= its interval can never produce a `missed` row — it always catches up
         instead. That is the case for any job hitting the 60-second floor.
 
+        THE CONVERSE, MEASURED 2026-08-18 rather than reasoned: because this derivation keeps the
+        grace STRICTLY SHORTER than the interval, at most one missed fire time is ever inside the
+        window — so turning coalesce off cannot produce a burst of RUNS. It produces one `missed`
+        row per swallowed slot instead. Three seeded missed slots gave 1 row with coalesce on and
+        3 (missed, missed, success) with it off. The rule this property depends on is the one
+        __post_init__ enforces above, which is why the two belong in the same file.
+
         For the heartbeat (900s interval, 450s grace) both outcomes are reachable: an outage that
         ends within 450s of the last due slot catches up, and one that ends later records a
         `missed` row. An absence of `missed` rows is therefore not by itself evidence that nothing

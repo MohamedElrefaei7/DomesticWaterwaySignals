@@ -17,11 +17,17 @@ What it asserts, per CLAUDE.md § 13:
 
     EXACTLY ONE fire after restart, and that one PROMPT.
 
-Both halves are load-bearing. `>= 1` passes when coalescing is broken and the job fires once per
-missed slot — the failure `coalesce=True` exists to prevent, which an operator would otherwise
-meet as an ingest source rate-limiting them. And a count-only assertion passes the
-`replace_existing` bug itself, whose symptom was a correctly-single fire at the wrong time: one
-full interval after restart instead of immediately.
+Both halves are load-bearing, and the promptness half is the one that catches the bug this file
+was written for: the `replace_existing` symptom was a correctly-single fire at the WRONG TIME, one
+full interval after restart instead of immediately, which a count-only assertion passes.
+
+`>= 1` IS STILL WRONG, but not for the reason this file used to give. It said a broken coalesce
+makes the job fire once per missed slot. MEASURED 2026-08-18 against a real scheduler with three
+seeded missed slots: `coalesce=False` produced `missed, missed, success` - ONE run, plus a
+spurious `missed` row per swallowed slot. The burst cannot happen, because CLAUDE.md § 12 keeps
+the grace strictly shorter than the interval, so only the newest missed fire time is ever inside
+the window. The count assertion below is about FIRES, which this harness reads from job_runs
+without filtering status - so it does still see the extra rows, and it should stay exact.
 
 The probe job lives here rather than in `app/` because it is apparatus. A probe in `app/` would
 mean production code shipping a job that exists only to be watched, and the next reader of the
