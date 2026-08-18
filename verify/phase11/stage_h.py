@@ -2,16 +2,22 @@
 
     python3 -m verify.phase11 h
 
-"EXACTLY THE FOUR PRODUCTION SERVICES" IS WRONG BY ONE, AND THE ONE MATTERS.
+"EXACTLY THE PRODUCTION SERVICES" IS WRONG BY ONE, AND THE ONE MATTERS.
 
-`docker-compose.yml` defines four services, but `frontend-build` carries `restart: "no"` and is
-gated by `service_completed_successfully` - it EXITS BY DESIGN once it has written the bundle into
-the `frontend_dist` volume. So the RUNNING set is three, and a containment check over four would
-fail on every correct instance while an exact-set check over four would fail too. Both are asserted
-separately and both are exact sets:
+`docker-compose.yml` defines five services as of Phase 12, but `frontend-build` carries
+`restart: "no"` and is gated by `service_completed_successfully` - it EXITS BY DESIGN once it has
+written the bundle into the `frontend_dist` volume. So the RUNNING set is one smaller than the
+declared set, and a containment check over the declared set would fail on every correct instance
+while an exact-set check over it would fail too. Both are asserted separately and both are exact
+sets:
 
-    running   == {timescaledb, api, caddy}
-    all       == {timescaledb, api, caddy, frontend-build}, with frontend-build exited 0
+    running   == {timescaledb, api, caddy, scheduler}
+    all       == running | {frontend-build}, with frontend-build exited 0
+
+`scheduler` joined the RUNNING set in Phase 12. It is the process that runs every job, and before
+it existed the scheduler had never run in production at all - `job_runs` held two verify/ probe
+rows and `apscheduler_jobs` held zero. A stage that did not expect it here would report the correct
+instance as wrong, which trains its own removal.
 
 An exited-nonzero `frontend-build` is its own failure: caddy's `service_completed_successfully`
 gate means the bundle is what it served, so a build that failed and a build that never ran look
@@ -47,7 +53,7 @@ THROWAWAY_PREFIX = "dws-restore-test-"
 
 # docker-compose.yml. `frontend-build` is deliberately in one set and not the other; see the
 # module docstring.
-RUNNING_SERVICES = frozenset({"timescaledb", "api", "caddy"})
+RUNNING_SERVICES = frozenset({"timescaledb", "api", "caddy", "scheduler"})
 ONE_SHOT_SERVICES = frozenset({"frontend-build"})
 ALL_SERVICES = RUNNING_SERVICES | ONE_SHOT_SERVICES
 

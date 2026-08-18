@@ -467,32 +467,50 @@ def test_h_fails_when_container_set_is_a_superset():
     assert "unexpected=['debug-shell']" in result.observed
 
 
-def test_h_expects_three_running_services_and_four_in_total():
+def test_h_expects_the_running_set_to_be_one_smaller_than_the_declared_set():
     """`frontend-build` EXITS BY DESIGN, so it is in one set and not the other.
 
-    `restart: "no"` and caddy's `service_completed_successfully` gate. An exact-set check over four
-    RUNNING services would fail on every correct instance, and a containment check over four would
-    pass while one was missing.
+    `restart: "no"` and caddy's `service_completed_successfully` gate. An exact-set check over the
+    whole declared set would fail on every correct instance, and a containment check over it would
+    pass while one service was missing.
+
+    RENAMED from `..._three_running_services_and_four_in_total`. There are four running and five in
+    total as of Phase 12 - `scheduler` joined both sets - and a test named for the old numbers
+    would be a green check teaching the next reader a count that stopped being true.
     """
-    assert stage_h.RUNNING_SERVICES == {"timescaledb", "api", "caddy"}
-    assert stage_h.ALL_SERVICES == {"timescaledb", "api", "caddy", "frontend-build"}
+    assert stage_h.RUNNING_SERVICES == {"timescaledb", "api", "caddy", "scheduler"}
+    assert stage_h.ALL_SERVICES == stage_h.RUNNING_SERVICES | {"frontend-build"}
 
     ok = stage_h.check_service_sets(
-        ["timescaledb", "api", "caddy"],
-        ["timescaledb", "api", "caddy", "frontend-build"],
+        ["timescaledb", "api", "caddy", "scheduler"],
+        ["timescaledb", "api", "caddy", "scheduler", "frontend-build"],
     )
     assert ok.status == PASS
 
     # frontend-build still running is a failure: it is supposed to have exited.
     still_running = stage_h.check_service_sets(
-        ["timescaledb", "api", "caddy", "frontend-build"],
-        ["timescaledb", "api", "caddy", "frontend-build"],
+        ["timescaledb", "api", "caddy", "scheduler", "frontend-build"],
+        ["timescaledb", "api", "caddy", "scheduler", "frontend-build"],
     )
     assert still_running.status == FAIL
 
+    # THE SCHEDULER ABSENT IS A FAILURE, not a quiet three-service pass. It is the service that
+    # runs every job; a stack missing it looks entirely healthy from the outside and does no work.
+    scheduler_down = stage_h.check_service_sets(
+        ["timescaledb", "api", "caddy"],
+        ["timescaledb", "api", "caddy", "scheduler", "frontend-build"],
+    )
+    assert scheduler_down.status == FAIL
+    assert "scheduler" in scheduler_down.observed
+
 
 def test_h_service_sets_match_the_compose_file():
-    """The four service names are a fact about docker-compose.yml, not a memory of it."""
+    """The service names are a fact about docker-compose.yml, not a memory of it.
+
+    Five as of Phase 12: `scheduler` joined, and Stage H's RUNNING set moved with it in the same
+    commit. This test is what makes that simultaneous rather than eventual - a verifier whose
+    service set lags the compose file reports the correct instance as wrong.
+    """
     compose = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     import re
 

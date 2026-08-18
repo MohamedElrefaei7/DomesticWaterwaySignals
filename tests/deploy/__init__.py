@@ -38,9 +38,13 @@ ENV_EXAMPLE_PATH = REPO_ROOT / ".env.example"
 # The domain. A literal, purchased, and not a placeholder.
 DOMAIN = "bargeanalysis.com"
 
-# The four services this commit's stack is made of. `worker` is still a host venv process
-# (Phase 12) and is deliberately not here.
-EXPECTED_SERVICES = {"timescaledb", "api", "frontend-build", "caddy"}
+# The FIVE services the stack is made of. `scheduler` joined in Phase 12; it is the process that
+# runs every job, and before it existed the scheduler had never run in production at all.
+EXPECTED_SERVICES = {"timescaledb", "api", "frontend-build", "caddy", "scheduler"}
+
+# Everything that is not a one-shot. Derived rather than written out a second time: the two sets
+# partition EXPECTED_SERVICES, and a hand-written third list is the one that goes stale.
+LONG_LIVED_SERVICES = EXPECTED_SERVICES - {"frontend-build"}
 
 # The one-shot. Everything else is long-lived and carries `restart: unless-stopped`; this one
 # exits on purpose, so that policy would make it a rebuild loop.

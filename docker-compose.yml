@@ -1,7 +1,21 @@
 # Inland Waterway Signals — the database, the read API, the frontend build, and the reverse proxy.
 #
-# CLAUDE.md § 6 fixes the final stack; `worker` is still a host venv process and is deliberately
-# absent (Phase 12). This file defines four services.
+# CLAUDE.md § 6 fixes the final stack. This file defines FIVE services: the scheduler joined in
+# Phase 12, and with it the scheduler began running in production for the first time.
+#
+# ===============================================================================================
+# THE SCHEDULER CONTAINER DOES NOT GET THE DOCKER SOCKET, AND NOTHING HERE DOES.
+# ===============================================================================================
+#
+# Until Phase 12 the backup job shelled out to `docker run` against the pinned server image. A
+# container cannot do that without /var/run/docker.sock, and mounting it is ROOT-EQUIVALENT ON THE
+# HOST: anything that can talk to the daemon can start a privileged container with / bind-mounted.
+# A compromise of the container whose job is running scheduled Python would become a compromise of
+# the instance, through a mount that reads like plumbing in this file.
+#
+# pg_dump and pg_restore live inside Dockerfile.scheduler instead, pinned to the server's major.
+# tests/deploy/test_compose_shape.py asserts the socket is absent from EVERY service, not just
+# from `scheduler` - a scheduler-only assertion invites somebody to add it to `api`.
 #
 # ===============================================================================================
 # PHASE 10 CHANGED WHO CAN REACH THIS STACK. IT IS NOW THE PUBLIC INTERNET.
@@ -28,10 +42,12 @@
 #   1. NO `ports:` KEY ON ANYTHING BUT CADDY. CLAUDE.md § 6 marks the database internal-only.
 #      Publishing 5432 — even bound to 127.0.0.1 — puts the database on the host's network
 #      namespace, which is a different security posture from "reachable only over the compose
-#      network". Phase 2's scheduler runs from a host venv and therefore does need host
-#      reachability while it is being verified; that is handled by an override file kept OUTSIDE
-#      this repo, not by adding a port here where it would outlive the reason for it. NOTHING IN
-#      THIS FILE DEPENDS ON THAT OVERRIDE — the api container talks to `timescaledb:5432`.
+#      network". The out-of-repo override that publishes it on loopback is still what the HOST-SIDE
+#      tooling uses — the migration runner, `verify/preflight.py`'s migration gate, and every
+#      `verify/phase11` stage connect from the host, and the migration runner cannot move into a
+#      container because the images deliberately do not contain `migrations/` (CLAUDE.md § 3). The
+#      scheduler no longer needs it. NOTHING IN THIS FILE DEPENDS ON THAT OVERRIDE — the api and
+#      scheduler containers talk to `timescaledb:5432`.
 #
 #   2. NO `user:` KEY. The official Postgres entrypoint starts as root, chowns PGDATA to the
 #      postgres user, and only then drops privileges. Setting `user:` skips the chown, and initdb
@@ -182,6 +198,91 @@ services:
       timeout: 10s
       retries: 3
       start_period: 20s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------------------------
+  # scheduler — APScheduler and every scheduled job. Internal only; publishes nothing.
+  # ---------------------------------------------------------------------------------------------
+  #
+  # THE FIRST COMMIT IN WHICH THE SCHEDULER RUNS IN PRODUCTION AT ALL. Before it, `job_runs` held
+  # two probe rows written by verify/ harnesses in August 2026 and nothing else, `apscheduler_jobs`
+  # held ZERO rows, and every ingest row in the database had arrived by manual backfill. The stack
+  # reported `degraded: true` correctly from Phase 8 onward and nobody was watching.
+  #
+  # NO SEPARATE systemd UNIT, DELIBERATELY. `dws-stack.service` already carries
+  # `RequiresMountsFor=/mnt/data` and `Requires=docker.service`, and the containers' own
+  # `restart: unless-stopped` policies do the supervision. A `dws-scheduler.service` would restate
+  # the mount guarantee in a second place, and the second copy is the one that drifts.
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile.scheduler
+
+    restart: unless-stopped
+
+    # NO `ports:`. It serves nothing and nothing connects to it; it is a process that wakes up on a
+    # timer. The published-port set across this whole stack stays exactly {80, 443} and is asserted
+    # by equality - if adding a service had required editing that assertion, something would be
+    # wrong with the service.
+    #
+    # NO `volumes:` ENTRY FOR /var/run/docker.sock. See the header. This absence is asserted
+    # stack-wide rather than for this service, because the reason applies equally to every service.
+
+    environment:
+      # ASSEMBLED FROM THE POSTGRES_* VARIABLES RATHER THAN PASSED THROUGH FROM `DATABASE_URL`,
+      # AND THE REASON IS THAT THE HOST AND THE CONTAINER NEED DIFFERENT HOSTS FOR ONE DATABASE.
+      #
+      # `.env`'s DATABASE_URL points at localhost, because host-side tooling still needs it (see
+      # the note at the top of this file). Inside the compose network, loopback is this container's
+      # own namespace, where nothing listens on 5432 - so this container needs `timescaledb`.
+      #
+      # The tempting shape is a fourth variable in `.env` carrying the same password a fourth time.
+      # That is a fourth copy of one secret, and `verify/preflight.py`'s agreement gate compares
+      # POSTGRES_PASSWORD against DATABASE_URL only - so the new copy would be the one nothing
+      # checks, which is always the copy that drifts (CLAUDE.md § 13). Composing from the variables
+      # that are ALREADY gated adds no copy at all: the password appears here as a reference, and
+      # the only literal is the compose-network hostname, which is a fact about this file.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-waterway}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is unset - copy .env.example to .env and fill it in}@timescaledb:5432/${POSTGRES_DB:-waterway}
+
+      # The backup bucket. NOT a secret and not derivable from anything else in here - it carries
+      # the account id, so it is environment-specific and belongs in .env beside the rest.
+      BACKUP_BUCKET: ${BACKUP_BUCKET:?BACKUP_BUCKET is unset - see .env.example; it is the terraform output `backup_bucket_name`}
+
+      # NO AWS KEYS, EVER. Credentials come from the instance role over IMDS, which is reachable
+      # from inside a container only because `http_put_response_hop_limit` is 2
+      # (infra/terraform/compute.tf, asserted by tests/terraform/test_compute.py). At 1 the token
+      # request dies one hop short and every S3 call fails with a credentials error that reads like
+      # an IAM misconfiguration - and sends you to the wrong file.
+
+    depends_on:
+      # MEANINGFUL FOR THE FIRST TIME AS OF STAGE B. The healthcheck used to be `pg_isready`, which
+      # answers yes to the temporary server `initdb` runs on a private unix socket - so this gate
+      # released dependents against a database that did not exist yet. It is now a real query over
+      # TCP as the real user.
+      timescaledb:
+        condition: service_healthy
+
+    volumes:
+      # THE BACKUP STAGING DIRECTORY, ON THE DATA VOLUME. The archive is written here with `-f`
+      # before it is verified and uploaded; a dump that filled the ROOT volume would take the
+      # instance down, while one that fills /mnt/data is bad and recoverable.
+      #
+      # IT MUST BE WRITABLE BY uid 10001, which is what this container runs as. Docker creates a
+      # missing bind-mount source as root:root, so an absent directory becomes an unwritable one -
+      # and the failure would land AFTER pg_dump had been invoked. Provisioning creates it:
+      #     sudo install -d -o 10001 -g 10001 -m 0750 /mnt/data/backups /mnt/data/restore-test
+      # and app/orchestration/backup.py asserts it is writable before dumping, because a
+      # provisioning step nobody ran is indistinguishable from one that ran wrong.
+      - /mnt/data/backups:/mnt/data/backups
+
+      # The restore test's scratch space: the archive is downloaded FROM S3 into here before being
+      # restored. Same ownership requirement, same reasoning.
+      - /mnt/data/restore-test:/mnt/data/restore-test
 
     logging:
       driver: json-file

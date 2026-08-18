@@ -15,6 +15,7 @@ from . import (
     REPO_ROOT,
     ENV_EXAMPLE_PATH,
     EXPECTED_SERVICES,
+    LONG_LIVED_SERVICES,
     ONE_SHOT_SERVICES,
     image_references,
     load_compose,
@@ -399,3 +400,240 @@ def test_timescaledb_healthcheck_requires_tcp_and_credentials():
         f"startup failure go away, the failure is still there and is now rarer - which is worse, "
         f"because an intermittent one that appears only under load is the expensive kind."
     )
+
+
+# ---------------------------------------------------------------------------------------------
+# Phase 12 — the scheduler service
+# ---------------------------------------------------------------------------------------------
+#
+# The scheduler is the first service in this stack that needed something the stack could not give
+# it without a security decision, so its tests are about what it does NOT have as much as what it
+# does. Every one of them is a line that would look harmless in a diff.
+
+# Every spelling of the Docker daemon's socket that a bind mount could name. The path is the one
+# that matters; the TCP forms are here because `-H tcp://` reaches the same daemon and somebody
+# reaching for a workaround reaches for those next.
+DOCKER_SOCKET_SPELLINGS = (
+    "/var/run/docker.sock",
+    "/run/docker.sock",
+    "docker.sock",
+    "docker.socket",
+)
+
+
+def test_no_service_mounts_the_docker_socket():
+    """STACK-WIDE, not scheduler-only, and that scope is the whole point of the test.
+
+    Mounting /var/run/docker.sock is root-equivalent on the host: anything that can talk to the
+    daemon can start a privileged container with / bind-mounted. A compromise of the container
+    whose job is running scheduled Python would become a compromise of the instance - and it also
+    voids `application containers run as a non-root user` in substance while satisfying it in
+    form, because the process is uid 10001 and can become root whenever it likes.
+
+    A scheduler-only assertion would read as sufficient and would invite the mount onto `api`
+    instead, where nothing was watching. The reason applies equally to every service, so the
+    assertion does too - and the walk asserts it saw services, because a check over an empty
+    collection is green forever and watching nothing (CLAUDE.md § 21).
+
+    The whole service mapping is walked, not just `volumes:`, because `privileged: true`,
+    `devices:` and a `-H tcp://` command flag all reach the same daemon by another door.
+    """
+    compose = load_compose()
+    services = compose["services"]
+    assert services, "walked no services - this test would pass over nothing"
+
+    offenders = []
+
+    def walk(node, trail):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                walk(value, f"{trail}.{key}")
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                walk(value, f"{trail}[{index}]")
+        elif isinstance(node, str):
+            for spelling in DOCKER_SOCKET_SPELLINGS:
+                if spelling in node:
+                    offenders.append((trail, node))
+
+    for name, service in services.items():
+        walk(service, f"services.{name}")
+        assert service.get("privileged") is not True, (
+            f"{name} runs privileged, which is the socket's blast radius without the socket"
+        )
+
+    assert offenders == [], (
+        f"a service mounts or reaches the Docker daemon: {offenders}. That is root on the host. "
+        f"pg_dump and pg_restore live inside Dockerfile.scheduler precisely so that nothing here "
+        f"needs it (CLAUDE.md § 22)."
+    )
+
+
+def test_restart_policy_set_is_exact_with_scheduler():
+    """The set of services carrying `unless-stopped`, compared by EQUALITY.
+
+    Stated as a set rather than as a per-service loop (which the test above already does), because
+    the two fail differently and both failures matter. The loop says "this service has the wrong
+    policy"; this says "the PARTITION changed" - a one-shot that acquired a restart policy, or a
+    long-lived service that lost one, and either is a different kind of mistake.
+
+    `frontend-build` is excluded because it exits on purpose. Under a policy that restarts a
+    container whenever it is not running, an exiting container is an infinite rebuild loop - and
+    it would look correct in the Compose file. The scheduler is NOT in that category: it is a
+    process that runs until it is stopped.
+    """
+    compose = load_compose()
+    observed = {
+        name for name, service in compose["services"].items()
+        if service.get("restart") == "unless-stopped"
+    }
+
+    assert observed == LONG_LIVED_SERVICES, (
+        f"the services carrying `restart: unless-stopped` are {sorted(observed)}, expected "
+        f"{sorted(LONG_LIVED_SERVICES)}. A one-shot under this policy is a rebuild loop; a "
+        f"long-lived service without it does not come back after a crash or a reboot."
+    )
+    assert observed | ONE_SHOT_SERVICES == EXPECTED_SERVICES, (
+        f"the two sets do not partition the stack: {sorted(observed)} | "
+        f"{sorted(ONE_SHOT_SERVICES)} != {sorted(EXPECTED_SERVICES)}. A service in neither has no "
+        f"stated restart behaviour at all."
+    )
+
+
+def test_published_port_set_unchanged():
+    """Adding a fifth service changed nothing about what is reachable from outside.
+
+    This restates the set equality asserted at the top of this file, and the restatement is the
+    finding rather than a duplicate: if adding a service had required EDITING that assertion,
+    something would be wrong with the service. The scheduler serves nothing and nothing connects
+    to it.
+    """
+    compose = load_compose()
+    assert set(compose["services"]) == EXPECTED_SERVICES, (
+        "the service set is not the expected five - this test is not measuring what it says"
+    )
+    assert "scheduler" in compose["services"], "no scheduler service to have added a port"
+
+    assert published_ports(compose) == PUBLIC_PORTS, (
+        f"the published set is {sorted(published_ports(compose))}, expected {sorted(PUBLIC_PORTS)}"
+    )
+
+
+def test_scheduler_has_no_ports_key():
+    """Named separately from the set check because it fails differently.
+
+    The set check says the stack's total exposure changed; this names the service, which is what
+    an operator reading a red test at speed actually needs.
+    """
+    scheduler = load_compose()["services"]["scheduler"]
+    assert not scheduler.get("ports"), (
+        f"the scheduler publishes {scheduler.get('ports')!r}. It serves nothing; a published port "
+        f"on it is a route into the container that runs every job, with no edge in front of it."
+    )
+    assert scheduler.get("network_mode") != "host", "the scheduler uses host networking"
+
+
+def test_scheduler_depends_on_timescaledb_healthy():
+    """`service_healthy`, not `service_started`, and Stage B is what made that mean anything.
+
+    The healthcheck was `pg_isready` through Phase 11, which answers YES to the temporary server
+    `initdb` runs on a private unix socket - so a `service_healthy` gate released dependents
+    against a database that did not exist yet. It is now a real query over TCP as the real user,
+    so this dependency is load-bearing for the first time.
+
+    It matters more for the scheduler than it did for the API. The API's first request would fail
+    and be retried; the scheduler's first act on a cold start is to open the persistent job store,
+    and a failure there is a process that exits into a restart loop.
+    """
+    scheduler = load_compose()["services"]["scheduler"]
+    depends = scheduler.get("depends_on")
+    assert isinstance(depends, dict), (
+        f"the scheduler declares depends_on as {depends!r}. The short list form cannot express a "
+        f"condition, so it waits only for the container to start."
+    )
+
+    gate = depends.get("timescaledb")
+    assert gate and gate.get("condition") == "service_healthy", (
+        f"the scheduler depends on timescaledb as {gate!r}, expected "
+        f"`condition: service_healthy`."
+    )
+
+
+def test_scheduler_mounts_backup_staging_path():
+    """Both /mnt/data paths the jobs write to, bind-mounted from the DATA volume.
+
+    /mnt/data/backups is where pg_dump writes the archive before it is verified and uploaded;
+    /mnt/data/restore-test is where the monthly job downloads an archive FROM S3 before restoring
+    it. Neither may be a named Docker volume: those live under /var/lib/docker on the ROOT disk,
+    which is the disk this project went to some trouble not to put anything large on. A dump that
+    fills root takes the instance down.
+
+    THE CONTAINER RUNS AS uid 10001 AND DOCKER CREATES A MISSING BIND-MOUNT SOURCE AS root:root,
+    so an absent directory silently becomes an unwritable one - and the failure would arrive after
+    pg_dump had already been invoked. Provisioning creates them with the right ownership and
+    app/orchestration/backup.py asserts writability before dumping; this only asserts the mounts
+    exist and come from the right disk.
+    """
+    scheduler = load_compose()["services"]["scheduler"]
+    mounts = [m for m in (scheduler.get("volumes") or []) if isinstance(m, str)]
+    assert mounts, "the scheduler mounts nothing - it has nowhere to write an archive"
+
+    for expected in ("/mnt/data/backups", "/mnt/data/restore-test"):
+        matching = [m for m in mounts if m.split(":")[1:2] == [expected]]
+        assert len(matching) == 1, (
+            f"expected exactly one mount at {expected}, found {matching!r} among {mounts!r}"
+        )
+        source = matching[0].split(":")[0]
+        assert source.startswith("/mnt/data/"), (
+            f"the scheduler's {expected} comes from {source!r}. It must be a bind mount under "
+            f"/mnt/data - the separate EBS volume - not a named volume on the root disk."
+        )
+        assert not matching[0].endswith(":ro"), (
+            f"{matching[0]!r} is mounted read-only. The job writes an archive into it."
+        )
+
+
+def test_scheduler_gets_a_container_reachable_database_url_and_no_aws_keys():
+    """The host inside the container is `timescaledb`, and no AWS credential is passed at all.
+
+    Loopback is this container's own namespace, where nothing listens on 5432; `.env`'s
+    DATABASE_URL still points at localhost because host-side tooling needs it (the migration
+    runner cannot move into a container - the images deliberately do not contain `migrations/`).
+    So the container's URL is assembled here from the POSTGRES_* variables rather than passed
+    through, which also means no fourth copy of the password in `.env` for the preflight agreement
+    gate to not be checking.
+
+    The AWS half is the one that would be quietest if it went wrong: a key pair in `.env` works,
+    so nothing fails, and the instance role's scoping - which grants no delete action of any kind
+    - is silently replaced by whatever the key can do.
+    """
+    scheduler = load_compose()["services"]["scheduler"]
+    environment = scheduler.get("environment")
+    assert isinstance(environment, dict) and environment, (
+        "the scheduler declares no environment mapping"
+    )
+
+    url = environment.get("DATABASE_URL")
+    assert url is not None, "the scheduler is not given DATABASE_URL"
+    assert "@timescaledb:5432/" in url, (
+        f"the scheduler's DATABASE_URL is {url!r}. Inside the compose network the host is the "
+        f"service name; loopback is this container's own namespace."
+    )
+    assert "${POSTGRES_PASSWORD:?" in url, (
+        f"the scheduler's DATABASE_URL does not take the password from POSTGRES_PASSWORD in the "
+        f"required `:?` form: {url!r}. A literal would be a second copy of the secret in a "
+        f"committed file; a `:-` default would start a container with an empty password."
+    )
+
+    bucket = environment.get("BACKUP_BUCKET")
+    assert bucket is not None and "${BACKUP_BUCKET:?" in bucket, (
+        f"BACKUP_BUCKET is passed as {bucket!r}; it must use the `:?` form so an unset value stops "
+        f"the container rather than failing inside the nightly job at 03:00."
+    )
+
+    for key in environment:
+        assert not key.startswith("AWS_"), (
+            f"the scheduler is given {key}. Credentials come from the instance role over IMDS; an "
+            f"AWS key in .env works, so nothing fails - it just quietly replaces the policy that "
+            f"grants no delete action of any kind."
+        )

@@ -145,6 +145,61 @@ pins in comments and requires the parser to stay green.
 
 ---
 
+### Part 2 — the fifth Compose service, and the scheduler runs in production for the first time
+
+`scheduler` builds from `Dockerfile.scheduler`, publishes nothing, mounts no socket, waits on
+`timescaledb: service_healthy`, and carries `restart: unless-stopped`. **The published-port set
+across the stack is unchanged at `{80, 443}` and its assertion was not edited** - if adding a
+service had required editing that assertion, something would have been wrong with the service.
+
+**No `dws-scheduler.service`, deliberately.** `dws-stack.service` already carries
+`RequiresMountsFor=/mnt/data` and `Requires=docker.service`, and the containers' own restart
+policies do the supervision. A second unit would restate the mount guarantee, and the second copy
+is the one that drifts.
+
+**`.env`'s `DATABASE_URL` STAYS ON `localhost`, WHICH IS NOT WHAT PHASE 11 EXPECTED.** The note in
+`.env.example` predicted that containerizing the worker would move it to `timescaledb:5432` and
+retire the out-of-repo override publishing 5432 on loopback. It does not: **host-side tooling still
+needs a host-reachable DSN** - the migration runner, `verify/preflight.py`'s migration gate, and
+every `verify/phase11` stage connect from the host, and the runner cannot move into a container
+because the images deliberately do not contain `migrations/` (`CLAUDE.md § 3`). **The override file
+stays.** `.env.example` now says so instead of predicting otherwise.
+
+**The container's `DATABASE_URL` is ASSEMBLED IN `docker-compose.yml` from `POSTGRES_USER` /
+`POSTGRES_PASSWORD` / `POSTGRES_DB` with the literal host `timescaledb`** - not passed through, and
+not a fourth variable in `.env`. A fourth copy of the password would be the copy
+`check_password_agreement` does not compare (it reads `POSTGRES_PASSWORD` against `DATABASE_URL`
+only), and the copy nothing checks is the copy that drifts (`§ 13`). Composing from variables that
+are already gated adds no copy: the only new literal is the compose-network hostname.
+
+**`BACKUP_BUCKET` joins `.env`** in the `:?` form. It is not a secret; it is in `.env` rather than
+in the committed compose file because it carries the AWS account id.
+
+**TWO DIRECTORIES MUST EXIST AND BE OWNED BY uid 10001 BEFORE THE JOBS RUN.** Docker creates a
+missing bind-mount source as `root:root`, so an absent directory silently becomes an unwritable
+one - and for the backup that failure lands *after* `pg_dump` has been invoked. Run once, as root:
+
+```
+sudo install -d -o 10001 -g 10001 -m 0750 /mnt/data/backups /mnt/data/restore-test
+```
+
+**Chosen: both belt and braces.** The provisioning command above, *and* an assertion at job start
+(Part 3), because a provisioning step nobody ran is indistinguishable from one that ran wrong.
+
+`/mnt/data/restore-test` is mounted as well as `/mnt/data/backups`; the prompt named only the
+first, but the monthly restore test downloads its archive from S3 into the second and cannot run
+without it.
+
+`deploy.sh` now builds `scheduler` alongside `frontend-build` and `api`, before `up -d`, so a build
+failure stops the deploy with the previous stack still running.
+
+**No healthcheck on the scheduler, stated rather than omitted.** There is nothing to probe: it
+serves no socket, and "is it doing its job" is a question about `job_runs` and `MAX(ts)`, which the
+heartbeat already answers from the data (`§ 4`). A healthcheck that only proved the process was
+alive would be exactly the process-liveness signal `§ 4` says not to trust.
+
+---
+
 ## § Up Next
 
 **THE DEPLOYMENT RUNBOOK IS `docs/runbooks/phase-11.md`, IN THE REPO AND VERSIONED.** It executes

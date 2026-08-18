@@ -153,7 +153,7 @@ run git pull --ff-only
 #
 #    tests/deploy/test_deploy_script.py asserts this line comes before the `up -d` line.
 # ---------------------------------------------------------------------------------------------
-run docker compose build frontend-build api
+run docker compose build frontend-build api scheduler
 
 # ---------------------------------------------------------------------------------------------
 # 3. Up. Compose starts timescaledb, waits for it to be healthy, starts api, runs frontend-build
