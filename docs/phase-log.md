@@ -14,9 +14,150 @@ current (`../CONTEXT.md`).
 
 **Read order for someone new:** `../CONTEXT.md` → `findings.md` → this file.
 
+**Two corrections are recorded in place below rather than by deletion**, both from 2026-08-18 —
+the `16.15-1.pgdg13+2` client version that was filed as "NOT the value to commit", and the
+freshness registry's claim that the newest `features` date comes from the daily-values job. **The
+reasoning that produced each was sound and the conclusion was wrong**, and both facts matter to a
+future reader, so the original stands with a dated correction beneath it.
+
+## Phase 11 — backups, restore verification, monitoring, rate limiting
+
+**VERIFIED ON THE INSTANCE, 2026-08-18.** Fifteen commits (`f29d734`… plus Stage B's seven from
+`6607ba7`), code-complete and unapplied since 2026-08-17, applied and exercised over Stages D–J.
+
+### What was applied
+
+**Terraform state migrated** to `domestic-waterway-signals-tfstate` with **native S3 locking**
+(`use_lockfile = true`, Terraform 1.15.8) — no DynamoDB table. **Thirteen resources applied:**
+
+- backup bucket `domestic-waterway-signals-backups-065158220014`
+- scoped IAM with **no delete action of any kind**
+- Route53 health check `38b360cc-531f-46df-a80b-e7df2c265db6`, string-matching `"degraded":false`
+- a CloudWatch alarm on it, with `insufficient_data_actions` on the same topic
+- SNS topic `arn:aws:sns:us-east-1:065158220014:domestic-waterway-signals-alerts`, subscription
+  **confirmed** (not `PendingConfirmation`)
+- a $25 monthly budget
+
+### THE FINDING THAT REFRAMED THE PHASE — the scheduler had never run in production
+
+Before Stage E the instance was at `895eaa0` (Phase 10). **`job_runs` held three rows, all written
+by `verify/` harnesses on 2026-08-11.** `apscheduler_jobs` existed — created by
+`SQLAlchemyJobStore`'s own DDL during a Phase 2 run — and held **zero rows**. There was **no
+`dws-scheduler.service`**; the only units were `dws-external-interface`, `dws-docker-firewall` and
+`dws-stack`. **Every ingest row in the database had arrived by manual backfill.** A kernel upgrade
+to `7.0.0-1010-aws` rebooted the instance on 2026-08-17 and nothing brought a scheduler back,
+because none existed.
+
+So `/api/health` had been reporting `degraded: true` **correctly** since Phase 8, and nobody was
+watching until Phase 11's health check existed. **The monitor found it within minutes of being
+created.** That is the phase's headline, and it is in `README.md § Monitoring` rather than only
+here.
+
+### Three placeholder incidents in one Terraform session, and a gap in the verifier
+
+All three caught before apply; full detail in `findings.md § I`. Summarised: `yes` consumed as
+`alert_email`; the tfvars *example*'s placeholders (`ami-0XXXXXXXXXXXXXXXX`, TEST-NET-3
+`203.0.113.0/24`) taken into effect and planning to replace the production instance and revoke real
+SSH; and `yes` consumed into `availability_zone`, forcing replacement of the data volume.
+
+**`d-pre` caught the second. `prevent_destroy` caught the third. Nothing caught the first.** A plan
+that *errors* writes no plan file, and `d-pre` reads a saved plan — **a verifier that inspects an
+artifact cannot see a failure that prevents the artifact existing.** That is an argument for
+`prevent_destroy` on more than the data volume, recorded as a known gap.
+
+**`d-pre` itself needed correcting three times** — a check that could never pass once the resources
+existed, a hand-typed second address list replaced by a union (17 → 30), and an IAM policy check
+structurally unrunnable on first apply because the document is `(known after apply)`.
+
+### Verified live
+
+`/api/health` returns **`"degraded":false` for the first time since the system existed.** Route53
+reports **Success from all 15 checker regions**. The CloudWatch alarm transitioned **`ALARM → OK`
+at 2026-08-18T19:54:44-04:00**, its first transition since creation. `d-post` **3 of 3**, `j`
+**5 of 5**. Stage J observed **30 consecutive requests to `/` all returning 200** — the accepted
+static-asset residual exposure, measured rather than assumed.
+
+---
+
+## Phase 12 — the scheduler as the fifth Compose service
+
+**VERIFIED ON THE INSTANCE, 2026-08-18.** The scheduler exists as a running thing for the first
+time in the project's life.
+
+### What was built
+
+**A fifth Compose service**, inheriting `RequiresMountsFor=/mnt/data` and the restart policy from
+`dws-stack.service` rather than getting its own unit — a second unit would restate the mount
+guarantee, and the second copy is the one that drifts.
+
+**No container gets the Docker socket.** It is root-equivalent on the host. `pg_dump` and
+`pg_restore` are installed into the scheduler image instead, pinned to
+`postgresql-client-16=16.15-1.pgdg13+2`, with preflight asserting client and server majors agree by
+deriving both from the files, and the job asserting it again at runtime against
+`SHOW server_version_num`.
+
+### The client-version placeholder encoded a wrong assumption, and failing to resolve is what surfaced it
+
+The committed literal ended **`pgdg120+0` — bookworm**. But `python:3.12-slim@sha256:2c941e86…`
+reports **Debian 13 (trixie)**. **A plausible bookworm version would have failed as
+package-not-found and sent the reader to the PGDG repository rather than to the base image.** The
+unresolvable placeholder is what pointed at the right layer.
+
+> **Correction, 2026-08-18.** `CONTEXT.md` recorded the scratchpad-resolved `16.15-1.pgdg13+2` as
+> **"NOT the value to commit"**, on the grounds that `§ 5` requires resolution on the machine that
+> runs it. **The rule was right and the conclusion was wrong.** Resolving on the instance produced
+> the *identical* string, because both machines derive the codename from the same pinned base
+> digest and therefore see the same PGDG suite. `§ 5` still holds — following it is what produced a
+> confirmed value rather than an assumed one — but a scratchpad resolution against the same pinned
+> digest is not, in fact, a different answer. The original reasoning is left in place above because
+> it was sound; only its conclusion was wrong.
+
+**Also found:** the repo carried **all-zero digest placeholders** for python, node and caddy while
+the instance held the real resolved values, **never committed back**. The instance's copy was
+authoritative.
+
+### First production job runs — all successful
+
+| Job | `rows_written` |
+|---|---|
+| `usgs_ingest` | 22,147 |
+| `usgs_daily_ingest` | 16 |
+| `usda_rates_ingest` | 0 |
+| `usda_movements_ingest` | 0 |
+| `features_build` | 1,046 |
+| `heartbeat` | NULL |
+
+**The `rows_written` contract produced all three of its distinct meanings on real data for the
+first time** (§ 4): a count; `0` meaning "ran and wrote nothing new"; and `NULL` meaning "this job
+writes no rows to this database". A schema that collapsed `NULL` into `0` would have made the
+heartbeat's row indistinguishable from the two USDA jobs' genuine no-op.
+
+**The Socrata short-page guard fired on the first live call:**
+
+```
+page 1 returned 63 of 1000 requested rows - SHORT, not necessarily last; paging continues until a page is empty
+```
+
+**A pager terminating on a short page would have truncated silently here, on the first run**
+(§ 16). This is the contract being exercised by production rather than by a fixture.
+
+### Backups
+
+| | Bytes | Tables | Compressed chunks |
+|---|---|---|---|
+| Backup 1 | 8,535,888 | 18 | 1,016 |
+| Backup 2 (post-0027) | 9,210,544 | 19 | 1,035 |
+
+So `gauge_readings_iv_archived_20260818` costs **674,656 bytes per nightly dump, about 8%** — **far
+less than the doubling anticipated**, because 986 tiny compressed chunks dump much smaller than
+their on-disk footprint suggests.
+
+---
+
 ## Phase 13 — cluster settings under version control, and the chunk interval
 
-**Two commits, both unapplied to the instance at the time of writing.**
+**VERIFIED ON THE INSTANCE, 2026-08-18.** Five commits: `3dee5c7`, `78eb514`, `2f50cee`, `59150f0`,
+`cebe5ee`.
 
 ### `3dee5c7` — the cluster's 33 settings were untracked
 
@@ -52,11 +193,89 @@ integration against a real TimescaleDB).
 - `verify/phase11/stage_f.py::EXPECTED_MIGRATIONS` 26 → 27. **The pin going red is the pin
   working.** Its companion test now reads the constant instead of repeating the literal four times.
 
-### Live verification is outstanding for both
+### `2f50cee` — the tuning candidate was filed at the wrong severity
 
-`ALTER SYSTEM` + restart, then 0027 with the scheduler stopped. The after-state compression figures
-are **not** recorded in `docs/findings.md` because none have been taken; the section says so
-explicitly rather than carrying a placeholder that reads as a measurement.
+The chunk interval had been logged as a **ratio** problem — 986 chunks dragging compression down.
+It was a **correctness** problem: a bare `SELECT min(ts), max(ts), count(*)` on the table failed
+with `out of shared memory`. **`max_locks_per_transaction × (max_connections +
+max_prepared_transactions)` = 128 × 25 = 3,200 slots**, cluster-wide despite the name, against a
+full-table query needing roughly 2,000 with index locks. Raised to 512 → **12,800 slots**, at a
+cost of roughly **3 MB** of shared memory.
+
+**Nothing in the original note was wrong; what it got wrong was the severity, and in a predictable
+direction.** The measurable consequence (a worse ratio) sat in a table already being measured. The
+unmeasurable one (lock exhaustion at some unknown concurrency) was in no table at all. **A finding
+logged against the number you happen to be looking at gets filed at the severity of that number.**
+
+### `59150f0` — the restore test's first run failed on one argument
+
+`restore_test.py` wrote its pgpass entry with `database=production_database` while `pg_restore`
+connects to the throwaway. **libpq matches all five fields and does not error on a non-matching
+entry — it falls through to prompting**, so it surfaced as
+`FATAL: password authentication failed`, which reads like a wrong credential. **The mechanism was
+entirely present**: file written, mode 0600, `PGPASSFILE` correctly exported.
+
+Fixed with `database="*"` (the throwaway does not exist when the pgpass is written), plus the
+durable half — **`-w` / `--no-password` on both clients**, which neither had carried. That converts
+the whole class from "looks like a wrong password" into "says no password was supplied".
+
+**Why the integration tier could not see it:** the harness authenticates with
+`POSTGRES_HOST_AUTH_METHOD=trust` and a `pg_hba.conf` reading `host all all all trust`. **On trust,
+libpq never consults the pgpass file at all**, so every assertion about it was vacuous — the
+helper's placeholder password literally spells `trust-auth-ignores-this`. A test already drove the
+real job end to end and **executed the defective line on every run, staying green with the defect
+reapplied.** Written up as `CLAUDE.md § 25`.
+
+**The message is TTY-dependent, and the instance's version was not the non-TTY one.** Off a TTY the
+failure is client-side `fe_sendauth: no password supplied`; `docker compose exec` allocates a TTY,
+which fed the prompt. Same root cause, different message depending on what answers — and `-w`
+removes the branch entirely.
+
+**First successful restore test:** 68 seconds, 19 tables compared, 1,035 compressed chunks on both
+sides, throwaway dropped after terminating one backend, `restore_verified_at` set on backup 2 only.
+
+### `cebe5ee` — three of five freshness thresholds were tripping on correct data
+
+Measured with **zero jobs overdue and every source publishing on schedule**. Full table and
+derivation in `findings.md § J`. The registry moved to
+`max_staleness >= cycle + observed_lag + one missed publication`, with the arithmetic committed as
+parsed `# DERIVATION:` lines rather than as a bare number.
+
+> **Correction, 2026-08-18.** The registry's comment said the newest `features` date "comes from
+> the daily-values job". **It does not.** `features` is built from `gauge_daily`, which
+> `app/features/rollup.py` reads from the **`gauge_series` view**, and 0010's precedence rule takes
+> the **instantaneous** row wherever one exists. So the newest feature date tracks
+> `gauge_readings_iv` — which is why `features` carried a row dated 2026-08-18 while
+> `gauge_readings_daily` ended at 08-16, an observation that looks impossible under the old comment
+> and is ordinary once you follow the view. The lag is nonetheless set to **2 days, not 0**,
+> because IV retention is a rolling window at three of four gauges, so falling back to the DV side
+> is normal operation and deriving from the fastest input would reintroduce the boundary-sitting
+> defect.
+
+**An existing test had encoded the defect as a guard.**
+`tests/ingest/test_usda_movements.py::test_both_usda_tables_are_in_the_freshness_registry` asserted
+`9 days < max_staleness < 14 days` — a band that **never counted the lag, permitted the broken 10
+days, and would have gone red on the correct value.** It is in the integration tier, so
+`-m "not integration"` reported **642 green over a changed contract**; only the full run caught it.
+
+**An ordering inverted, and it is emergent rather than a rule.** `cadence.py` chose
+`usda_rates_ingest` `overdue_after=14 days` explicitly so data-stale (then 10 days) would speak
+first. It is now job-overdue at 14 and data-stale at 17. **All five entries now have job-overdue
+firing first**, which before this change was true only of `gauge_readings_iv`. **That is a
+consequence of deriving each window from its source's publication behaviour, not a target that was
+aimed at, and it must not be enforced as a rule** — the two thresholds answer different questions
+and stay independently derived.
+
+### The advisory-lock question, answered rather than deferred
+
+**An advisory lock only detects a party that also takes it, and `usgs_ingest` takes none** — so
+`pg_try_advisory_lock` would have reported the coast clear against a running ingest. Rejected.
+
+What is used instead is a `job_runs` check plus `LOCK TABLE … ACCESS EXCLUSIVE` under a 30s
+`lock_timeout`. **The `job_runs` check is a snapshot, not a lock**: it closes the window where an
+ingest is *already* running and **cannot** close the window where one starts between the check and
+the lock. **Stopping the scheduler remains required, and the refusal must not be read as
+sufficient.**
 
 
 ## Contents
@@ -74,6 +293,13 @@ explicitly rather than carrying a placeholder that reads as a measurement.
 | 8 — the FastAPI read layer | 2026-08-16 | 2026-08-16 |
 | 9 — the React frontend | 2026-08-16 | 2026-08-16 (browser) |
 | 10 — domain, TLS, hardening | 2026-08-16 | **2026-08-17 (public internet)** |
+| 11 — backups, restore verification, monitoring | 2026-08-17 | **2026-08-18** |
+| 12 — the scheduler as the fifth Compose service | 2026-08-17 | **2026-08-18** |
+| 13 — cluster settings and the chunk interval | 2026-08-18 | **2026-08-18** |
+
+**Phases 11, 12 and 13 are written ABOVE this table**, following the convention the Phase 13 block
+established: the newest blocks sit at the top of the file where they are read, and Phases 1–10
+remain below in chronological order.
 
 
 ---

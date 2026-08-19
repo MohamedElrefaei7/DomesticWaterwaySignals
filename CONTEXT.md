@@ -3,7 +3,7 @@
 This is the **log**: where the project is now, what is open, and `§ Up Next`. Stable contracts live
 in `CLAUDE.md`, which outranks this file.
 
-**Last updated:** 2026-08-17. Phase 11 is code-complete and unapplied.
+**Last updated:** 2026-08-18. **Phases 11, 12 and 13 are applied and verified on the instance.**
 
 ## Where everything lives
 
@@ -16,7 +16,7 @@ moved verbatim** — nothing was summarized, and no finding was softened in the 
 | **`CONTEXT.md`** (this file) | Current state, open questions, `§ Up Next`, standing items, process notes |
 | **`docs/findings.md`** | Every measured finding, by domain, with its date and method |
 | **`docs/decisions.md`** | Decisions taken, the reason for each, and the alternatives rejected |
-| **`docs/phase-log.md`** | The per-phase verification blocks, chronological, Phase 1 → Phase 10 |
+| **`docs/phase-log.md`** | The per-phase verification blocks, Phase 1 → Phase 13 |
 | **`docs/query-outputs.md`** | Verbatim query output — the sweep tables, the gate results, the live responses |
 
 **Precedence is unchanged:** `CLAUDE.md` > this file > `docs/` > any handoff or summary document.
@@ -27,7 +27,35 @@ this file, this file is the current state and that one is the record of a moment
 
 ## Current state
 
-**PHASE 10 IS VERIFIED ON THE INSTANCE, 2026-08-17. `https://bargeanalysis.com` IS LIVE AND
+**PHASES 11, 12 AND 13 ARE VERIFIED ON THE INSTANCE, 2026-08-18. THE INSTANCE IS AT `cebe5ee`.**
+
+**`/api/health` returns `"degraded":false` for the first time since the system existed.** Route53
+reports **Success from all 15 checker regions**; the CloudWatch alarm transitioned **`ALARM → OK`
+at 2026-08-18T19:54:44-04:00**, its first transition since creation; `d-post` passes **3 of 3** and
+`j` passes **5 of 5**.
+
+**THE SCHEDULER RUNS.** Phase 11's monitor found that it never had — `job_runs` held three probe
+rows from `verify/` harnesses on 2026-08-11, `apscheduler_jobs` held zero, there was no
+`dws-scheduler.service`, and every ingest row had arrived by manual backfill. Phase 12 made it
+exist. **The system had been reporting `degraded: true` correctly since Phase 8 and nobody was
+watching**; the monitor found it within minutes of being created. That is the better story and it
+is in the README.
+
+**Phase 13 fixed a table that was not fully queryable.** `gauge_readings_iv` held 986 chunks and a
+bare `SELECT min(ts), max(ts), count(*)` failed with `out of shared memory`. Migration 0027
+consolidated it to 20 chunks and `max_locks_per_transaction` went 128 → 512. **The compression
+figures must be read with their caveat** (§ Phase 13 Part 2 below and `docs/findings.md § B`): the
+ratio moved 3.36:1 → 30.8:1, but most of that is the *uncompressed baseline* shrinking from 134.9 MB
+to 65.6 MB on more rows. **The honest headline is the index: 39,960,576 → 311,296 bytes.**
+
+**Five things are open**, listed in `§ Up Next` — the four the writeback brief named as
+deliberately unfinished, plus the tuner baseline, which Phase 13 opened and nothing since has
+closed. **None is a defect**; each is a measurement nobody has taken, a refactor nobody has done,
+or an operation only a human may run.
+
+---
+
+**PHASE 10 WAS VERIFIED ON THE INSTANCE, 2026-08-17. `https://bargeanalysis.com` IS LIVE AND
 PUBLIC.** Certificate issued on the first attempt, validated by Let's Encrypt from five distinct
 IPs; `http://` redirects with a 308; the stack survived a real reboot and came back unattended in
 ≈30 seconds; and `nc` to 5432 and 8000 **hangs rather than refusing**, which is the first
@@ -54,8 +82,10 @@ extending it (`CLAUDE.md § 22`, and `docs/decisions.md § Phase 10`).
 the edge, under a stated `CLAUDE.md § 22` amendment. **Static assets remain unlimited at the edge**
 — an accepted residual exposure, recorded as a decision. Not yet deployed.
 
-**Still degraded, still honestly.** `/api/health` reports `degraded: true` because no scheduler has
-run continuously across sessions. Phase 12 containerizes the worker and owns it.
+**~~Still degraded, still honestly.~~ CLOSED 2026-08-18 by Phase 12.** This line read: *"`/api/health`
+reports `degraded: true` because no scheduler has run continuously across sessions. Phase 12
+containerizes the worker and owns it."* It did, and the endpoint now reports `degraded: false`. The
+sentence is kept because it was true and correct for the whole period it stood.
 
 **What the project can claim about the river:** nothing quotable yet. The sweep scanned **6,966**
 pairs and **1** passed correction, contemporaneously at `lag_days = 0`, with a **negative**
@@ -98,7 +128,8 @@ no longer matches the data:
 ## Phase 12 — the scheduler runs in production
 
 **THE FINDING THAT SCOPES THE PHASE: THE SCHEDULER HAS NEVER RUN IN PRODUCTION.** `job_runs` holds
-two probe rows from 2026-08-11 written by `verify/` harnesses and nothing else. `apscheduler_jobs`
+**three** probe rows from 2026-08-11 written by `verify/` harnesses and nothing else. *(Corrected
+2026-08-18 from "two", which was written before the rows were counted on the instance.)* `apscheduler_jobs`
 exists - created by `SQLAlchemyJobStore`'s own DDL during a Phase 2 run - and holds **zero rows**.
 There is no `dws-scheduler.service`; the units are `dws-external-interface`, `dws-docker-firewall`
 and `dws-stack`. Every ingest row in the database arrived by manual backfill. So this is not
@@ -402,8 +433,10 @@ It now filters to rows that represent the function having actually been called.
 ### Part 6 — documentation, and four things that were quietly wrong
 
 **THE SCHEDULER HAD NEVER RUN IN PRODUCTION, AND THE MONITOR IS WHAT FOUND IT.** `job_runs` held
-two probe rows from 2026-08-11 written by `verify/` harnesses; `apscheduler_jobs` held zero rows;
-there was no `dws-scheduler.service`; every ingest row arrived by manual backfill. **The system
+**three** probe rows from 2026-08-11 written by `verify/` harnesses; `apscheduler_jobs` held zero
+rows; there was no `dws-scheduler.service`; every ingest row arrived by manual backfill. **A kernel
+upgrade to `7.0.0-1010-aws` rebooted the instance on 2026-08-17 and nothing brought a scheduler
+back, because none existed.** **The system
 reported `degraded: true` correctly from Phase 8 onward and nobody was watching until Phase 11's
 health check existed.** That is a better story than a clean record and it belongs here and in the
 README rather than only in a commit message.
@@ -463,6 +496,51 @@ is not the first time.
 
 ---
 
+### Part 7 — verified on the instance, 2026-08-18
+
+**FIRST PRODUCTION JOB RUNS, ALL SUCCESSFUL.**
+
+| Job | `rows_written` |
+|---|---|
+| `usgs_ingest` | 22,147 |
+| `usgs_daily_ingest` | 16 |
+| `usda_rates_ingest` | 0 |
+| `usda_movements_ingest` | 0 |
+| `features_build` | 1,046 |
+| `heartbeat` | NULL |
+
+**The `rows_written` contract produced all three of its distinct meanings on real data for the
+first time** (§ 4): a count; `0` meaning "ran and wrote nothing new"; and `NULL` meaning "this job
+writes no rows to this database". A schema that had collapsed `NULL` into `0` would have made the
+heartbeat's row indistinguishable from the two USDA jobs' genuine no-op.
+
+**THE SOCRATA SHORT-PAGE GUARD FIRED ON THE FIRST LIVE CALL:**
+
+```
+page 1 returned 63 of 1000 requested rows - SHORT, not necessarily last; paging continues until a page is empty
+```
+
+**A pager that stopped there would have truncated silently, on the very first run** (§ 16). The
+contract was exercised by production rather than by a fixture, which is the only kind of evidence
+that settles it.
+
+**BACKUPS.**
+
+| | Bytes | Tables | Compressed chunks |
+|---|---|---|---|
+| Backup 1 | 8,535,888 | 18 | 1,016 |
+| Backup 2 (post-0027) | 9,210,544 | 19 | 1,035 |
+
+The archived hypertable therefore costs **674,656 bytes per nightly dump, about 8%** — **far less
+than the doubling anticipated**, because 986 tiny compressed chunks dump much smaller than their
+on-disk footprint suggests.
+
+**The repo carried all-zero digest placeholders for python, node and caddy** while the instance held
+the real resolved values, **never committed back**. The instance's copy was authoritative and is now
+in the repo.
+
+---
+
 ## Phase 13 — the cluster's own settings, and the chunk interval
 
 ### Part 1 — 33 settings were untracked, and `max_locks_per_transaction` is the one that bit
@@ -516,7 +594,10 @@ recorded anywhere this agent can read, and inventing them was refused (§ 1). `t
 carries the literal `NEVER-CAPTURED` sentinel rather than `{}`, and
 `verify/preflight.py --write-baseline` captures it from the running cluster — 33 settings are not
 a value a human should be typing, for the same reason a digest is not (§ 13). **Capturing and
-committing it is an open human step.**
+committing it is an open human step, and it is STILL OPEN as of 2026-08-18** —
+`infra/postgres/tuner-baseline.json` still carries the `NEVER-CAPTURED` sentinel. The rest of Phase
+13 is applied and verified; this step is not, and the sentinel is what keeps that visible rather
+than letting an uncaptured baseline read as a cluster running nothing but defaults.
 
 **Two halves of the gate, and the fixture that distinguishes them.** The gate reads the running
 value *and* `pending_restart`. The case that proves `pending_restart` is a setting being
@@ -584,6 +665,41 @@ running every migration in one pass applies 0027 to an *empty* table: the copy m
 equality check compares zero to zero, the view is repointed at a table nobody reads, and the
 migration passes without exercising one line of what it is for. The fixture asserts its own
 precondition (`> 50` chunks before) so the after-assertion cannot pass vacuously.
+
+#### APPLIED 2026-08-18 IN 23 SECONDS, SCHEDULER STOPPED — AND THE HEADLINE RATIO IS THE MISLEADING NUMBER
+
+| | Before | After |
+|---|---|---|
+| Chunks | 986 (981 compressed) | 20 (19 compressed) |
+| Uncompressed total | 134,946,816 | 65,634,304 |
+| — table | 56,451,072 | 25,518,080 |
+| — index | 70,459,392 | **39,960,576** |
+| — toast | 8,036,352 | 155,648 |
+| Compressed total | 40,181,760 | **2,129,920** |
+| — table | 16,072,704 | 1,048,576 |
+| — index | 16,072,704 | **311,296** |
+| — toast | 8,036,352 | 770,048 |
+| Ratio | 3.36:1 | **30.8:1** |
+
+**DO NOT REPORT THIS AS A BARE RATIO IMPROVEMENT.** 3.36:1 → 30.8:1 is true and misleading. **The
+uncompressed baseline ALSO fell** — 134.9 MB → 65.6 MB — **on MORE rows than before**, because
+per-chunk fixed overhead across 986 chunks vanished. **Most of the apparent ratio gain is the
+denominator shrinking**, not the compression improving; no compression setting changed at all.
+
+**The honest headline is the index: 39,960,576 → 311,296 bytes.** Report the ratio and both
+absolute sizes together, or the reader cannot tell which term moved.
+
+**Rows: 280,990 on both the new hypertable and `gauge_readings_iv_archived_20260818`, exactly.
+After a subsequent ingest: live 280,996, archive still 280,990** — writes land in the new table and
+none leak to the archive. **That divergence is the observable that matters**; equality at commit
+time proves nothing, because both tables hold identical data at that instant and a `gauge_series`
+still bound to the archive would look identical too.
+
+**The `findings.md § B` placeholder predicted this and got the direction backwards, which is worth
+keeping.** It warned that *"the ratio could fall while the absolute size falls further, and that
+would be a win being reported as a regression"*. What happened is the mirror image — the ratio rose
+while the baseline fell — **so the misleading direction is the flattering one**. The general rule
+survives either way: **a ratio is a fraction, and a structural change moves both of its terms.**
 
 ### Part 3 — the restore test's first run failed on one argument
 
@@ -718,88 +834,154 @@ longer exists.
 
 ## § Up Next
 
-**THE DEPLOYMENT RUNBOOK IS `docs/runbooks/phase-11.md`, IN THE REPO AND VERSIONED.** It executes
-items 1–11 below, collapsed to **six human actions** with a verifier call before and after each, and
-it names every stop-condition as `exit != 0`. The eleven items stay here as the log's record of what
-is pending; the runbook is how to do them. Where the two disagree, the runbook is the procedure and
-this is the state.
+**PHASES 11, 12 AND 13 ARE APPLIED AND VERIFIED. THE INSTANCE IS AT `cebe5ee`, WHICH EQUALS
+`origin/main`.** The eleven pending human steps that stood here, and the "Phase 12 — containerize
+the worker" entry beside them, are all done; they are recorded in `docs/phase-log.md` rather than
+here, because this section is what is *pending*. `docs/runbooks/phase-11.md` remains in the repo
+and remains re-runnable against a rebuilt instance.
 
-**PHASE 11 AND STAGE B ARE BOTH CODE-COMPLETE AND UNAPPLIED.** Phase 11 is eight commits beginning
-`f29d734`; Stage B is seven more beginning `6607ba7`, which audited the commit boundaries and made
-four corrections rather than adding capability. Every part is written, tested and
-mutation-confirmed; **nothing has been applied to AWS or run on the instance.** 633 tests pass with
-`DATABASE_URL` and Docker.
+**Five things are open. None is a defect.** Each is a measurement nobody has taken, a refactor
+nobody has done, or an operation only a human may run.
 
-The pending human steps are listed under each part below and gathered here:
+### 1. `barge_rates`' 17-day freshness threshold is PROVISIONAL
 
-1. `cd infra/terraform/bootstrap && terraform init && terraform apply` — create the state bucket.
-2. `cd infra/terraform && terraform init -migrate-state`, then `terraform plan` — **expect "No
-   changes."** A plan that wants to create anything means the migration did not carry the state.
-3. Two concurrent `terraform plan`s — the second must block or report a held lock. If both proceed,
-   locking is decorative.
-4. `terraform apply` for the backup bucket, IAM, health check, alarm, SNS and budget.
-5. Confirm the SNS subscription and check the ARN is **not** `PendingConfirmation`.
-6. Force a degraded health response, wait ~3 minutes, confirm the Route53 check fails and an email
-   arrives. **This step is the whole point of the monitoring part.**
-7. `python3 -m app.orchestration.migrate` — one pending file, `0026`. **Not `migrations.run`**, which does not exist; run it from the host venv, because the images deliberately do not contain `migrations/`.
-8. **Start the scheduler once**, if this instance has never run it, *before* step 9. From Phase 12
-   that is `docker compose up -d scheduler`. `apscheduler_jobs` is created by APScheduler's own DDL
-   on first start, not by a migration, and the backup asserts it exists before dumping — so on a
-   fresh instance the first backup otherwise refuses with an error about an excluded table that
-   says nothing about ordering.
-9. The two jobs, one at a time, **inside the scheduler container** (Phase 12):
-   ```
-   cd /opt/inland-waterway-signals
-   docker compose exec scheduler python -m app.orchestration.run_once backup_nightly
-   docker compose exec scheduler python -m app.orchestration.run_once restore_test_monthly
-   ```
-   Exit `0` succeeded, `1` the job failed (recorded in `job_runs`), `2` usage.
-   **`exec`, not `run`:** `run` starts a second container, while `exec` uses the one already up —
-   the one whose environment and mounts were verified. The host venv is no longer involved in
-   these two; `boto3` and a pinned `postgresql-client` are in the image. It is still needed for
-   the migration runner and every `verify.phase11` stage, which connect from the host.
-10. Burst `/api/conclusion` from a laptop, not the instance.
-11. `docker compose down && docker compose up -d`, then `docker compose ps` — **three times**. The
-    API must not report started before `timescaledb` reports healthy. Stage B replaced the
-    `pg_isready` probe that made this ordering decorative; the race was load-dependent, which is
-    why this is repeated rather than observed once.
+**Its `observed_lag` is assumed from its measured sibling `lock_movements`, not measured.**
+`lag_measured_on=None` records that, and a test asserts the `None` so replacing it is a deliberate
+act. Run twice, a few days apart:
 
-**Phase 12 — containerize the `worker` service.** It closes `degraded: true`, and it **needs its
-own restart-recovery verification**: being inside a container with `restart: unless-stopped`
-changes the process lifetime this whole design is about, and this project has already demonstrated
-that the settings can all be correct while the behaviour is not.
+```sql
+SELECT max(week_ending), now()::date - max(week_ending) FROM barge_rates;
+```
 
-**Two dependencies Phase 11 created, recorded now because rediscovering them costs more:**
+**`§ 16` forbids a property established by analogy from reading as verified**, and this project has
+already been wrong assuming two USGS endpoints shared a period of record (`§ 15`). Twice, a few
+days apart, because one reading gives a point in the cycle and not the lag.
 
-1. **Containerizing the scheduler moves the backup job into a container**, so Part 6's `docker run`
-   becomes docker-in-docker or a mounted Docker socket. **Mounting the socket into the scheduler
-   container is root-equivalent on the host.** That is a design decision, not an implementation
-   detail, and it interacts directly with `§ 22`'s "application containers run as a non-root user".
-   Part 6's container-in-container invocation needs re-verification then.
-2. **Part 1's tag-plus-digest requirement applies to any self-built image**, which is what an
-   `xcaddy` Caddy would be if `§ 22`'s rate-limiting exception is ever revisited. A locally built
-   image has no registry digest to resolve, so it would need a different pinning story.
+### 2. `verify/phase11/__main__.py` imports every stage module at load
 
-**Struck from this list, resolved rather than pending: boto3 behind IMDS from inside a container.**
-The concern was that a hop limit of 1 would make the instance role unreachable from a container,
-failing every S3 call with a credentials error that reads like an IAM problem. **Measured:
-`infra/terraform/compute.tf:25` already sets `http_put_response_hop_limit = 2`, which is what a
-container needs.** It is not a Phase 12 blocker and is recorded here so nobody re-opens it. **Do not
-lower it.**
+`stage_h`'s import of `restore_test` therefore gives **`d-post` and `j` a `psycopg` dependency they
+were specifically designed not to need.** Both currently pass, so this is latent rather than
+breaking — it surfaces on a host without `psycopg`, which is exactly the host those two stages were
+meant to be runnable from. **Fix: lazy import on dispatch.**
 
-**A third dependency, added by Stage B:** `apscheduler_jobs` is created by `SQLAlchemyJobStore`'s
-own DDL on the scheduler's first start, so it sits outside the numbered migrations and the checksum
-regime entirely — a library upgrade can change its shape with nothing here noticing. The backup job
-depends on that table existing (it asserts the `--exclude-table-data` target is present before
-dumping), so **on a rebuilt instance the scheduler must start once before the first backup.**
-Containerizing the worker changes when that first start happens, which is why it belongs beside
-dependency 1 rather than in Housekeeping.
+### 3. `gauge_readings_iv_archived_20260818` awaits a human `DROP`
+
+**986 chunks, costing 674,656 bytes per nightly dump (~8%).** Measured, not estimated — backup 1
+was 8,535,888 bytes over 18 tables; backup 2, post-0027, was 9,210,544 over 19.
+
+**Only a human runs the `DROP` (`§ 3`), and there is deliberately no migration that will do it.**
+Whether the pre-consolidation copy is still wanted is a decision, not a cleanup. It is not a silent
+passenger in the meantime: it appears in the restore test's per-table `row_counts`, which compares
+key sets in both directions with no tolerance.
+
+### 4. Two Phase 12 Part 4 coverage losses, still open
+
+Both are the price of not mounting the Docker socket, and **neither is closed**:
+
+- **Roles are cluster-wide**, so the read-only role already exists in the throwaway database and
+  `create_roles`-from-archive is a **no-op in production runs**. The code and its tests stay — the
+  idempotent guard makes the no-op correct — and **its production path is untested.**
+- **The fresh-cluster property is gone.** A dump depending on some cluster-level object would
+  restore cleanly here and fail on a real rebuild. The test answers *"does this archive restore
+  into this server"*, not *"into a new one"*.
+
+### 5. The tuner baseline has never been captured
+
+`infra/postgres/tuner-baseline.json` **still carries the `NEVER-CAPTURED` sentinel** as of
+2026-08-18. Run `python verify/preflight.py --write-baseline` on the instance, review the diff, and
+commit it. **Until then a rebuild has nothing to be compared against, which is the entire purpose
+of the file.** The sentinel rather than `{}` is what keeps this visible: `{}` would read as
+"captured, and this cluster runs nothing but defaults".
+
+*(This one is not on the writeback brief's list of four. It is carried because it was opened by
+Phase 13 Part 1, is untouched by this work, and the file on disk still holds the placeholder.)*
+
+---
+
+### Everything previously open stays open, unchanged and un-narrowed
+
+None of these was closed, narrowed, or quietly dropped by Phases 11, 12 or 13:
+
+- **The three analog-engine questions**, and `SIMILARITY_CUTOFF` and friends — human modelling
+  decisions (`§ 1`), listed under *Still open — modelling questions nobody has answered* below.
+- **The Cairo site number.**
+- **`gauge_series` UTC bucketing.**
+- **`lock_movements` is used by no feature.**
+- **Node is not pinned in provisioning.**
+
+### Two Phase 11 dependencies, now resolved rather than pending
+
+Recorded so nobody re-opens them:
+
+- **Containerizing the scheduler** was going to force docker-in-docker or a mounted socket for the
+  backup. **Resolved: the socket was refused and `pg_dump` moved into the scheduler image** (Phase
+  12 Part 1).
+- **boto3 behind IMDS from inside a container** — `infra/terraform/compute.tf:25` already sets
+  `http_put_response_hop_limit = 2`, which is what a container needs. **Do not lower it.**
+
+**Still live as a dependency:** `§ 22`'s tag-plus-digest requirement applies to any self-built
+image, which is what an `xcaddy` Caddy would be if the rate-limiting exception is ever revisited. A
+locally built image has no registry digest to resolve, so it would need a different pinning story.
 
 ---
 
 ## Phase 11 — backups, restore verification, monitoring, rate limiting
 
-In progress. One entry per part, with the commit SHA and what was measured rather than intended.
+**VERIFIED ON THE INSTANCE, 2026-08-18.** One entry per part below, with the commit SHA and what
+was measured rather than intended. The live-run outcomes are here; the phase block is in
+`docs/phase-log.md`.
+
+### Applied, 2026-08-18
+
+**State migrated** to `domestic-waterway-signals-tfstate` with **native S3 locking**
+(`use_lockfile = true`, Terraform 1.15.8) — no DynamoDB table. **Thirteen resources applied:**
+backup bucket `domestic-waterway-signals-backups-065158220014`; scoped IAM with **no delete action**;
+Route53 health check `38b360cc-531f-46df-a80b-e7df2c265db6` string-matching `"degraded":false`; a
+CloudWatch alarm; SNS topic
+`arn:aws:sns:us-east-1:065158220014:domestic-waterway-signals-alerts` with a **confirmed** email
+subscription; and a **$25** monthly budget.
+
+**Verified:** `/api/health` returns `"degraded":false`; Route53 Success from **all 15 checker
+regions**; the alarm transitioned **`ALARM → OK` at 2026-08-18T19:54:44-04:00**, its first
+transition since creation; `d-post` **3 of 3**; `j` **5 of 5**. Stage J observed **30 consecutive
+requests to `/` all returning 200**, which is the accepted static-asset residual exposure measured
+rather than assumed.
+
+### THREE PLACEHOLDER INCIDENTS IN ONE TERRAFORM SESSION, ALL CAUGHT BEFORE APPLY
+
+Detail in `docs/findings.md § I`. Summarised, because the shape is one thing arriving three ways —
+**a placeholder or a prompt answer becoming a real input value**:
+
+1. **`terraform plan` prompted for `alert_email`** (no default) and the `yes` intended as an apply
+   confirmation was consumed as the variable. Every alert path would have delivered to an address
+   that cannot receive — the exact theme-1 shape the variable's own description warns about.
+2. **`cp terraform.tfvars.example terraform.tfvars`** brought the example's placeholders into
+   effect: `ami_id = "ami-0XXXXXXXXXXXXXXXX"` and `ssh_admin_cidr = "203.0.113.0/24"` (TEST-NET-3,
+   RFC 5737). The plan wanted to **destroy and recreate the production instance** and to **revoke
+   SSH from the real admin address** in favour of a range no host can occupy. **`d-pre` caught the
+   instance replacement** and refused to run its remaining six checks.
+3. **Removing the tfvars entirely** caused prompts for `ami_id` and `availability_zone`, and `yes`
+   was consumed into both. `availability_zone = "yes"` forced replacement of the data volume,
+   subnet, instance and route table association. **`prevent_destroy` on the EBS volume blocked the
+   plan outright.**
+
+**A REAL LIMITATION OF THE VERIFICATION DESIGN, FROM INCIDENT 3, RECORDED AS A KNOWN GAP RATHER
+THAN FIXED.** A plan that **errors** writes no plan file, and `d-pre` reads a saved plan — so
+`d-pre` never saw it. `prevent_destroy` caught what the verifier structurally could not. **A
+verifier that inspects an artifact cannot see a failure that prevents the artifact existing.** That
+is an argument for `prevent_destroy` on more than the data volume; it belongs here so it is not
+rediscovered by a third incident.
+
+**`d-pre` ITSELF NEEDED CORRECTING THREE TIMES**, all the same underlying error — a check written
+against the state of the world on the day it was written:
+
+1. Its third check asserted the plan **creates** the thirteen Phase 11 resources, so it could never
+   pass once they existed. It now derives the plan's shape from the plan and accepts **pre-apply**
+   or **applied**, refusing a partial apply or an empty plan whose thirteen are simply absent.
+2. `PROTECTED_ADDRESSES` went 17 → 30 **by union with `PHASE_11_ADDRESSES`**, not by a second
+   hand-typed list.
+3. The IAM policy check was **structurally unrunnable on first apply**, because the policy document
+   is `(known after apply)` until the bucket exists.
 
 ### Part 1 — gate 1's four remaining conditions (`f29d734`)
 
@@ -1057,6 +1239,12 @@ and all eleven mutations are confirmed.
 `timescaledb_pre_restore`/`post_restore`, real teardown — and `docker ps -a` shows no leaked
 containers after the suite.
 
+> **SUPERSEDED 2026-08-18 by Phase 12 Part 4.** The throwaway is now a *database* on the existing
+> server, not a container: containerizing the scheduler made spawning one require the Docker
+> socket, which was refused. The sentence above was accurate when written and is left standing.
+> **Its two coverage losses are open** — roles are cluster-wide, and the fresh-cluster property is
+> gone (`§ Up Next` item 4).
+
 **Two findings that only running it could produce:**
 
 1. **`create_roles` originally created only `waterway_api`, and the restore failed** on
@@ -1166,7 +1354,8 @@ way a slow start under load would, `pg_isready` (no `-h`) reported UP for **18 c
 while a TCP query correctly reported not-ready. `api` gates on `condition: service_healthy`, so the
 API's startup ordering has been decorative since Phase 2 — it releases the API against a server
 still initialising, and only when `initdb` is slow. `CLAUDE.md § 13` already stated this rule for
-the restore test's throwaway container; production was not held to it.
+the restore test's throwaway container; production was not held to it. *(That throwaway is a
+database rather than a container as of Phase 12 Part 4; the readiness rule is unchanged.)*
 
 **The `--list` truncation table**, which changes how fixtures get chosen here:
 
@@ -1517,7 +1706,36 @@ nowhere else.*
 
 **Commits:** after any Claude Code session reports a commit, run `git log --oneline origin/main`
 from your own terminal before treating the work as real — three separate sessions on 2026-08-10
-reported committed work that had not been pushed.
+reported committed work that had not been pushed. **This happened again on 2026-08-18, for the
+fifth time.** The check is one command from the laptop, *before* touching the instance:
+`git log --oneline origin/main -1`. Five occurrences makes it a habit rather than an accident.
+
+**`git pull` IS NOT A DEPLOY FOR A CONTAINERISED SERVICE.** `app/` is baked into the API and
+scheduler images at build time, so a pull changes the checkout and changes **nothing the containers
+see**. On 2026-08-18 this produced a full diagnostic round against code that was on disk and not
+running — every symptom consistent with the fix not working, because the fix was not deployed.
+**Every deploy of Python code needs `docker compose up -d --build`.** `deploy.sh` does this; a bare
+`git pull` during debugging does not, and debugging is exactly when somebody skips the script. It
+is `§ 2`'s theme 1 in an unusual costume — the layer reporting success was `git`, which correctly
+reported that it had updated the working tree.
+
+**NEVER `git checkout -- <file>` TO UNDO A MUTATION.** On 2026-08-18 it reverted the commit's own
+changes along with the mutation. Caught immediately; subsequent mutations restored from a
+**snapshot copy** taken before the mutation. The working tree during a mutation pass contains
+uncommitted work by definition, and `checkout --` cannot distinguish it from the mutation.
+
+**THE INSTANCE CANNOT RUN THE FULL TEST SUITE.** `httpx2` is in `requirements-dev.txt` and the
+production venv correctly does not carry it. **"The tests pass" is a claim about the development
+environment, not about the machine that runs the code** — and this project has already been bitten
+by the harness's configuration differing from production's in a way that made a whole tier of
+assertions vacuous (`§ 25`, the pgpass entry under `trust` auth).
+
+**A transient `OutOfMemory` on the health endpoint's freshness query, and two `TimeoutError`s on the
+API container's own healthcheck probe**, both during the window when the 986-chunk hypertable was
+exhausting the cluster's lock table. **A plausible mechanism, now unreproducible in the good
+direction** — 0027 removed the conditions. **Recorded as observed, not as diagnosed.** Writing down
+a cause would be the more comfortable entry and the less true one; if these return after the chunk
+consolidation, this line is what says it is not the first time.
 
 **Live-verification outcomes are written back in the same session, as their own small commit.** This
 is the rule this project most needed and went three commits without following: every session wrote

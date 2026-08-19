@@ -241,20 +241,66 @@ indexes" claim above, stated as a split rather than as one headline ratio.
 that measurement was taken earlier, with fewer rows ingested. Both are real; neither supersedes the
 other. The 2026-08-18 figures are the ones 0027's after-state must be compared against.)*
 
-### After consolidation — NOT YET MEASURED
+### After consolidation — MEASURED 2026-08-18
 
-**No after-figures are recorded here because none have been taken.** 0027 is committed and
-mutation-confirmed but has not been applied to the instance; the after-state comes from live
-verification step 6 and is transcribed by a human, per `CLAUDE.md § 13` (a verifier never writes to
-a tracked file).
+**0027 applied in 23 seconds with the scheduler stopped.** Figures transcribed from the instance.
 
-**The direction is genuinely uncertain and is worth stating before the number arrives**, so that
-whatever lands is read rather than rationalised. Fewer, larger chunks compress better per segment —
-longer runs per `segmentby` group, less per-chunk framing overhead. But the *uncompressed baseline
-shrinks too*, because much of that 134.9 MB is per-chunk fixed cost across 986 chunks that will not
-exist afterwards. **The ratio could fall while the absolute size falls further**, and that would be
-a win being reported as a regression by the headline number. Record both, and record the chunk
-counts beside them.
+| | Before | After |
+|---|---|---|
+| Chunks | 986 (981 compressed) | 20 (19 compressed) |
+| Uncompressed total | 134,946,816 B | 65,634,304 B |
+| — table | 56,451,072 B | 25,518,080 B |
+| — index | 70,459,392 B | **39,960,576 B** |
+| — toast | 8,036,352 B | 155,648 B |
+| Compressed total | 40,181,760 B | **2,129,920 B** |
+| — table | 16,072,704 B | 1,048,576 B |
+| — index | 16,072,704 B | **311,296 B** |
+| — toast | 8,036,352 B | 770,048 B |
+| Ratio | 3.36:1 | **30.8:1** |
+
+**Row counts, exactly equal across the rewrite:** 280,990 on the new hypertable and 280,990 on
+`gauge_readings_iv_archived_20260818`. **After a subsequent ingest: live 280,996, archive still
+280,990** — which is the assertion that matters, because it is the one that distinguishes a correct
+rewrite from a `gauge_series` view still pointing at the archive. Equality alone at commit time
+proves nothing (both tables hold identical data at that instant); the divergence on the next write
+is the observable.
+
+#### THE PREDICTION ABOVE WAS RIGHT, AND THE HEADLINE RATIO IS THE MISLEADING NUMBER
+
+The section this replaces said, before the figures existed: *"the ratio could fall while the
+absolute size falls further, and that would be a win being reported as a regression by the headline
+number."* **What happened is the mirror image of that, and it misleads in the flattering
+direction instead.**
+
+- **3.36:1 → 30.8:1 is a true statement and a misleading one.** It reads as a 9× improvement in
+  compression. It is not.
+- **The uncompressed baseline also fell — 134,946,816 → 65,634,304 bytes — on MORE rows than
+  before** (258,739 at the time of the pre-measurement, 280,990 at the rewrite). That is the
+  per-chunk fixed overhead of 986 chunks disappearing, not compression doing anything.
+- **Most of the apparent ratio gain is the denominator shrinking.** Reporting the ratio alone
+  credits the compression algorithm with the chunk-count fix.
+
+**The honest headline is the index: 39,960,576 → 311,296 bytes**, a 128× reduction on the component
+that was already the larger share of the before-size and the one that compressed hardest. That is
+consistent with the "most of the win is in indexes" finding above, and it is the number to quote.
+
+**Toast moved in both directions and is not a finding.** Uncompressed toast fell 8,036,352 →
+155,648 while compressed toast *rose* 8,036,352 → 770,048. No mechanism was investigated and none
+is asserted; recorded as observed.
+
+**The general point, worth more than the numbers:** a ratio is a fraction, and a change to a
+partitioning scheme moves both of its terms. **Any before/after ratio across a structural change
+must be reported with both absolute sizes**, or the reader cannot tell which term moved. This
+project came close to publishing "3.36:1 → 30.8:1" as the result of a compression change that
+changed no compression setting at all.
+
+### The archive is still on disk and awaits a human `DROP`
+
+`gauge_readings_iv_archived_20260818` holds 986 chunks. **Measured cost: 674,656 bytes per nightly
+dump, about 8%** of the archive (backup 1 was 8,535,888 bytes over 18 tables and 1,016 compressed
+chunks; backup 2, taken after 0027, was 9,210,544 bytes over 19 tables and 1,035 chunks). **Far
+less than the doubling that was anticipated**, because 986 tiny compressed chunks dump much smaller
+than their on-disk footprint suggests. Only a human runs the `DROP` (`CLAUDE.md § 3`).
 
 
 ---
@@ -1114,7 +1160,110 @@ out-of-repo dev override only**.
 
 ---
 
+### Three placeholder incidents in one Terraform session, all caught before apply — 2026-08-18
+
+**Phase 11 Stage D. None reached `apply`; each would have been destructive if it had.** They are
+recorded together because they are one shape — *a placeholder or a prompt answer becoming a real
+input value* — arriving through three different doors in a single sitting.
+
+**1. `yes` was consumed as a variable value.** `terraform plan` prompted for `alert_email`, which
+has no default. The `yes` typed in the expectation of an apply confirmation was read as the
+variable. Every alert path would have delivered to an address that cannot receive — a notification
+channel reporting itself configured while nothing downstream gets anything, which is `CLAUDE.md
+§ 2`'s theme 1 and exactly what that variable's own `description` warns about.
+
+**2. `cp terraform.tfvars.example terraform.tfvars` brought the example's placeholders into
+effect.** `ami_id = "ami-0XXXXXXXXXXXXXXXX"` and `ssh_admin_cidr = "203.0.113.0/24"` — TEST-NET-3,
+RFC 5737, a range no host can occupy. The resulting plan wanted to **destroy and recreate the
+production instance** and to **revoke SSH from the real admin address** in favour of that range.
+**`d-pre` caught the instance replacement and refused to run its remaining six checks**, which is
+the stop-at-first-failure rule (§ 13) doing its job: the later checks assume the earlier ones held.
+
+**3. Removing the tfvars entirely moved the problem rather than solving it.** `terraform plan` then
+prompted for `ami_id` and `availability_zone`, and `yes` was consumed into both.
+`availability_zone = "yes"` forced replacement of the data volume, the subnet, the instance and the
+route table association. **`prevent_destroy` on the EBS volume blocked the plan outright.**
+
+#### A REAL LIMITATION OF THE VERIFICATION DESIGN, FROM INCIDENT 3
+
+**A plan that ERRORS writes no plan file, and `d-pre` reads a saved plan — so `d-pre` never saw
+incident 3 at all.** What caught it was `prevent_destroy`, a Terraform lifecycle attribute, not the
+verifier built to catch exactly this.
+
+This is not a bug in `d-pre`; it is a structural gap in where the check sits. **A verifier that
+inspects an artifact cannot see a failure that prevents the artifact from existing.** The
+consequence is an argument for `prevent_destroy` on more than the data volume — the instance, the
+subnet and the EIP are all things whose replacement a saved-plan check would only catch if the plan
+saved. **Recorded as a known gap rather than fixed**, so it is not rediscovered by a third
+incident.
+
+**Incident 2 is the one that would have got through.** Its plan *succeeded* and wrote a plan file,
+so `d-pre` read it and refused. Incidents 1 and 3 produced no plan file for different reasons.
+Between them the three establish that the saved-plan verifier and `prevent_destroy` cover different
+halves of the same risk, and **neither substitutes for the other** — the same relationship ufw and
+`DOCKER-USER` have (§ 11).
+
+### `d-pre` itself needed correcting three times — 2026-08-18
+
+The verifier was wrong in three independent ways against a correct account, and all three are the
+same underlying error: **a check written against the state of the world on the day it was written.**
+
+1. **Its third check asserted the plan *creates* the thirteen Phase 11 resources, so it could never
+   pass once they existed.** A guard that goes red on the correct state trains its own removal —
+   the general rule already recorded under the freshness thresholds below, of which this is the
+   first instance. The stage now derives the plan's shape from the plan and accepts **pre-apply**
+   (a rebuild) or **applied** (today), refusing anything else: a partial apply, or an empty plan
+   whose thirteen are simply absent, which was the original reason the creates check existed.
+2. **`PROTECTED_ADDRESSES` went from 17 to 30 by *union* with `PHASE_11_ADDRESSES`**, not by a
+   second hand-typed list. Two hand-maintained lists of overlapping facts drift, and the drift is
+   silent (§ 4).
+3. **The IAM policy check was structurally unrunnable on first apply**, because the policy document
+   reads `(known after apply)` until the bucket exists. A check that cannot run on the one occasion
+   it most matters is not a check.
+
+**`terraform show <planfile> | grep '^Plan:'` prints nothing**, and this cost time. The
+`Plan: N to add` summary line is emitted by `terraform plan` as it runs; `show` renders a saved plan
+and has no such line. The grep returns empty on a plan that adds thirteen resources and on one that
+adds none — **the two failure states and the success state are indistinguishable**. Recorded in the
+runbook as a trap rather than as a step.
+
+---
+
 ## J. Test apparatus and process
+
+### `git pull` is not a deploy for a containerised service — 2026-08-18
+
+**`app/` is baked into the API and scheduler images at build time**, so a `git pull` on the server
+changes the checkout and changes **nothing the containers see**. This produced a full diagnostic
+round against code that was on disk and not running — every symptom consistent with the fix not
+working, because the fix was not deployed.
+
+**Every deploy of Python code needs `docker compose up -d --build`.** `deploy.sh` does this; a bare
+`git pull` during debugging does not, and debugging is exactly when somebody skips the script.
+
+This is § 2's theme 1 wearing an unusual costume: the layer reporting success was `git`, which
+correctly reported that it had updated the working tree.
+
+### Four smaller process findings from the same sessions — 2026-08-18
+
+- **Work reported as committed was not pushed, for the fifth time.** The check is one command from
+  the laptop, *before* touching the instance: `git log --oneline origin/main -1`. Five occurrences
+  makes this a habit rather than an accident.
+- **`git checkout -- <file>` to undo a mutation reverted the commit's own changes with it.** Caught
+  immediately. Subsequent mutations restored from a **snapshot copy** taken before the mutation,
+  never from git — the working tree during a mutation pass contains uncommitted work by definition,
+  and `checkout --` cannot distinguish it from the mutation.
+- **The instance cannot run the full test suite.** `httpx2` is in `requirements-dev.txt` and the
+  production venv correctly does not carry it. **"The tests pass" is a claim about the development
+  environment, not about the machine that runs the code** — and this project has already been
+  bitten by the harness's configuration differing from production's in a way that made a test
+  vacuous (§ 25, the pgpass entry under `trust` auth).
+- **A transient `OutOfMemory` on the health endpoint's freshness query, and two `TimeoutError`s on
+  the API container's own healthcheck probe**, both during the window when the 986-chunk hypertable
+  was exhausting the cluster's lock table. **A plausible mechanism, now unreproducible in the good
+  direction** — 0027 removed the conditions. **Recorded as observed, not as diagnosed.** Writing
+  down a cause would be the more comfortable entry and the less true one; if these return after the
+  chunk consolidation, this line is what says it is not the first time.
 
 ### 2. PROCESS NOTE — THREE THINGS STOOD BETWEEN A GREEN BUILD AND A PAGE, AND NONE WAS THE CODE
 

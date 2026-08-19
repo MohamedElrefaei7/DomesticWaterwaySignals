@@ -59,6 +59,45 @@ is installed — and the socket's blast radius is not.
 
 ---
 
+## Storage, and what the compression numbers actually say
+
+`gauge_readings_iv` is the project's largest table. It was created with a 7-day chunk interval —
+correct for a table expected to hold recent instantaneous readings, wrong once Phase 3.5 measured
+that the USGS daily endpoint carries 35 years and the backfill loaded them. Migration `0027`
+(applied 2026-08-18, 23 seconds, scheduler stopped) moved it to 365 days and consolidated the
+existing chunks by rewrite.
+
+| | Before | After |
+|---|---|---|
+| Chunks | 986 (981 compressed) | 20 (19 compressed) |
+| Uncompressed total | 134,946,816 B | 65,634,304 B |
+| — table | 56,451,072 B | 25,518,080 B |
+| — **index** | **70,459,392 B** | **39,960,576 B** |
+| — toast | 8,036,352 B | 155,648 B |
+| Compressed total | 40,181,760 B | **2,129,920 B** |
+| — table | 16,072,704 B | 1,048,576 B |
+| — **index** | **16,072,704 B** | **311,296 B** |
+| — toast | 8,036,352 B | 770,048 B |
+| Ratio | 3.36:1 | 30.8:1 |
+
+**The headline is the index: 39,960,576 → 311,296 bytes.** It is not the ratio.
+
+**Read the ratio with its caveat, because on its own it overstates the result.** 3.36:1 → 30.8:1 is
+true and misleading: the *uncompressed baseline also fell*, from 134.9 MB to 65.6 MB, on **more**
+rows than before, because per-chunk fixed overhead across 986 chunks vanished. Most of the apparent
+ratio gain is the baseline shrinking rather than the compression improving. Both absolute sizes are
+in the table above so that neither number has to be taken alone.
+
+Row counts after the rewrite: 280,990 on the new hypertable and 280,990 on
+`gauge_readings_iv_archived_20260818`, exactly. After a subsequent ingest: live 280,996, archive
+still 280,990 — writes land in the new table and none leak to the archive.
+
+**The honest framing, unchanged by any of this:** these are real reductions on a real ~290k-row
+series, **but at this volume Postgres alone would be entirely adequate.** TimescaleDB here is a
+demonstrated engineering choice, not a necessity the data forced.
+
+---
+
 ## Backup and recovery posture
 
 **This section states what recovery does NOT cover, because those limits are only defensible when
@@ -66,10 +105,16 @@ they are written down.**
 
 ### What runs
 
-- **Nightly** (`backup_nightly`): `pg_dump` from a one-shot container started off the *same pinned
-  digest as the server*, writing with `-f` to `/mnt/data` — nothing piped through stdout. Per-table
+- **Nightly** (`backup_nightly`): `pg_dump` from the pinned `postgresql-client` **inside the
+  scheduler image**, writing with `-f` to `/mnt/data` — nothing piped through stdout. Per-table
   row counts are captured **inside the dump's own snapshot** (`pg_export_snapshot()` +
   `pg_dump --snapshot`), so the counts describe the state the archive actually contains.
+
+  *(Corrected 2026-08-18. Through Phase 11 this ran in a one-shot container started off the same
+  pinned digest as the server, so client and server matched mechanically. Phase 12 containerized
+  the scheduler, which made spawning that container require the Docker socket — refused — so the
+  guarantee moved from structural to checked: preflight compares what the files say, and the job
+  compares `pg_dump --version` against `SHOW server_version_num` before anything is dumped.)*
 - **Verification is a full `pg_restore -f /dev/null`, requiring exit 0 *and empty stderr*.**
   `pg_restore --list` is not verification: it reads only the archive's table of contents. Measured
   in this repo's own test suite (`test_backup_integration_list_would_not_have_caught_it`), by
@@ -89,9 +134,12 @@ they are written down.**
   the guard against it.** Pick the fixture that distinguishes the implementations, and confirm by
   mutation that it does.
 - **Monthly** (`restore_test_monthly`): the most recent verified archive is downloaded **from S3**,
-  restored into a throwaway container, `ANALYZE`d, and compared against the recorded snapshot with
-  **no tolerance** and key sets checked in both directions. The restored read-only role is made to
-  attempt a `DELETE` and must be refused.
+  restored into a throwaway **database** on the existing server, `ANALYZE`d, and compared against
+  the recorded snapshot with **no tolerance** and key sets checked in both directions. The restored
+  read-only role is made to attempt a `DELETE` and must be refused. **First successful run
+  2026-08-18**: 68 seconds, 19 tables compared, 1,035 compressed chunks on both sides, the
+  throwaway dropped after terminating one backend. What this costs is under *Known limitations*
+  below; both losses are the price of not mounting the Docker socket.
 - Objects land under `backups/daily/` (35-day lifecycle expiry) and are server-side-copied to
   `backups/monthly/` on the first of each month (400 days).
 
@@ -136,6 +184,9 @@ plugin needs an `xcaddy` build that would bring a self-built image inside the di
 contract. That trade was declined; it is recorded here and in `CLAUDE.md § 22` so it stays a
 decision rather than becoming an omission.
 
+**Confirmed by observation, 2026-08-18 (Phase 11 Stage J):** 30 consecutive requests to `/` all
+returned 200. The exposure is not theoretical and is not mitigated; it is measured and accepted.
+
 `/api/health` is exempt from limiting by exact path match, so the external monitor can never be
 throttled into a false alarm.
 
@@ -158,15 +209,23 @@ on a dashboard.
 
 ### The thing the monitor found, recorded because it is the point
 
-**The scheduler had never run in production.** Through Phase 11 `job_runs` held two probe rows
-written by verification harnesses and nothing else, `apscheduler_jobs` held zero rows, and every
-row of ingested data in the database had arrived by a human running a backfill CLI by hand. The
-scheduled jobs existed, were tested, and had never fired.
+**The scheduler had never run in production.** Through Phase 11 `job_runs` held **three** probe
+rows, all written by `verify/` harnesses on 2026-08-11, and nothing else; `apscheduler_jobs`
+existed — created by `SQLAlchemyJobStore`'s own DDL during a Phase 2 run — and held **zero** rows;
+there was no `dws-scheduler.service` at all, the only units being `dws-external-interface`,
+`dws-docker-firewall` and `dws-stack`; and every row of ingested data in the database had arrived
+by a human running a backfill CLI by hand. The scheduled jobs existed, were tested, and had never
+fired. A kernel upgrade to `7.0.0-1010-aws` rebooted the instance on 2026-08-17 and nothing brought
+a scheduler back, because none existed.
 
 **The system said so, correctly, the whole time.** `/api/health` reported `degraded: true` from
 Phase 8 onward, for the correct reason, in the correct field. What was missing was anybody reading
 it — which is what Phase 11's external health check and alarm added, and Phase 12 is the fix it
-prompted.
+prompted. **The monitor found it within minutes of being created.**
+
+**Closed 2026-08-18.** `/api/health` returns `"degraded":false` for the first time since the system
+existed; the Route53 check reports Success from all 15 checker regions; and the CloudWatch alarm
+transitioned `ALARM → OK` at 2026-08-18T19:54:44-04:00, its first transition since creation.
 
 It is written here rather than only in a commit message because the honest version of this project
 is more useful than a clean one: the failure mode that this codebase is organised around — a layer
