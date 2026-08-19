@@ -14,6 +14,14 @@ usually the wrong one — a shared table with a discriminator column, a `.get()`
 explicit three-state read, a truncate-and-rebuild, a similarity cutoff. Reading only the code shows
 what was built; these say what was turned down.
 
+**From Phase 11 onward each entry states four things, because an entry missing the second does not
+prevent re-proposal, which is what this file is for:** the decision; **the rejected alternative and
+why it is tempting**; the reason, labelled **measured** or **reasoned**; and the **residual cost**
+where one exists. A measured rejection carries a number and settles the question. A reasoned one is
+weaker, and a future session with new information is entitled to re-examine it — the ones that are
+open to that are gathered under *What is revisitable* at the end of the file, with what would change
+the answer.
+
 ## Contents
 
 - [Project-level](#project-level)
@@ -27,6 +35,10 @@ what was built; these say what was turned down.
 - [Phase 8 — the read API](#phase-8--the-read-api)
 - [Phase 9 — the frontend](#phase-9--the-frontend)
 - [Phase 10 — deployment](#phase-10--deployment)
+- [Phase 11 — backups, restore verification, monitoring](#phase-11--backups-restore-verification-monitoring)
+- [Phase 12 — the scheduler as the fifth Compose service](#phase-12--the-scheduler-as-the-fifth-compose-service)
+- [Phase 13 — cluster settings, the chunk interval, and freshness](#phase-13--cluster-settings-the-chunk-interval-and-freshness)
+- [What is revisitable, and what would change the answer](#what-is-revisitable-and-what-would-change-the-answer)
 
 
 ---
@@ -1072,3 +1084,523 @@ lost measurements. **So `CONTEXT.md` carries a condensed list of what is still o
 `phase-log.md`'s appendix carries the full text as it stood.** A reader looking for "why is this
 still open" gets one line; a reader looking for "what did we already close and on what evidence"
 gets the original.
+
+---
+
+## Phase 11 — backups, restore verification, monitoring
+
+### 1. RATE LIMITING MOVED INTO THE APPLICATION, AND `§ 22` WAS AMENDED RATHER THAN BENT
+
+**The decision.** A per-client-IP limiter runs **in the application**, keyed on the proxy-set
+`X-Real-IP`. Two buckets: a general one across `/api`, and a tighter one on `/api/conclusion`.
+`CLAUDE.md § 22` carries the amendment as a stated exception, not as silence.
+
+**The rejected alternative, and why it is tempting.** An `xcaddy` build of
+`github.com/mholt/caddy-ratelimit`, putting the limit at the edge. **It is tempting because
+`CLAUDE.md § 22` says in as many words that rate limiting lives at the edge, and the plugin is the
+direct way to honour it** — the application limiter is, on its face, the contract being broken.
+Phase 10 had already deferred the limit for this reason and named Phase 11 as its owner.
+
+**The reason — REASONED, not measured.** Two costs, neither of which needed a measurement to see.
+A self-built Caddy is an image *this project produces*, and the digest-pinning contract (`§ 13`,
+`§ 12`) is written for images it *pulls*: a local build has no registry digest to resolve from, so
+it would need a different pinning story invented for it. And it would resurrect preflight's
+`build:` exemption as live code, in a phase whose subject is backups.
+
+**Why the exception is legitimate rather than a bend:** the edge cannot see the cost it would be
+limiting. `/api/conclusion` accepts distinct `(site_id, as_of)` pairs; each distinct pair misses
+the conclusion cache and runs an analog query. **The expensive request and the cheap one are the
+same shape, the same size and the same path**, differing only in a query parameter whose cost only
+the application knows. An edge limiter tuned for static assets is the wrong instrument.
+
+**Residual cost, accepted and unfixed.** The bundle, the CSS and the fonts remain **unlimited at
+the edge**. `§ 22`'s original paragraph is still true about them and this exception does not pretend
+otherwise. **Confirmed by observation in Stage J, 2026-08-18: 30 consecutive requests to `/` all
+returned 200.** Measured, not assumed.
+
+---
+
+### 2. THE HEALTH CHECK STRING-MATCHES `"degraded":false`, AND BOTH OBVIOUS ALTERNATIVES ARE FORBIDDEN
+
+**The decision.** The Route53 health check searches the response **body** for the literal
+`"degraded":false`.
+
+**Rejected alternative 1: a dedicated `status` field with an ok token.** **Tempting because a
+purpose-built token reads as cleaner than string-matching a boolean out of a larger body** — it is
+what a monitoring integration usually wants. **Rejected (reasoned, but on a recorded incident):**
+`CLAUDE.md § 20` forbids exactly the `{"status": "ok"}` shape, because it is what let the prior
+project record "Completed" while the whole stack had been down for two and a half months. A token
+that means "the endpoint answered" is not a token that means "the data is current".
+
+**Rejected alternative 2: a plain HTTPS status-code check.** **Tempting because it is the default,
+it needs no string, and it is what every uptime monitor does.** **Rejected (reasoned, and it is a
+contract collision):** `/api/health` returns **200 while degraded, by design** — so a status-code
+monitor on that endpoint is a check that *cannot fail for the reason it exists*. That is `§ 2`'s
+theme 2 in its purest form, and it would have been installed by choosing the obvious option.
+
+**Residual cost.** The check is coupled to a serialization detail. If the encoder ever emits
+`"degraded": false` with a space, the string stops matching and the check goes red on a healthy
+system — a false alarm rather than a false pass, which is the safe direction, but it is a real
+coupling and it is the reason the string is written down here.
+
+---
+
+### Decisions worth reading before changing anything here
+
+- **The verifier reads a plan file it did not create.** *Rejected:* having `d-pre` run
+  `terraform plan` itself. **Tempting because it removes a human step and makes the stage
+  self-contained** — the operator would run one command instead of two. *Rejected (reasoned):* the
+  artifact reviewed must be the artifact applied. A verifier that generates its own plan is
+  reviewing a plan nobody will apply, and the gap between the two is exactly where a changed
+  variable lives. **Enforced structurally rather than by intention: the subprocess allow-list omits
+  `plan`,** so the capability does not exist to be reached for. *Residual:* a plan that **errors**
+  writes no plan file, so `d-pre` cannot see it at all — `prevent_destroy` caught what the verifier
+  structurally could not (`findings.md § I`). An argument for `prevent_destroy` on more than the
+  data volume, open.
+- **An ALLOW-list of permitted subcommands, never a deny-list.** *Rejected:* enumerating the
+  dangerous verbs. **Tempting because the dangerous verbs are the ones you can name** — `destroy`,
+  `apply`, `rm` — and a deny-list of four entries reads as complete. *Rejected (reasoned):* it fails
+  open on the verb nobody named, **while reporting success**: `terraform state rm`, `terraform
+  import`, `docker volume prune`, and every verb added to those tools after the list was written.
+  *Residual:* every genuinely new read-only subcommand needs an explicit addition, which is friction
+  by design.
+- **The all-zero digest placeholder counts as UNPINNED, not as drift.** *Rejected:* classifying it
+  as drift and refusing to overwrite it. **Tempting because `--write-digest` raising on any
+  differing pin is the simpler, stricter rule, and strictness is usually right here.** *Rejected
+  (reasoned):* the placeholder is the committed "not resolved yet" marker (`§ 12`), and writing it
+  is **what the command is for** — classifying it as drift would make the placeholder the one thing
+  `--write-digest` refuses to write. Four were replaced this way in Phase 10.
+- **`PROTECTED_ADDRESSES` grew 17 → 30 by UNION with `PHASE_11_ADDRESSES`, not by a second
+  hand-typed list.** *Rejected:* typing the thirty. **Tempting because one flat list is easier to
+  read than a union of two.** *Rejected (reasoned):* two hand-maintained lists of overlapping facts
+  drift, and the drift is silent — the same rule the cadence table and the heartbeat live under
+  (`§ 4`).
+- **`d-pre` accepts PRE-APPLY or APPLIED, and refuses anything else.** *Rejected:* asserting the
+  plan creates the thirteen Phase 11 resources. **Tempting because it is the precise assertion for
+  the day it was written**, and it was correct that day. *Rejected (reasoned, after it went red
+  against a correct account):* it can never pass once the resources exist, and **a guard that goes
+  red on the correct state trains its own removal.** The stage now derives the plan's shape from the
+  plan. It still refuses a *partial* apply and an empty plan whose thirteen are simply absent, which
+  was the original reason the creates-check existed.
+- **`insufficient_data_actions` fires the SAME SNS topic as the alarm action.** *Rejected:* leaving
+  it unset. **Tempting because INSUFFICIENT_DATA is not an alarm and wiring it to the alert topic
+  looks like noise.** *Rejected (reasoned):* an alarm stuck in INSUFFICIENT_DATA is
+  **indistinguishable from a healthy one on a dashboard** — a monitor that has stopped monitoring
+  reports the same green as a monitor seeing nothing wrong.
+- **The IAM policy carries no delete action of any kind.** *Rejected:* granting delete so a job can
+  clean up after itself. **Tempting because retention needs *something* to remove old objects.**
+  *Rejected (reasoned):* retention is a bucket **lifecycle rule**, which S3 executes itself, so a
+  compromised instance cannot erase the backups. *Residual, stated in the README:* equally, no job
+  can clean up after itself, and a lifecycle misconfiguration is invisible to the application.
+
+---
+
+### Carried from the contracts, restated here because it is the most re-proposable of all
+
+- **Dump verification is a full `pg_restore -f /dev/null` requiring exit 0 AND empty stderr —
+  never `pg_restore --list`.** *Rejected:* `--list`. **Tempting because it is fast, it is what the
+  manual suggests for inspecting an archive, and on the fixture built to resemble the original
+  incident it WORKS** — which is the trap. *Rejected **BY MEASUREMENT**, against this project's own
+  archive:*
+
+  | cut | `--list` | full restore |
+  |---|---|---|
+  | 33% — the incident's own proportions | **rejects** | rejects |
+  | 95%, 98%, 99% | **accepts** | rejects |
+
+  At one third the table of contents is destroyed too, so `--list` catches it — meaning **a test
+  built only from the incident's own proportions stays green when verification is swapped to
+  `--list`, and the contract it exists to defend can be deleted underneath it.** The diagnostic cut
+  is the one where the TOC survives and the data does not, and it is *further* from the incident
+  than the obvious choice. **A fixture that resembles the original incident is not automatically a
+  good test of the guard against it.**
+
+---
+
+## Phase 12 — the scheduler as the fifth Compose service
+
+### 1. NO CONTAINER GETS THE DOCKER SOCKET, AND THREE OTHER DECISIONS FOLLOW FROM IT
+
+**The decision.** `/var/run/docker.sock` is bind-mounted into **no** service in this stack, and its
+absence is asserted **stack-wide** rather than for the one service that would want it.
+
+**The rejected alternative, and why it is tempting.** Mounting the socket into the scheduler.
+**It is one line. It is how most people do this. And — the part that made it genuinely attractive
+— it would have left `backup.py`'s existing `docker run` invocation and the restore test's
+throwaway *container* working completely unchanged**, so the entire phase would have been "move the
+process into a container" with no redesign beneath it. Everything below this line is work the
+socket would have made unnecessary.
+
+**The reason — REASONED.** The socket is **root-equivalent on the host**: anything that can talk to
+the daemon can start a privileged container with `/` bind-mounted. So a compromise of the container
+whose job is running scheduled Python becomes a compromise of the instance. It also satisfies
+`§ 22`'s non-root requirement *in form while voiding it in substance* — the process is uid 10001 and
+can become root whenever it likes.
+
+**Why the trade is the right way round, which is the reusable part.** The alternative costs a
+version pin in two files that can drift. **That is accepted because the drift is DETECTABLE** — a
+preflight gate reads what the files say, and the job reads what is actually running — **whereas the
+socket trades a detectable problem for an undetectable one.** A scheduler-only assertion would
+invite the mount onto `api` instead, which is why the check is stack-wide.
+
+**Residual cost.** The `postgresql-client` major is pinned in two places
+(`Dockerfile.scheduler` and the preflight-checked compose context) and can disagree. Two checks
+cover it, and **the division between them is the point: preflight compares what the FILES say, the
+job compares what is RUNNING.** A stale image passes the first and fails the second, which is the
+case neither catches alone.
+
+**Three decisions that are consequences of this one, not independent choices:**
+
+1. **`pg_dump`/`pg_restore` live inside the scheduler image**, pinned to
+   `postgresql-client-16=16.15-1.pgdg13+2`. Through Phase 11 the dump ran in a one-shot container
+   off the same pinned digest as the server, so the two matched *mechanically*. **The guarantee
+   moved from structural to checked.**
+2. **The restore test uses a throwaway DATABASE, not a throwaway container.** Not chosen so much as
+   forced. *Residual, open, and not closed:* **roles are cluster-wide**, so the read-only role
+   already exists in the throwaway and `create_roles`-from-archive is a **no-op in production runs**
+   — the code and its tests stay, the idempotent guard makes the no-op correct, and its production
+   path is untested. And **the fresh-cluster property is gone**: a dump depending on some
+   cluster-level object would restore cleanly here and fail on a real rebuild. The test now answers
+   *"does this archive restore into this server"*, not *"into a new one"*. `CLAUDE.md § 3` carries
+   the single permitted `DROP` with its double name guard.
+3. **The `docker run` path was DELETED, not kept behind a flag.** *Rejected:* retaining it, disabled.
+   **Tempting because it is a working code path with a plausible use case, and deleting working code
+   feels wasteful.** *Rejected (reasoned):* a retained branch **reintroduces the socket requirement
+   the moment somebody sets the flag**, and dead code with a plausible use case is the code that
+   comes back.
+
+---
+
+### 2. `coalesce=True` — THE MEASUREMENT THAT CONTRADICTED THIS REPO IN THREE PLACES
+
+**The decision.** `coalesce=True`, with `misfire_grace_time` derived from the interval.
+
+**The rejected alternative, and why it is tempting — it is more than tempting here, because this
+repo asserted it in three separate files.**
+`app/orchestration/scheduler.py`, `app/orchestration/cadence.py` and `verify/restart_recovery.py`
+all said `coalesce=False` produces a **burst** — the scheduler firing once per missed slot, in
+`scheduler.py`'s own words *"firing sixteen times in a row against a source that will rate-limit us
+for it"*. **That is the standard explanation of the setting, it reads as obviously correct, and a
+future session reaching for `coalesce=False` will find this project's own prose agreeing with them
+unless this entry is here.**
+
+**Measured 2026-08-18** — three seeded missed slots, real scheduler, identical seeding:
+
+| setting | `job_runs` rows |
+|---|---|
+| `coalesce=True` | 1: `success` |
+| `coalesce=False` | 3: `missed`, `missed`, `success` |
+
+**One run either way. The burst cannot happen**, and the reason is this project's own contract:
+`§ 12` requires `misfire_grace_time` **strictly shorter** than the interval, consecutive slots are
+one interval apart, so at most one missed fire time is ever inside the grace window — every older
+one is skipped as a misfire rather than run.
+
+**Residual cost: none for the setting, but the corrected prose is the artifact.** Three files
+carried a confident wrong explanation for the whole life of the project before anyone measured it,
+and the value here is the corrected reason rather than the unchanged setting.
+
+**The failure it actually prevents is quieter and arguably worse than a burst.** `missed` is
+supposed to mean *"a scheduled run was lost"*. With coalescing off it also means *"a slot went by
+during an outage"* — so **a four-hour outage writes rows claiming two hours of runs were missed when
+one run was merely late, and the heartbeat reads those rows.** All three files were corrected in the
+same commit. **A measurement that contradicts the plan wins, and this one contradicted the repo's
+own prose in three places at once.**
+
+---
+
+### Decisions worth reading before changing anything here
+
+- **The scheduler is a fifth Compose service, not a `dws-scheduler.service`.** *Rejected:* a systemd
+  unit. **Tempting because three `dws-*` units already exist and are the established pattern here**
+  — the shape a reader expects. *Rejected (reasoned):* a unit would restate
+  `RequiresMountsFor=/mnt/data`, its own restart policy, and its own relationship to database
+  health, **all of which the Compose service inherits** from `dws-stack.service` and the containers'
+  own policies. **The second copy is the one that drifts.** Memory footprint was not a factor in
+  the decision either way.
+- **No healthcheck on the scheduler — stated rather than omitted.** *Rejected:* adding one.
+  **Tempting because every other long-lived service has one and a blank looks like an oversight.**
+  *Rejected (reasoned):* there is nothing to probe — it serves no socket — and *"is it doing its
+  job"* is a question about `job_runs` and `MAX(ts)`, which the heartbeat already answers **from the
+  data**. A healthcheck proving only that the process is alive is exactly the process-liveness
+  signal `§ 4` says not to trust.
+- **`.env`'s `DATABASE_URL` STAYS on `localhost`, and the out-of-repo override publishing 5432 on
+  loopback STAYS.** *Rejected:* moving it to `timescaledb:5432` and retiring the override — **which
+  is what `.env.example` itself predicted Phase 12 would do.** **Tempting because containerizing the
+  worker is exactly the event that was supposed to make the host-reachable DSN unnecessary.**
+  *Rejected (reasoned, on discovering the prediction was wrong):* **host-side tooling still needs
+  it** — the migration runner, `verify/preflight.py`'s migration gate, and every `verify/phase11`
+  stage connect from the host, and **the runner cannot move into a container because the images
+  deliberately do not contain `migrations/`** (`§ 3`). `.env.example` now says so instead of
+  predicting otherwise.
+- **The container's `DATABASE_URL` is ASSEMBLED in `docker-compose.yml` from `POSTGRES_USER` /
+  `POSTGRES_PASSWORD` / `POSTGRES_DB`.** *Rejected:* a fourth variable in `.env`. **Tempting because
+  an explicit variable is more readable than string assembly in a compose file.** *Rejected
+  (reasoned):* a fourth copy of the password would be **the copy `check_password_agreement` does not
+  compare** — it reads `POSTGRES_PASSWORD` against `DATABASE_URL` only — and the copy nothing checks
+  is the copy that drifts (`§ 13`). Composing from already-gated variables adds no copy; the only
+  new literal is the compose-network hostname.
+- **An inherited `PGPASSWORD` is STRIPPED from the child environment.** *Rejected:* leaving it
+  alone. **Tempting because it is not set deliberately anywhere, so stripping it guards against
+  nothing visible.** *Rejected (reasoned):* **libpq prefers `PGPASSWORD`**, so one left in the
+  environment means the 0600 file is silently not the thing being used — **and the dump still
+  succeeds**, which is what makes it invisible.
+- **On failure the throwaway database is NOT dropped, and the error names it.** *Rejected:* always
+  tearing down. **Tempting because it is what the container version did, and leaving state behind on
+  a failure feels like a leak.** *Rejected (reasoned), and it inverts the container version
+  deliberately:* **a container's logs are its whole state, while a database's state IS the
+  database.** Evidence at the moment it becomes useful is worth more than a clean server. *Residual:*
+  a failed run leaves a database behind; `verify/phase11/stage_h.py` sweeps `pg_database` for
+  `dws_restore_test_*` so it is visible rather than forgotten.
+- **`stage_h` sweeps `pg_database`, not containers.** *Rejected:* keeping the container sweep.
+  **Tempting because it was already written, it was correct for the whole of Phase 11, and nothing
+  about it looks wrong — a sweep that finds no leaked containers is exactly what a passing sweep
+  looks like.** *Rejected (reasoned):* it **would pass over a host where nothing can create such a
+  container** —
+  green, and watching nothing (`§ 22`'s gate-over-an-empty-collection). Its failure message
+  deliberately does **not** assert *which* cause a survivor has: deliberate evidence and a killed
+  run send an operator to two different places.
+- **The integration tier's precondition became a postgres CLIENT, not Docker — and the job-level
+  tests SKIP on a major mismatch rather than stubbing the check out.** *Rejected:* stubbing the
+  version check so the tests always run. **Tempting because a skip looks like lost coverage.**
+  *Rejected (reasoned):* the job refuses a mismatch **by design**, so stubbing it would make the
+  only tests that exercise the whole path stop exercising the guard that path depends on. The skip
+  states both majors in its reason. **This earned itself during Part 6 on a real mismatch nobody
+  staged:** a pg18 client against the pg16 server produced
+  `ERROR: unrecognized configuration parameter "transaction_timeout"` — that parameter arrived in
+  PostgreSQL 17, so a 17+ client emits it and a 16 server rejects it.
+- **The restart-recovery outage is SEEDED, not waited out.** *Rejected:* waiting out a real outage
+  in the test. **Tempting because a real outage is the real thing and seeding is a simulation.**
+  *Rejected (reasoned):* a backdated `next_run_time` in `apscheduler_jobs` **is what an outage leaves
+  behind**, and seeding it is the only way to get an outage's aftermath into a test that runs in
+  seconds. *Residual, deliberately unclosed:* `verify/restart_recovery.py` still does the
+  multi-minute real-outage version and **remains the live evidence** — the seeded test does not
+  replace it.
+- **`apscheduler_jobs` rows are cleaned up after tests; `job_runs` rows deliberately are NOT.**
+  *Rejected:* cleaning both, for symmetry. **Tempting because a test that leaves rows behind reads
+  as a test with a missing teardown, and the asymmetry looks like something half-finished.**
+  *Rejected (reasoned):* `job_runs` is **append-only by
+  trigger** (`§ 12`) and a test that deletes from it would be a test disabling the contract it runs
+  under. `apscheduler_jobs` must be cleaned because `register_jobs()` never removes a job it does not
+  recognise, so a leftover probe would keep firing under whatever scheduler starts next.
+- **The restart-recovery probe interval is 120s and cannot be smaller.** *Rejected:* a faster probe
+  to shorten the test. *Rejected (reasoned):* `Cadence.__post_init__` rejects a grace at or above the
+  interval and the derivation is `max(60, interval // 2)`, so **121s is the true minimum and 120s is
+  legal by exactly 60 seconds.** **A probe needing an exemption from the rule it verifies would not
+  be verifying much.**
+
+---
+
+## Phase 13 — cluster settings, the chunk interval, and freshness
+
+### 1. `ALTER SYSTEM` PLUS A COMMITTED BASELINE — AND THE THREE THINGS THAT LOOK LIKE BETTER IDEAS
+
+**The decision.** The cluster's deliberate overrides are applied by **`ALTER SYSTEM`, run by a
+human**, recorded in `infra/postgres/settings.py`, and checked by a preflight gate against the
+running cluster.
+
+**State the achievable property plainly, because the wrong one is what invites the rejected
+alternatives:** this is **not settings-in-git**. It is **committed values authoritative, and any
+divergence detected** — the same shape as the image digests (`§ 12`) and the `postgresql-client`
+pin (`§ 3`). The artifact lives somewhere the repo cannot hold it, so the repo holds the value it
+must have and a gate reads what is actually running.
+
+**Why the settings genuinely cannot be moved into the repo:** `postgresql.conf` lives in PGDATA on
+the data volume, and all 33 non-default settings were written there by `timescaledb-tune` when the
+image initialised on 2026-08-11. **None were in version control.** A rebuilt instance re-derives
+whatever the tuner chooses that day, silently, with no diff anywhere.
+
+**Three rejected alternatives, and the first is what the next reader will reach for:**
+
+1. **Bind-mounting `postgresql.conf`.** **Tempting because it is the obvious way to put a config
+   file under version control, and it is how config files are normally handled in a Compose stack.**
+   *Rejected (reasoned):* **it breaks `initdb` on a fresh volume** — which is *the exact case this
+   whole exercise exists to make reproducible*. The fix would break the thing being fixed.
+2. **`include_dir`.** **Tempting because it is present in the generated file and is the mechanism
+   Postgres itself provides for exactly this.** *Rejected (measured against the generated file):* it
+   is **commented out**, and **cannot be set by `ALTER SYSTEM`** — so enabling it requires editing
+   the file that cannot be mounted. Circular.
+3. **A `command:` key on the database service.** **Tempting because it is one line and passes
+   settings as flags.** *Rejected (forced):* `tests/orchestration/test_migration_ordering.py:162`
+   forbids `command:` and `entrypoint:` on any service. **Note what that test's reason actually is,
+   because it is not what the name suggests:** it is a claim about *the mechanism by which
+   migration-on-start returns* — *"the database service runs the image's own entrypoint; overriding
+   it is how migration-on-start gets reintroduced"* — not about the string `migrate`. So the
+   prohibition genuinely covers this case rather than merely colliding with it.
+
+**Why `ALTER SYSTEM` and not a hand-edit:** it writes `postgresql.auto.conf`, which Postgres reads
+**after** `postgresql.conf` and which therefore wins. That file was empty when this started, so
+nothing the tuner chose is lost. **Hand-editing `postgresql.conf` instead would be the untracked
+hand-edit this contract exists to detect, performed as the fix for it.** Nothing in the repo issues
+`ALTER SYSTEM`, as nothing in it runs `terraform apply` (`§ 1`).
+
+**Residual cost, open.** `infra/postgres/tuner-baseline.json` **still carries the `NEVER-CAPTURED`
+sentinel** as of 2026-08-18. Until `--write-baseline` is run and committed, a rebuild has nothing to
+be compared against — which is the entire purpose of the file.
+
+---
+
+### 2. NO ADVISORY LOCK DURING 0027 — REJECTED BY MEASUREMENT, AND THE REPLACEMENT IS NOT SUFFICIENT EITHER
+
+**The decision.** Migration 0027 refuses to run if a `job_runs` check shows an ingest running, then
+takes `LOCK TABLE … ACCESS EXCLUSIVE` under a 30-second `lock_timeout`, held for the whole
+transaction.
+
+**The rejected alternative, and why it is tempting.** `pg_try_advisory_lock`. **It is the idiomatic
+Postgres answer to "is something else running", it is the first thing anyone reaches for, and it
+reads as more rigorous than checking a table.**
+
+**The reason — REJECTED BY MEASUREMENT of what the other party does.** **An advisory lock only
+detects a party that also takes it, and `usgs_ingest` takes none.** So `pg_try_advisory_lock` would
+have been **acquired successfully against a running ingest and reported the coast clear** — a
+mechanism that is present, idiomatic, and answering a different question than the one asked. That is
+`CLAUDE.md § 25`'s shape exactly, caught before it shipped rather than after.
+
+**The replacement is verified behaviourally, both halves:** the migration refuses **before any
+change is made** (the archive does not exist afterwards), and a *finished* `usgs_ingest` row does
+**not** block it. Both, because one wrong implementation satisfies either alone.
+
+**Residual cost, and it is not small.** **The `job_runs` check is a snapshot, not a lock.** It
+closes the window where an ingest is *already* running and **cannot** close the window where one
+starts *between the check and the lock*. **Stopping the scheduler remains required, and the refusal
+must not be read as sufficient.** Also not claimed: whether a writer that blocks on the table lock
+and resumes after commit lands in the new table or the archive — that depends on Postgres
+re-resolving the relation name after lock acquisition, it was not measured, so it is not relied on.
+
+---
+
+### Decisions worth reading before changing anything here
+
+- **Two lists — `REQUIRED_SETTINGS` enforced, `TUNER_BASELINE` recorded and NEVER enforced.**
+  *Rejected:* merging them into one enforced list. **Tempting because one list is simpler and
+  "record but never check" reads as a list nobody is using.** *Rejected (reasoned):* the tuner's
+  output is a function of instance size, so **a rebuild onto a larger instance derives a larger
+  `shared_buffers` CORRECTLY** — enforcing it would be a guard that goes red on a correct state, and
+  that gets disabled rather than fixed (`d-pre` is the first instance of exactly this). The
+  baseline's purpose is that re-derivation is **visible**; before it existed there was no committed
+  side to diff against.
+- **A required setting is a FLOOR, not an equality.** *Rejected:* exact-value matching. **Tempting
+  because equality is the stricter check and strictness is usually right in this repo.** *Rejected
+  (reasoned):* equality guarantees only **that nobody may ever be more generous than us**, and makes
+  a well-reasoned increase fail the gate.
+- **The baseline placeholder is the literal `NEVER-CAPTURED`, not `{}`.** *Rejected:* `{}`.
+  **Tempting because it is valid JSON, it is the natural empty value, and it needs no special
+  handling.** *Rejected (reasoned):* `{}` **would read as "captured, and this cluster runs nothing
+  but defaults"** — the placeholder-that-resolves failure `§ 12` forbids for digests, and `§ 22`'s
+  gate over an empty collection. **The baseline is captured by a command, never typed:** 33 settings
+  are not a value a human should be entering, for the same reason a digest is not.
+- **The gate checks the running value AND `pending_restart`, with distinct messages.** *Rejected:*
+  either half alone. **A `pending_restart`-only gate is the more tempting mistake because it reads
+  as the more sophisticated check** — and a cluster where nobody applied anything reports clean.
+  *Rejected (reasoned, with the discriminating case named):* **the case that proves `pending_restart`
+  is a setting being LOWERED** — running value still meets the floor, `pending_restart` true, and the
+  restart that makes it false happens at boot, unattended, long after the `ALTER SYSTEM` has left
+  anybody's shell history. **A fixture built at a *failing* value goes red under both mutations for
+  the wrong reason and proves nothing about either half** — the brief specified that fixture and it
+  was corrected.
+- **`max_locks_per_transaction = 512` is written with the arithmetic that produced it, and the gate
+  COMPUTES the slot count from the cluster's own factors.** *Rejected:* a bare number, and a
+  hardcoded slot total. **Tempting because 512 is short and the arithmetic is noise once you know
+  it.** *Rejected (reasoned):* **a bare round number gets tidied downwards by somebody economising on
+  memory who cannot see what it was for.** The gate reading the cluster's own `max_connections` and
+  `max_prepared_transactions` rather than a constant is the same rule applied to the check: a
+  constant copied off the instance it was first written on stops being true on the next instance.
+- **0027 consolidates existing chunks by REWRITE, not by a bare `set_chunk_time_interval`.**
+  *Rejected:* the one-statement version. **Tempting because it is the documented way to change the
+  interval, it is one call, and it applies cleanly.** *Rejected **BY MUTATION MEASUREMENT**:*
+  `set_chunk_time_interval` affects only chunks created **after** it runs — replacing the rewrite
+  with it leaves **312 chunks of 312** and turns six integration tests red. **The trap is that it
+  reports success, changes the catalog in a way that reads correct in every later inspection, and
+  leaves every historical query exactly as broken.**
+- **The `gauge_series` repointing is asserted on `pg_depend`/`pg_rewrite`, never by reading rows.**
+  *Rejected:* checking the view returns rows. **Tempting because it is the obvious check and it is
+  what "does the view still work" means.** *Rejected (reasoned, and this is why it would have been
+  silent):* Postgres binds view dependencies **by OID**, so the rename would have quietly repointed
+  `gauge_series` at the archive — and **immediately after the migration the archive holds identical
+  data, so the view returns identical results and diverges only on the next ingest.** Reading rows
+  cannot distinguish the two. **The dependency is the property, so the dependency is what is
+  asserted**, and the migration enumerates dependents from the catalog rather than trusting its
+  author to have listed them.
+- **The integration fixture stages the migrations in TWO passes with rows in between.** *Rejected:*
+  one pass. **Tempting because running every migration in sequence is what the runner does and what
+  every other fixture does.** *Rejected (reasoned):* one pass applies 0027 to an **empty** table —
+  the copy moves zero rows, the equality check compares zero to zero, the view is repointed at a
+  table nobody reads, and **the migration passes without exercising one line of what it is for.**
+  The fixture asserts its own precondition (`> 50` chunks before) so the after-assertion cannot pass
+  vacuously.
+- **The old hypertable is ARCHIVED, not dropped.** *Rejected:* a `DROP` in the migration. **Tempting
+  because the data is duplicated and the rewrite is verified.** *Rejected (forced by `§ 3`):*
+  destructive operations are archived; only a human runs a `DROP`, and **there is deliberately no
+  migration that will do it** — whether the pre-consolidation copy is still wanted is a decision, not
+  a cleanup. *Residual, open:* `gauge_readings_iv_archived_20260818` holds 986 chunks and costs
+  **674,656 bytes per nightly dump (~8%)** until a human drops it. Not a silent passenger: it appears
+  in the restore test's per-table `row_counts`, compared in both directions with no tolerance.
+- **The two `write_pgpass` callers pass DIFFERENT arguments, deliberately.** *Rejected:* unifying
+  them. **Tempting because two callers of one function passing different things reads as an
+  inconsistency somebody forgot to clean up** — and the narrow-looking version is the one that reads
+  as careful. *Rejected (reasoned):* `backup_nightly_job` connects **only** to the production
+  database, so its specific entry is correct and **strictly narrower**; `restore_test_monthly_job`
+  needs `*` because its target database name is **generated per run and does not exist when the file
+  is written**. Naming it would mean moving the write inside the `try`, reshaping the `finally` that
+  unlinks the file, and opening a window where a 0600 credential outlives a failure path. **Two tests
+  assert the two callers in OPPOSITE directions, so "tidying" them into agreement goes red.**
+  `CLAUDE.md § 25` carries the asymmetry rule; the helper's own docstring carries the widening.
+- **`--no-password` is added to `pg_dump` and `pg_restore`, and deliberately NOT to `verify_archive`
+  or `roles_in_archive`.** *Rejected:* adding it everywhere for consistency. **Tempting because a
+  flag applied to three of four call sites reads as one somebody forgot, and "add it everywhere" is
+  the safe-looking cleanup.** *Rejected (reasoned):*
+  **neither passes `--dbname`, so neither opens a connection** — the flag would be inert and would
+  imply a connection that does not happen. **The flag is the durable half of the pgpass fix**: it
+  converts the whole class from *"looks like a wrong password"* into *"says no password was
+  supplied"*, so the next mismatch — a changed port, a renamed user — does not produce the identical
+  misleading message.
+- **The new pgpass test starts its own scram-sha-256 container, and SKIPS rather than passes against
+  a trust server.** *Rejected:* asserting against the existing integration tier. **Tempting because
+  a test already drove the real job end to end and was green.** *Rejected **BY MEASUREMENT**:* that
+  tier runs under `POSTGRES_HOST_AUTH_METHOD=trust`, where **libpq never consults the pgpass file at
+  all** — so every assertion about it was vacuous, and **with the defect reapplied the test still
+  passed.** The helper's placeholder password literally spells `trust-auth-ignores-this`. The new
+  test also **verifies the server really refuses a wrong password rather than trusting the
+  environment variable**, because a reused volume keeps the `pg_hba.conf` written at first init.
+  *Residual:* on a trust server it skips — **a visible line in the report, which is better than the
+  green pass the old tier gave.**
+- **`features`' freshness lag is 2 days, NOT derived from its fastest input.** *Rejected:* deriving
+  it from `gauge_readings_iv`, which features actually track and which is current to within hours.
+  **Tempting because it is the accurate description of where the data comes from** — and correcting
+  the registry's wrong comment is what surfaced it. *Rejected (reasoned):* **IV retention is a
+  rolling window at three of four gauges** (`§ 15`), so falling back to the DV side is **normal
+  operation**, and deriving from the fastest input would put the threshold back on its boundary the
+  moment the fastest input hiccuped — the exact defect being removed.
+- **Freshness measures CONTENT age; `job_runs` measures the pipeline. They are never collapsed.**
+  *Rejected:* adding an `ingested_at` column and measuring that instead. **Tempting because a
+  permanently-stale table looks like it needs a better clock, and this is the obvious fix.**
+  *Rejected (reasoned):* it would **turn every entry green forever by silently converting this check
+  into a second copy of the one `job_runs` already performs, leaving nobody watching the source.**
+  That is `§ 4`'s "liveness is measured from the DATA" being deleted by something that looks like a
+  fix. Measured the same day: the heartbeat reported `usgs_daily_ingest: ok` with a success minutes
+  old while the table's newest content was two days behind — **both true, and their disagreement is
+  the diagnosis.**
+- **The freshness registry's uniform job-before-data ordering is EMERGENT, not a rule.** *Rejected:*
+  enforcing it. **Tempting because all five entries now line up and a uniform property looks like a
+  design.** *Rejected (reasoned):* it is a **consequence** of deriving each window from its source's
+  publication behaviour, not a target that was aimed at. The two thresholds answer different
+  questions and must stay independently derived — a future entry landing the other way round should
+  read as *"this source publishes more slowly than we poll"*, not as a mistake.
+
+---
+
+## What is revisitable, and what would change the answer
+
+**Most of the rejections above are measured or forced, and are closed.** These three are
+**reasoned**, and a future session with new information is entitled to reopen them. Reopening one is
+not overruling this file; proposing one *without* new information is.
+
+| Decision | Reopens if | Does NOT reopen because |
+|---|---|---|
+| **The `xcaddy` rejection** (Phase 11 § 1) | the static-asset exposure starts mattering — a real cost event, not a hypothetical — **or** a maintained Caddy image carrying the plugin exists upstream, removing the self-built-image problem entirely | the application limiter feels like a contract violation. `§ 22` carries the amendment; it is a stated exception, not a bend |
+| **The Docker socket** (Phase 12 § 1) | the two-file client pin proves **undetectable in practice** — i.e. a drift actually reaches production past both gates | it would be more convenient, or because a later phase wants to spawn a container. Preflight and the runtime check exist specifically to keep this closed |
+| **`features`' 2-day lag** (Phase 13) | **IV retention stops being a rolling window at three of four gauges** — measure it, do not assume it | the lag looks conservative against a table that is current to within hours. That is the observation the decision already accounts for |
+
+**Everything else on these three phases' lists is measured or forced**, and the measurement is
+recorded beside it. Where a rejection is labelled measured, **the number is the argument** — reopen
+it by producing a different number, not a different opinion.
